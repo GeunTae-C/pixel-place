@@ -103,9 +103,11 @@ public class InMemoryTileBoard {
         return List.copyOf(tiles.values());
     }
 
-    // lastFlushedEventSeq 이후 WAL replay를 메모리 authoritative state에 반영하기 위한 최소 메서드다.
-    // WAL replay 이벤트 1건을 실제 메모리 보드에 적용
-    public synchronized void applyReplayRecord(int x, int y, int color) {
+    // 정상 write와 WAL replay가 공유하는 메모리 타일 변경 API다.
+    // 호출자는 WAL fsync 성공 또는 recovery replay처럼 메모리 authoritative state에 반영해도 되는 상태를 보장해야 한다.
+    public synchronized TileMutationResult applyPixel(int x, int y, int color) {
+        validatePixelMutation(x, y, color);
+
         int tx = x / BoardConstants.TILE_SIZE;
         int ty = y / BoardConstants.TILE_SIZE;
         int lx = x % BoardConstants.TILE_SIZE;
@@ -113,7 +115,33 @@ public class InMemoryTileBoard {
         TileKey key = new TileKey(BoardConstants.Z0_LEVEL, tx, ty);
         TileState tileState = getRequired(key);
         byte[] pixels = tileState.pixels();
+
+        // Java byte는 signed지만, 이 배열에서는 1 byte 팔레트 인덱스 저장 표현으로만 해석한다.
         pixels[(ly * BoardConstants.TILE_SIZE) + lx] = (byte) color;
-        tiles.put(key, new TileState(pixels, tileState.tileVersion() + 1));
+        long nextTileVersion = tileState.tileVersion() + 1;
+        tiles.put(key, new TileState(pixels, nextTileVersion));
+        return new TileMutationResult(key, nextTileVersion);
+    }
+
+    // lastFlushedEventSeq 이후 WAL replay를 메모리 authoritative state에 반영하기 위한 최소 메서드다.
+    // recovery replay도 정상 write와 같은 mutation 규칙을 사용해야 tileVersion 증가 기준이 일관된다.
+    public synchronized void applyReplayRecord(int x, int y, int color) {
+        applyPixel(x, y, color);
+    }
+
+    // 픽셀 검증.
+    private void validatePixelMutation(int x, int y, int color) {
+        if (x < 0 || x >= BoardConstants.BOARD_SIZE) {
+            // 보드 밖 좌표를 허용하면 z=0 전체 타일 범위 불변식이 깨진다.
+            throw new IllegalArgumentException("Pixel x coordinate is out of board range.");
+        }
+        if (y < 0 || y >= BoardConstants.BOARD_SIZE) {
+            // 보드 밖 좌표를 허용하면 z=0 전체 타일 범위 불변식이 깨진다.
+            throw new IllegalArgumentException("Pixel y coordinate is out of board range.");
+        }
+        if (color < 0 || color >= BoardConstants.PALETTE_SIZE) {
+            // 팔레트 인덱스는 1 byte 저장 모델과 256색 고정 팔레트를 유지하기 위해 0~255만 허용한다.
+            throw new IllegalArgumentException("Pixel color index is out of palette range.");
+        }
     }
 }
