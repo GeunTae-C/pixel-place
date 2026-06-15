@@ -7,10 +7,10 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 
-// 실제 WAL 구현 전이므로 빈 replay 결과와 기본 walLastEventSeq를 주는 stub다.
+// 실제 WAL 구현 전이므로 빈 replay 결과와 기본 walLastEventSeq를 주는 stub
 @Component
 @Profile("stub")
-// 실제 인프라를 붙이지 않는 테스트/개발 profile에서만 사용하는 임시 stub다.
+// 실제 인프라를 붙이지 않는 테스트/개발 profile에서만 사용하는 임시 stub
 public class StubWalReplaySource implements WalReplaySource {
 
     @Override

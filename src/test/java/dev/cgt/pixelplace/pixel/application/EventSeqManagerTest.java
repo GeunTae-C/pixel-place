@@ -5,11 +5,11 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-// EventSeqManager가 recovery seed를 마지막 발급 완료값으로 취급하는지 검증한다.
+// EventSeqManager가 recovery seed를 마지막 발급 완료값으로 취급하는지 검증함
 class EventSeqManagerTest {
 
     @Test
-    // seed 0은 아직 발급된 이벤트가 없는 상태이므로 첫 allocate 결과는 1이어야 한다.
+    // seed 0은 아직 발급된 이벤트가 없는 상태이므로 첫 allocate 결과는 1이어야 함
     void allocateReturnsOneAfterZeroSeed() {
         EventSeqManager manager = new EventSeqManager();
 
@@ -20,7 +20,7 @@ class EventSeqManagerTest {
     }
 
     @Test
-    // seed 15는 15번까지 이미 발급/반영된 상태이므로 다음 발급값은 16이어야 한다.
+    // seed 15는 15번까지 이미 발급/반영된 상태이므로 다음 발급값은 16이어야 함
     void allocateReturnsSeedPlusOneAfterNonZeroSeed() {
         EventSeqManager manager = new EventSeqManager();
 
@@ -31,7 +31,7 @@ class EventSeqManagerTest {
     }
 
     @Test
-    // eventSeq는 정합성 판단 기준이므로 여러 번 발급해도 빈 번호 없이 1씩 증가해야 한다.
+    // eventSeq는 정합성 판단 기준이므로 여러 번 발급해도 빈 번호 없이 1씩 증가해야 함
     void allocateIncrementsByOne() {
         EventSeqManager manager = new EventSeqManager();
 
@@ -44,7 +44,7 @@ class EventSeqManagerTest {
     }
 
     @Test
-    // 음수 seed는 recovery 기준점 자체가 잘못된 상태이므로 조용히 보정하지 않고 실패시킨다.
+    // 음수 seed는 recovery 기준점 자체가 잘못된 상태이므로 조용히 보정하지 않고 실패시킴
     void rejectNegativeSeed() {
         EventSeqManager manager = new EventSeqManager();
 

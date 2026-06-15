@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// WAL JSON codec은 writer와 parser 사이의 포맷 계약을 담당하므로 JSON Lines 개행과 재파싱 가능성을 검증한다.
+// WAL JSON codec은 writer와 parser 사이의 포맷 계약을 담당하므로 JSON Lines 개행과 재파싱 가능성을 검증함
 class WalRecordJsonCodecTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -19,7 +19,7 @@ class WalRecordJsonCodecTest {
     private final WalRecordParser parser = new WalRecordParser(objectMapper);
 
     @Test
-    // WAL은 UTF-8 JSON Lines 파일이므로 serialize 결과는 UTF-8 문자열로 복원 가능해야 한다.
+    // WAL은 UTF-8 JSON Lines 파일이므로 serialize 결과는 UTF-8 문자열로 복원 가능해야 함
     void serializeLineReturnsUtf8JsonLineBytes() {
         byte[] bytes = codec.serializeLine(record(1L));
         String line = new String(bytes, StandardCharsets.UTF_8);
@@ -29,7 +29,7 @@ class WalRecordJsonCodecTest {
     }
 
     @Test
-    // JSON Lines에서 한 승인 이벤트의 경계는 줄바꿈이므로 serialize 결과는 반드시 개행으로 끝나야 한다.
+    // JSON Lines에서 한 승인 이벤트의 경계는 줄바꿈이므로 serialize 결과는 반드시 개행으로 끝나야 함
     void serializeLineEndsWithNewLine() {
         byte[] bytes = codec.serializeLine(record(1L));
         String line = new String(bytes, StandardCharsets.UTF_8);
@@ -38,7 +38,7 @@ class WalRecordJsonCodecTest {
     }
 
     @Test
-    // writer가 만든 한 줄은 recovery parser가 그대로 읽을 수 있어야 WAL 포맷 호환성이 유지된다.
+    // writer가 만든 한 줄은 recovery parser가 그대로 읽을 수 있어야 WAL 포맷 호환성이 유지됨
     void serializedLineCanBeParsedByWalRecordParser() {
         byte[] bytes = codec.serializeLine(record(1L));
         String line = new String(bytes, StandardCharsets.UTF_8);
@@ -52,7 +52,7 @@ class WalRecordJsonCodecTest {
     }
 
     @Test
-    // null record는 WAL에 기록할 수 있는 승인 이벤트가 아니므로 즉시 실패해야 한다.
+    // null record는 WAL에 기록할 수 있는 승인 이벤트가 아니므로 즉시 실패해야 함
     void serializeLineRejectsNullRecord() {
         assertThrows(NullPointerException.class, () -> codec.serializeLine(null));
     }

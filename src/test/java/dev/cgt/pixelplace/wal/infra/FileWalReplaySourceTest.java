@@ -13,14 +13,14 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-// 파일 기반 WAL replay가 lastFlushedEventSeq 이후 적용 대상과 WAL 전체 마지막 eventSeq를 분리해서 반환하는지 검증한다.
+// 파일 기반 WAL replay가 lastFlushedEventSeq 이후 적용 대상과 WAL 전체 마지막 eventSeq를 분리해서 반환하는지 검증함
 class FileWalReplaySourceTest {
 
     @TempDir
     Path tempDir;
 
     @Test
-    // WAL 파일이 아직 없을 수 있는 최초 부팅은 빈 replay와 walLastEventSeq=0으로 시작한다.
+    // WAL 파일이 아직 없을 수 있는 최초 부팅은 빈 replay와 walLastEventSeq=0으로 시작함
     void missingWalReturnsEmptyBatch() {
         FileWalReplaySource source = source(tempDir.resolve("missing.wal"));
 
@@ -31,7 +31,7 @@ class FileWalReplaySourceTest {
     }
 
     @Test
-    // replay 대상은 lastFlushedEventSeq 초과 이벤트뿐이지만 walLastEventSeq는 파일 마지막 이벤트를 따라야 한다.
+    // replay 대상은 lastFlushedEventSeq 초과 이벤트뿐이지만 walLastEventSeq는 파일 마지막 이벤트를 따라야 함
     void readAfterFiltersRecordsAndKeepsWalLastEventSeq() throws IOException {
         Path wal = tempDir.resolve("active.wal");
         Files.writeString(wal, """
@@ -49,7 +49,7 @@ class FileWalReplaySourceTest {
     }
 
     @Test
-    // lastFlushedEventSeq가 WAL 끝 이상이어도 seed 계산을 위해 walLastEventSeq는 유지한다.
+    // lastFlushedEventSeq가 WAL 끝 이상이어도 seed 계산을 위해 walLastEventSeq는 유지함
     void readAfterCanReturnNoRecordsButKeepWalLastEventSeq() throws IOException {
         Path wal = tempDir.resolve("active.wal");
         Files.writeString(wal, """
@@ -64,13 +64,13 @@ class FileWalReplaySourceTest {
     }
 
     @Test
-    // active WAL 경로가 디렉터리면 파일 fsync와 순차 replay 계약이 깨진 상태로 본다.
+    // active WAL 경로가 디렉터리면 파일 fsync와 순차 replay 계약이 깨진 상태로 봄
     void rejectsNonRegularWalPath() {
         assertThrows(IllegalStateException.class, () -> source(tempDir).readAfter(0L));
     }
 
     @Test
-    // eventSeq는 WAL 파일 안에서 엄격히 증가해야 replay 순서를 신뢰할 수 있다.
+    // eventSeq는 WAL 파일 안에서 엄격히 증가해야 replay 순서를 신뢰할 수 있음
     void rejectsNonIncreasingEventSeq() throws IOException {
         Path wal = tempDir.resolve("active.wal");
         Files.writeString(wal, """
@@ -82,7 +82,7 @@ class FileWalReplaySourceTest {
     }
 
     @Test
-    // 잘못된 레코드 값은 복구 중 조용히 누락하지 않고 실패시킨다.
+    // 잘못된 레코드 값은 복구 중 조용히 누락하지 않고 실패시킴
     void rejectsInvalidRecordValue() throws IOException {
         Path wal = tempDir.resolve("active.wal");
         Files.writeString(wal, """

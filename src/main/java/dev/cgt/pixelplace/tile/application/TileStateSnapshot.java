@@ -4,7 +4,7 @@ import dev.cgt.pixelplace.tile.domain.TileKey;
 
 import java.util.Arrays;
 
-// DB snapshot에서 메모리 보드로 옮길 때 사용하는 중간 전달 타입이다.
+// DB snapshot에서 메모리 보드로 옮길 때 사용하는 중간 전달 타입
 public record TileStateSnapshot(TileKey key, byte[] pixels, long tileVersion) {
 
     public TileStateSnapshot {

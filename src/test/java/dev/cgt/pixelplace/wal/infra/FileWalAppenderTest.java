@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// 파일 WAL appender는 append + fsync 성공을 write 내구성 경계로 삼으므로 실제 임시 파일에 기록해 검증한다.
+// 파일 WAL appender는 append + fsync 성공을 write 내구성 경계로 삼으므로 실제 임시 파일에 기록해 검증함
 class FileWalAppenderTest {
 
     @TempDir
@@ -29,7 +29,7 @@ class FileWalAppenderTest {
     private final WalRecordParser parser = new WalRecordParser(objectMapper);
 
     @Test
-    // active WAL이 없으면 append 시점에 파일을 만들고 승인 이벤트 한 줄을 기록해야 한다.
+    // active WAL이 없으면 append 시점에 파일을 만들고 승인 이벤트 한 줄을 기록해야 함
     void appendAndFsyncCreatesWalFileAndWritesOneLine() throws IOException {
         Path wal = tempDir.resolve("active.wal");
         FileWalAppender appender = appender(wal);
@@ -43,7 +43,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // append는 직렬화되어야 하므로 여러 호출 결과가 eventSeq 순서대로 여러 줄에 남아야 한다.
+    // append는 직렬화되어야 하므로 여러 호출 결과가 eventSeq 순서대로 여러 줄에 남아야 함
     void appendAndFsyncWritesMultipleLinesInEventSeqOrder() throws IOException {
         Path wal = tempDir.resolve("active.wal");
         FileWalAppender appender = appender(wal);
@@ -61,7 +61,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // appender가 기록한 줄은 기존 WalRecordParser가 다시 읽을 수 있어야 boot recovery와 호환된다.
+    // appender가 기록한 줄은 기존 WalRecordParser가 다시 읽을 수 있어야 boot recovery와 호환됨
     void writtenLineCanBeParsedByWalRecordParser() throws IOException {
         Path wal = tempDir.resolve("active.wal");
         FileWalAppender appender = appender(wal);
@@ -76,7 +76,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // 운영 환경에서 WAL 디렉터리가 아직 없을 수 있으므로 append 시점에 parent directory를 만든다.
+    // 운영 환경에서 WAL 디렉터리가 아직 없을 수 있으므로 append 시점에 parent directory를 만듦
     void appendAndFsyncCreatesMissingParentDirectory() {
         Path wal = tempDir.resolve("missing").resolve("nested").resolve("active.wal");
         FileWalAppender appender = appender(wal);
@@ -88,7 +88,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // activeFile 경로가 디렉터리면 JSON Lines append와 fsync 계약을 만족할 수 없어 실패해야 한다.
+    // activeFile 경로가 디렉터리면 JSON Lines append와 fsync 계약을 만족할 수 없어 실패해야 함
     void appendAndFsyncFailsWhenActiveFileIsDirectory() {
         FileWalAppender appender = appender(tempDir);
 
@@ -96,7 +96,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // null record는 내구성 원본에 쓸 수 있는 승인 이벤트가 아니므로 파일 접근 전에 거부한다.
+    // null record는 내구성 원본에 쓸 수 있는 승인 이벤트가 아니므로 파일 접근 전에 거부함
     void appendAndFsyncRejectsNullRecord() {
         FileWalAppender appender = appender(tempDir.resolve("active.wal"));
 
@@ -104,7 +104,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // 기록된 WAL은 FileWalReplaySource가 다시 읽어 replay 대상 이벤트로 반환해야 한다.
+    // 기록된 WAL은 FileWalReplaySource가 다시 읽어 replay 대상 이벤트로 반환해야 함
     void writtenRecordsCanBeReadByFileWalReplaySource() {
         Path wal = tempDir.resolve("active.wal");
         FileWalAppender appender = appender(wal);
@@ -121,7 +121,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // 새 WAL 파일 첫 append는 파일 생성 메타데이터 내구화를 위해 force(true) 정책을 선택한다.
+    // 새 WAL 파일 첫 append는 파일 생성 메타데이터 내구화를 위해 force(true) 정책을 선택함
     void forcePolicyUsesMetadataForceForNewWalFile() {
         FileWalAppender appender = appender(tempDir.resolve("new.wal"));
 
@@ -129,7 +129,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // 기존 WAL 파일 append는 파일 내용 내구화만 필요하므로 force(false) 정책을 선택한다.
+    // 기존 WAL 파일 append는 파일 내용 내구화만 필요하므로 force(false) 정책을 선택함
     void forcePolicyUsesContentForceForExistingWalFile() {
         FileWalAppender appender = appender(tempDir.resolve("existing.wal"));
 
@@ -137,7 +137,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // 새 파일 첫 fsync가 성공한 뒤에는 이후 append가 force(false) 경로로 넘어가야 한다.
+    // 새 파일 첫 fsync가 성공한 뒤에는 이후 append가 force(false) 경로로 넘어가야 함
     void firstMetadataForceIsClearedAfterSuccessfulAppend() {
         Path wal = tempDir.resolve("active.wal");
         FileWalAppender appender = appender(wal);

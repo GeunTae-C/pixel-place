@@ -10,21 +10,21 @@ import java.util.List;
 import java.util.Map;
 
 // 메모리에 올라와 있는 전체 z=0 타일 보드
-// 실시간 authoritative state는 DB가 아니라 이 메모리 타일 보드다.
-// 부팅이 끝난 뒤에는 z=0 타일 1024개가 항상 존재해야 이후 read/write/replay가 타일 부재를 정상 흐름으로 오해하지 않는다.
+// 실시간 authoritative state는 DB가 아니라 이 메모리 타일 보드
+// 부팅이 끝난 뒤에는 z=0 타일 1024개가 항상 존재해야 이후 read/write/replay가 타일 부재를 정상 흐름으로 오해하지 않음
 @Component
 public class InMemoryTileBoard {
 
     private final Map<TileKey, TileState> tiles = new LinkedHashMap<>();
 
-    // 전체 타일을 흰색으로 채운다.
+    // 전체 타일을 흰색으로 채움
     // z=0 전체 1024 타일이 존재
     // 빈 맵 상태가 아님
     public InMemoryTileBoard() {
         initializeAllWhite();
     }
 
-    // DB tiles 전체가 없는 경우에도 z=0 전체 타일을 all-white로 즉시 메모리에 채워 넣는 pre-init 경로다.
+    // DB tiles 전체가 없는 경우에도 z=0 전체 타일을 all-white로 즉시 메모리에 채워 넣는 pre-init 경로
     // Z0_TILE_COUNT_PER_AXIS == BOARD_SIZE(8192) / TILE_SIZE(256) = 32
     public synchronized void initializeAllWhite() {
         tiles.clear();
@@ -37,18 +37,18 @@ public class InMemoryTileBoard {
     }
 
     // DB의 z=0 전체 타일 snapshot을 메모리에 적재.
-    // DB tiles는 전체 존재 또는 전체 미존재만 허용한다.
-    // 일부만 로드된 상태를 받아들이면 recovery가 부분 복구를 성공으로 오해하므로 여기서 실패시킨다.
+    // DB tiles는 전체 존재 또는 전체 미존재만 허용함
+    // 일부만 로드된 상태를 받아들이면 recovery가 부분 복구를 성공으로 오해하므로 여기서 실패시킴
     public synchronized void loadAll(List<TileStateSnapshot> snapshots) {
 
         // 검증 1: 개수(1024) 확인.
         if (snapshots.size() != BoardConstants.Z0_TILE_COUNT) {
-            // recovery에서는 조용한 partial load를 허용하지 않는다.
+            // recovery에서는 조용한 partial load를 허용하지 않음
             throw new IllegalStateException("DB tiles must be fully present or fully absent.");
         }
 
-        // DB snapshot 목록은 순차 리스트이므로, 이후 전체 타일 좌표 검증과 적재를 위해 TileKey 기준 Map으로 변환한다.
-        // 이 Map은 최종 보드 상태가 아니라, 메모리 보드 재구성을 위한 임시 적재 데이터다.
+        // DB snapshot 목록은 순차 리스트이므로, 이후 전체 타일 좌표 검증과 적재를 위해 TileKey 기준 Map으로 변환함
+        // 이 Map은 최종 보드 상태가 아니라, 메모리 보드 재구성을 위한 임시 적재 데이터
         Map<TileKey, TileState> loadedTiles = new LinkedHashMap<>();
         for (TileStateSnapshot snapshot : snapshots) {
             loadedTiles.put(snapshot.key(), new TileState(snapshot.pixels(), snapshot.tileVersion()));
@@ -57,7 +57,7 @@ public class InMemoryTileBoard {
         // 검증 2: 중복/누락 확인
         // 중복된 키가 있거나, 결과적으로 1024개가 안 되면 실패.
         if (loadedTiles.size() != BoardConstants.Z0_TILE_COUNT) {
-            // duplicate나 missing을 정상화하지 않고 즉시 실패시켜 잘못된 복구를 막는다.
+            // duplicate나 missing을 정상화하지 않고 즉시 실패시켜 잘못된 복구를 막음
             throw new IllegalStateException("DB tiles contain duplicate or missing rows.");
         }
 
@@ -67,7 +67,7 @@ public class InMemoryTileBoard {
                 // 검증 3: 모든 좌표 존재 확인
                 // (0,0)부터 (31,31)까지 z=0 전체 타일이 진짜 다 있는지 다시 확인.
                 if (!loadedTiles.containsKey(key)) {
-                    // z=0 전체 타일이 메모리에 존재해야 한다는 불변식을 recovery 시점에 강제한다.
+                    // z=0 전체 타일이 메모리에 존재해야 한다는 불변식을 recovery 시점에 강제함
                     throw new IllegalStateException("DB tiles must not miss any z=0 tile.");
                 }
             }
@@ -82,7 +82,7 @@ public class InMemoryTileBoard {
     public synchronized TileState getRequired(TileKey key) {
         TileState tileState = tiles.get(key);
         if (tileState == null) {
-            // authoritative state에서 타일 부재를 조용히 넘기지 않기 위해 즉시 실패시킨다.
+            // authoritative state에서 타일 부재를 조용히 넘기지 않기 위해 즉시 실패시킴
             throw new IllegalStateException("Required tile is missing from memory board.");
         }
         return tileState;
@@ -103,8 +103,8 @@ public class InMemoryTileBoard {
         return List.copyOf(tiles.values());
     }
 
-    // 정상 write와 WAL replay가 공유하는 메모리 타일 변경 API다.
-    // 호출자는 WAL fsync 성공 또는 recovery replay처럼 메모리 authoritative state에 반영해도 되는 상태를 보장해야 한다.
+    // 정상 write와 WAL replay가 공유하는 메모리 타일 변경 API
+    // 호출자는 WAL fsync 성공 또는 recovery replay처럼 메모리 authoritative state에 반영해도 되는 상태를 보장해야 함
     public synchronized TileMutationResult applyPixel(int x, int y, int color) {
         validatePixelMutation(x, y, color);
 
@@ -116,15 +116,15 @@ public class InMemoryTileBoard {
         TileState tileState = getRequired(key);
         byte[] pixels = tileState.pixels();
 
-        // Java byte는 signed지만, 이 배열에서는 1 byte 팔레트 인덱스 저장 표현으로만 해석한다.
+        // Java byte는 signed지만, 이 배열에서는 1 byte 팔레트 인덱스 저장 표현으로만 해석함
         pixels[(ly * BoardConstants.TILE_SIZE) + lx] = (byte) color;
         long nextTileVersion = tileState.tileVersion() + 1;
         tiles.put(key, new TileState(pixels, nextTileVersion));
         return new TileMutationResult(key, nextTileVersion);
     }
 
-    // lastFlushedEventSeq 이후 WAL replay를 메모리 authoritative state에 반영하기 위한 최소 메서드다.
-    // recovery replay도 정상 write와 같은 mutation 규칙을 사용해야 tileVersion 증가 기준이 일관된다.
+    // lastFlushedEventSeq 이후 WAL replay를 메모리 authoritative state에 반영하기 위한 최소 메서드
+    // recovery replay도 정상 write와 같은 mutation 규칙을 사용해야 tileVersion 증가 기준이 일관됨
     public synchronized void applyReplayRecord(int x, int y, int color) {
         applyPixel(x, y, color);
     }
@@ -132,15 +132,15 @@ public class InMemoryTileBoard {
     // 픽셀 검증.
     private void validatePixelMutation(int x, int y, int color) {
         if (x < 0 || x >= BoardConstants.BOARD_SIZE) {
-            // 보드 밖 좌표를 허용하면 z=0 전체 타일 범위 불변식이 깨진다.
+            // 보드 밖 좌표를 허용하면 z=0 전체 타일 범위 불변식이 깨짐
             throw new IllegalArgumentException("Pixel x coordinate is out of board range.");
         }
         if (y < 0 || y >= BoardConstants.BOARD_SIZE) {
-            // 보드 밖 좌표를 허용하면 z=0 전체 타일 범위 불변식이 깨진다.
+            // 보드 밖 좌표를 허용하면 z=0 전체 타일 범위 불변식이 깨짐
             throw new IllegalArgumentException("Pixel y coordinate is out of board range.");
         }
         if (color < 0 || color >= BoardConstants.PALETTE_SIZE) {
-            // 팔레트 인덱스는 1 byte 저장 모델과 256색 고정 팔레트를 유지하기 위해 0~255만 허용한다.
+            // 팔레트 인덱스는 1 byte 저장 모델과 256색 고정 팔레트를 유지하기 위해 0~255만 허용함
             throw new IllegalArgumentException("Pixel color index is out of palette range.");
         }
     }

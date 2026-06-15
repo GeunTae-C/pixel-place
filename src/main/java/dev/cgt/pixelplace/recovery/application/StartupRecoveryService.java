@@ -11,8 +11,8 @@ import dev.cgt.pixelplace.wal.application.WalReplaySource;
 import dev.cgt.pixelplace.wal.domain.WalRecord;
 import org.springframework.stereotype.Service;
 
-// startup recovery 전체 순서를 강제하는 핵심 오케스트레이터다.
-// 메모리 타일 보드를 authoritative state로 세우기 위해 checkpoint, DB snapshot, WAL replay를 정해진 순서로만 연결한다.
+// startup recovery 전체 순서를 강제하는 핵심 오케스트레이터
+// 메모리 타일 보드를 authoritative state로 세우기 위해 checkpoint, DB snapshot, WAL replay를 정해진 순서로만 연결함
 @Service
 public class StartupRecoveryService {
 
@@ -60,8 +60,8 @@ public class StartupRecoveryService {
     }
 
     // recovery 순서는 checkpoint 조회 -> DB tiles 전체 로드 또는 all-white pre-init
-    // -> lastFlushedEventSeq 이후 WAL replay -> 마지막 발급 eventSeq 초기화 -> service ready 로 고정된다.
-    // 이 순서가 바뀌면 메모리 authoritative state와 eventSeq 기준점이 어긋날 수 있다.
+    // -> lastFlushedEventSeq 이후 WAL replay -> 마지막 발급 eventSeq 초기화 -> service ready 로 고정됨
+    // 이 순서가 바뀌면 메모리 authoritative state와 eventSeq 기준점이 어긋날 수 있음
     public void recover() {
         serviceReadiness.markNotReady();
 
@@ -73,20 +73,20 @@ public class StartupRecoveryService {
         if (tileLoadResult.allMissing()) {
             inMemoryTileBoard.initializeAllWhite();
         } else {
-            // partial tile 누락은 loadAll 내부에서 실패시켜 조용한 부분 복구를 막는다.
+            // partial tile 누락은 loadAll 내부에서 실패시켜 조용한 부분 복구를 막음
             inMemoryTileBoard.loadAll(tileLoadResult.snapshots());
         }
 
         /* DB 반영 완료 마지막 eventSeq 이후 WAL replay */
         WalReplayBatch replayBatch = walReplaySource.readAfter(checkpointSnapshot.lastFlushedEventSeq());
         for (WalRecord record : replayBatch.records()) {
-            // WalReplaySource 계약상 records는 이미 lastFlushedEventSeq 초과 이벤트만 담는다.
-            // WAL color는 0~255 int로 검증된 뒤, 메모리 타일의 1 byte 팔레트 저장 표현으로 변환한다.
+            // WalReplaySource 계약상 records는 이미 lastFlushedEventSeq 초과 이벤트만 담음
+            // WAL color는 0~255 int로 검증된 뒤, 메모리 타일의 1 byte 팔레트 저장 표현으로 변환함
             inMemoryTileBoard.applyReplayRecord(record.x(), record.y(), record.color());
         }
 
         /* 마지막 발급 eventSeq 초기화 */
-        // lastFlushedEventSeq는 DB 반영 완료 지점이고, walLastEventSeq는 WAL 파일의 마지막 eventSeq다.
+        // lastFlushedEventSeq는 DB 반영 완료 지점이고, walLastEventSeq는 WAL 파일의 마지막 eventSeq
         eventSeqManager.initializeLastIssued(Math.max(
                 checkpointSnapshot.lastFlushedEventSeq(),
                 replayBatch.walLastEventSeq()

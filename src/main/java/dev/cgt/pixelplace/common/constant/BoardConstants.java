@@ -1,7 +1,7 @@
 package dev.cgt.pixelplace.common.constant;
 
-// 보드/타일 관련 고정 불변식을 한 곳에 모은다.
-// recovery와 z=0 전체 pre-init 검증이 같은 숫자를 공유해야 조용한 불일치를 막을 수 있다.
+// 보드/타일 관련 고정 불변식을 한 곳에 모음
+// recovery와 z=0 전체 pre-init 검증이 같은 숫자를 공유해야 조용한 불일치를 막을 수 있음
 public final class BoardConstants {
 
     public static final int BOARD_SIZE = 8192;

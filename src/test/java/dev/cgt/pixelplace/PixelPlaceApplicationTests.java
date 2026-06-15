@@ -18,11 +18,11 @@ import static dev.cgt.pixelplace.common.constant.BoardConstants.Z0_TILE_COUNT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// 이 테스트는 Spring context 통합 테스트가 아니라 skeleton 불변식 검증용 단위 테스트다.
+// 이 테스트는 Spring context 통합 테스트가 아니라 skeleton 불변식 검증용 단위 테스트
 class PixelPlaceApplicationTests {
 
     @Test
-    // 부팅 직후 z=0 타일 1024개가 메모리에 항상 존재한다는 불변식을 보장한다.
+    // 부팅 직후 z=0 타일 1024개가 메모리에 항상 존재한다는 불변식을 보장함
     void inMemoryTileBoardPreInitializesAllZ0Tiles() {
         InMemoryTileBoard board = new InMemoryTileBoard();
 
@@ -30,7 +30,7 @@ class PixelPlaceApplicationTests {
     }
 
     @Test
-    // recovery가 마지막 발급 eventSeq 초기화와 ready 전환까지 완료하는지 확인한다.
+    // recovery가 마지막 발급 eventSeq 초기화와 ready 전환까지 완료하는지 확인함
     void recoverInitializesEventSeqManagerAndMarksReady() {
         EventSeqManager eventSeqManager = new EventSeqManager();
         ServiceReadiness serviceReadiness = new ServiceReadiness();
@@ -50,7 +50,7 @@ class PixelPlaceApplicationTests {
     }
 
     @Test
-    // recovery seed는 DB flush 완료 지점과 WAL 파일 마지막 eventSeq 중 큰 값이어야 한다.
+    // recovery seed는 DB flush 완료 지점과 WAL 파일 마지막 eventSeq 중 큰 값이어야 함
     void recoverUsesMaxOfLastFlushedEventSeqAndWalLastEventSeqAsSeed() {
         EventSeqManager eventSeqManager = new EventSeqManager();
         StartupRecoveryService service = new StartupRecoveryService(

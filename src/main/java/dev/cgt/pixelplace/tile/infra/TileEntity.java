@@ -16,26 +16,26 @@ import java.util.Objects;
 @Table(name = "tiles")
 public class TileEntity {
 
-    // tiles 테이블 매핑 엔티티다.
-    // 이 클래스는 DB row와 Java 객체 사이의 단순 매핑만 담당하며, recovery orchestration 책임은 갖지 않는다.
-    // tiles row는 DB 후행 저장소의 타일 snapshot이다.
-    // 실시간 authoritative state는 InMemoryTileBoard가 갖고, 이 엔티티는 복구 시작점으로 읽히는 단순 DB 매핑만 담당한다.
+    // tiles 테이블 매핑 엔티티
+    // 이 클래스는 DB row와 Java 객체 사이의 단순 매핑만 담당하며, recovery orchestration 책임은 갖지 않음
+    // tiles row는 DB 후행 저장소의 타일 snapshot
+    // 실시간 authoritative state는 InMemoryTileBoard가 갖고, 이 엔티티는 복구 시작점으로 읽히는 단순 DB 매핑만 담당함
     @EmbeddedId
     private TileId id;
 
-    // 타일의 픽셀 데이터를 1 byte/pixel 팔레트 인덱스 raw bytes로 저장하는 컬럼이다.
-    // 팔레트 인덱스 raw bytes를 그대로 저장한다. 타일 1개는 256 * 256 bytes가 되어야 한다.
+    // 타일의 픽셀 데이터를 1 byte/pixel 팔레트 인덱스 raw bytes로 저장하는 컬럼
+    // 팔레트 인덱스 raw bytes를 그대로 저장함 타일 1개는 256 * 256 bytes가 되어야 함
     @Lob
     @Column(name = "data", nullable = false, columnDefinition = "MEDIUMBLOB")
     private byte[] data;
 
-    // DB 후행 저장소에 기록된 타일 버전이며, 복구 시 메모리 타일 상태의 기준 버전으로 읽힌다.
-    // DB에 마지막으로 flush된 타일 기준 상태 버전이다. write path의 실시간 버전 원본은 메모리 타일 상태다.
+    // DB 후행 저장소에 기록된 타일 버전이며, 복구 시 메모리 타일 상태의 기준 버전으로 읽힘
+    // DB에 마지막으로 flush된 타일 기준 상태 버전임 write path의 실시간 버전 원본은 메모리 타일 상태
     @Column(name = "tile_version", nullable = false)
     private long tileVersion;
 
-    // DB가 관리하는 메타 컬럼으로, 애플리케이션이 recovery 흐름 제어용으로 갱신하지 않는다.
-    // DB flush 시점 확인용 메타 컬럼이며, recovery orchestration 책임은 이 엔티티에 두지 않는다.
+    // DB가 관리하는 메타 컬럼으로, 애플리케이션이 recovery 흐름 제어용으로 갱신하지 않음
+    // DB flush 시점 확인용 메타 컬럼이며, recovery orchestration 책임은 이 엔티티에 두지 않음
     @Column(name = "updated_at", nullable = false, insertable = false, updatable = false)
     private LocalDateTime updatedAt;
 
@@ -73,8 +73,8 @@ public class TileEntity {
     @Embeddable
     public static class TileId implements Serializable {
 
-        // (z, tx, ty) 복합키가 tiles 테이블의 타일 row 식별 기준이다.
-        // z, tx, ty 복합키는 DB tiles의 물리 row와 메모리 TileKey가 같은 기준을 쓰도록 맞춘다.
+        // (z, tx, ty) 복합키가 tiles 테이블의 타일 row 식별 기준
+        // z, tx, ty 복합키는 DB tiles의 물리 row와 메모리 TileKey가 같은 기준을 쓰도록 맞춤
         @Column(name = "z", nullable = false)
         private int z;
 
