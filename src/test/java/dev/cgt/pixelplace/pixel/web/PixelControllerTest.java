@@ -21,6 +21,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+// pixel write HTTP 경계 검증
+// controller는 임시 X-User-Id 파싱과 응답 변환만 담당, write 처리는 service 경계에 위임
 class PixelControllerTest {
 
     private final PixelWriteService pixelWriteService = mock(PixelWriteService.class);
@@ -29,6 +31,7 @@ class PixelControllerTest {
             .build();
 
     @Test
+    // 승인된 write 결과를 HTTP 응답 DTO로 변환하는 기본 계약
     void writePixelReturnsAcceptedResponse() throws Exception {
         when(pixelWriteService.writePixel(7L, 768, 1280, 17))
                 .thenReturn(new PixelWriteResult(
@@ -62,6 +65,7 @@ class PixelControllerTest {
     }
 
     @Test
+    // 임시 사용자 식별 header 없이는 write path 진입 금지
     void writePixelWithoutUserIdHeaderReturnsBadRequest() throws Exception {
         mockMvc.perform(post("/api/pixels")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -78,6 +82,7 @@ class PixelControllerTest {
     }
 
     @Test
+    // 필수 x 좌표 누락 시 service 호출 금지
     void writePixelWithoutXReturnsBadRequest() throws Exception {
         mockMvc.perform(post("/api/pixels")
                         .header("X-User-Id", "7")
@@ -95,6 +100,7 @@ class PixelControllerTest {
     }
 
     @Test
+    // 필수 y 좌표 누락 시 service 호출 금지
     void writePixelWithoutYReturnsBadRequest() throws Exception {
         mockMvc.perform(post("/api/pixels")
                         .header("X-User-Id", "7")
@@ -112,6 +118,7 @@ class PixelControllerTest {
     }
 
     @Test
+    // 필수 color 누락 시 service 호출 금지
     void writePixelWithoutColorReturnsBadRequest() throws Exception {
         mockMvc.perform(post("/api/pixels")
                         .header("X-User-Id", "7")
@@ -129,6 +136,7 @@ class PixelControllerTest {
     }
 
     @Test
+    // 요청 검증 계열 service 실패는 client 오류로 매핑
     void writePixelConvertsServiceIllegalArgumentExceptionToBadRequest() throws Exception {
         when(pixelWriteService.writePixel(7L, -1, 1280, 17))
                 .thenThrow(new IllegalArgumentException("x coordinate is out of board range. x=-1"));
@@ -150,6 +158,7 @@ class PixelControllerTest {
     }
 
     @Test
+    // WAL fsync 실패 같은 서버 불변식 실패는 400으로 숨기지 않음
     void writePixelDoesNotConvertIllegalStateExceptionToBadRequest() {
         when(pixelWriteService.writePixel(7L, 768, 1280, 17))
                 .thenThrow(new IllegalStateException("WAL fsync failed."));
@@ -171,6 +180,7 @@ class PixelControllerTest {
     }
 
     @Test
+    // 잘못된 사용자 header는 write 승인 경로로 넘기지 않음
     void writePixelWithNonNumericUserIdHeaderReturnsBadRequest() throws Exception {
         mockMvc.perform(post("/api/pixels")
                         .header("X-User-Id", "abc")
