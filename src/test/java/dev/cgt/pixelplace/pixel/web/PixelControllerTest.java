@@ -1,8 +1,10 @@
 package dev.cgt.pixelplace.pixel.web;
 
 import dev.cgt.pixelplace.common.constant.BoardConstants;
+import dev.cgt.pixelplace.pixel.application.PixelCommandService;
+import dev.cgt.pixelplace.pixel.application.PixelCooldownActiveException;
+import dev.cgt.pixelplace.pixel.application.PixelCooldownUnavailableException;
 import dev.cgt.pixelplace.pixel.application.PixelWriteResult;
-import dev.cgt.pixelplace.pixel.application.PixelWriteService;
 import dev.cgt.pixelplace.tile.domain.TileKey;
 import jakarta.servlet.ServletException;
 import org.junit.jupiter.api.Test;
@@ -25,15 +27,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 // controller는 임시 X-User-Id 파싱과 응답 변환만 담당, write 처리는 service 경계에 위임
 class PixelControllerTest {
 
-    private final PixelWriteService pixelWriteService = mock(PixelWriteService.class);
+    private final PixelCommandService pixelCommandService = mock(PixelCommandService.class);
     private final MockMvc mockMvc = MockMvcBuilders
-            .standaloneSetup(new PixelController(pixelWriteService))
+            .standaloneSetup(new PixelController(pixelCommandService))
             .build();
 
     @Test
     // 승인된 write 결과를 HTTP 응답 DTO로 변환하는 기본 계약
     void writePixelReturnsAcceptedResponse() throws Exception {
-        when(pixelWriteService.writePixel(7L, 768, 1280, 17))
+        when(pixelCommandService.writePixel(7L, 768, 1280, 17))
                 .thenReturn(new PixelWriteResult(
                         1L,
                         new TileKey(BoardConstants.Z0_LEVEL, 3, 5),
@@ -61,7 +63,7 @@ class PixelControllerTest {
                 .andExpect(jsonPath("$.color").value(17))
                 .andExpect(jsonPath("$.tileVersion").value(1));
 
-        verify(pixelWriteService).writePixel(7L, 768, 1280, 17);
+        verify(pixelCommandService).writePixel(7L, 768, 1280, 17);
     }
 
     @Test
@@ -78,7 +80,7 @@ class PixelControllerTest {
                                 """))
                 .andExpect(status().isBadRequest());
 
-        verifyNoInteractions(pixelWriteService);
+        verifyNoInteractions(pixelCommandService);
     }
 
     @Test
@@ -96,7 +98,7 @@ class PixelControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value(containsString("x is required.")));
 
-        verifyNoInteractions(pixelWriteService);
+        verifyNoInteractions(pixelCommandService);
     }
 
     @Test
@@ -114,7 +116,7 @@ class PixelControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value(containsString("y is required.")));
 
-        verifyNoInteractions(pixelWriteService);
+        verifyNoInteractions(pixelCommandService);
     }
 
     @Test
@@ -132,13 +134,13 @@ class PixelControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value(containsString("color is required.")));
 
-        verifyNoInteractions(pixelWriteService);
+        verifyNoInteractions(pixelCommandService);
     }
 
     @Test
     // 요청 검증 계열 service 실패는 client 오류로 매핑
     void writePixelConvertsServiceIllegalArgumentExceptionToBadRequest() throws Exception {
-        when(pixelWriteService.writePixel(7L, -1, 1280, 17))
+        when(pixelCommandService.writePixel(7L, -1, 1280, 17))
                 .thenThrow(new IllegalArgumentException("x coordinate is out of board range. x=-1"));
 
         mockMvc.perform(post("/api/pixels")
@@ -154,13 +156,61 @@ class PixelControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value(containsString("x coordinate is out of board range")));
 
-        verify(pixelWriteService).writePixel(7L, -1, 1280, 17);
+        verify(pixelCommandService).writePixel(7L, -1, 1280, 17);
+    }
+
+    @Test
+    // cooldown 활성 상태는 write path 진입 전 429로 고정
+    void writePixelReturnsTooManyRequestsWhenCooldownActive() throws Exception {
+        when(pixelCommandService.writePixel(7L, 768, 1280, 17))
+                .thenThrow(new PixelCooldownActiveException(123_000L));
+
+        mockMvc.perform(post("/api/pixels")
+                        .header("X-User-Id", "7")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "x": 768,
+                                  "y": 1280,
+                                  "color": 17
+                                }
+                                """))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.message").value("Pixel write cooldown is active."))
+                .andExpect(jsonPath("$.remainingMillis").value(123_000));
+
+        verify(pixelCommandService).writePixel(7L, 768, 1280, 17);
+    }
+
+    @Test
+    // cooldown check 실패는 승인 여부 불명확 상태이므로 503으로 고정
+    void writePixelReturnsServiceUnavailableWhenCooldownUnavailable() throws Exception {
+        when(pixelCommandService.writePixel(7L, 768, 1280, 17))
+                .thenThrow(new PixelCooldownUnavailableException(
+                        "Pixel cooldown check failed.",
+                        new RuntimeException("redis down")
+                ));
+
+        mockMvc.perform(post("/api/pixels")
+                        .header("X-User-Id", "7")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "x": 768,
+                                  "y": 1280,
+                                  "color": 17
+                                }
+                                """))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.message").value("Pixel cooldown check failed."));
+
+        verify(pixelCommandService).writePixel(7L, 768, 1280, 17);
     }
 
     @Test
     // WAL fsync 실패 같은 서버 불변식 실패는 400으로 숨기지 않음
     void writePixelDoesNotConvertIllegalStateExceptionToBadRequest() {
-        when(pixelWriteService.writePixel(7L, 768, 1280, 17))
+        when(pixelCommandService.writePixel(7L, 768, 1280, 17))
                 .thenThrow(new IllegalStateException("WAL fsync failed."));
 
         ServletException exception = assertThrows(ServletException.class, () ->
@@ -176,7 +226,7 @@ class PixelControllerTest {
                                 """)));
 
         assertInstanceOf(IllegalStateException.class, exception.getCause());
-        verify(pixelWriteService).writePixel(7L, 768, 1280, 17);
+        verify(pixelCommandService).writePixel(7L, 768, 1280, 17);
     }
 
     @Test
@@ -194,6 +244,6 @@ class PixelControllerTest {
                                 """))
                 .andExpect(status().isBadRequest());
 
-        verifyNoInteractions(pixelWriteService);
+        verifyNoInteractions(pixelCommandService);
     }
 }

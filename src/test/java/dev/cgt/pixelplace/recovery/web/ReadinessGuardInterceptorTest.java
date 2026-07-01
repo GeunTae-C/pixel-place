@@ -2,8 +2,8 @@ package dev.cgt.pixelplace.recovery.web;
 
 import dev.cgt.pixelplace.board.web.BoardController;
 import dev.cgt.pixelplace.common.constant.BoardConstants;
+import dev.cgt.pixelplace.pixel.application.PixelCommandService;
 import dev.cgt.pixelplace.pixel.application.PixelWriteResult;
-import dev.cgt.pixelplace.pixel.application.PixelWriteService;
 import dev.cgt.pixelplace.pixel.web.PixelController;
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import dev.cgt.pixelplace.tile.application.TileReadResult;
@@ -36,19 +36,19 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class ReadinessGuardInterceptorTest {
 
     private ServiceReadiness serviceReadiness;
-    private PixelWriteService pixelWriteService;
+    private PixelCommandService pixelCommandService;
     private TileReadService tileReadService;
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
         serviceReadiness = new ServiceReadiness();
-        pixelWriteService = mock(PixelWriteService.class);
+        pixelCommandService = mock(PixelCommandService.class);
         tileReadService = mock(TileReadService.class);
 
         mockMvc = MockMvcBuilders.standaloneSetup(
                         new BoardController(),
-                        new PixelController(pixelWriteService),
+                        new PixelController(pixelCommandService),
                         new TileController(tileReadService)
                 )
                 .addInterceptors(new ReadinessGuardInterceptor(serviceReadiness))
@@ -86,7 +86,7 @@ class ReadinessGuardInterceptorTest {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.message").value("Service is not ready."));
 
-        verifyNoInteractions(pixelWriteService);
+        verifyNoInteractions(pixelCommandService);
     }
 
     @Test
@@ -116,7 +116,7 @@ class ReadinessGuardInterceptorTest {
     @Test
     void postPixelPassesToControllerAndServiceWhenReady() throws Exception {
         serviceReadiness.markReady();
-        when(pixelWriteService.writePixel(7L, 1, 2, 3))
+        when(pixelCommandService.writePixel(7L, 1, 2, 3))
                 .thenReturn(new PixelWriteResult(
                         1L,
                         new TileKey(BoardConstants.Z0_LEVEL, 0, 0),
@@ -135,7 +135,7 @@ class ReadinessGuardInterceptorTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accepted").value(true));
 
-        verify(pixelWriteService).writePixel(7L, 1, 2, 3);
+        verify(pixelCommandService).writePixel(7L, 1, 2, 3);
     }
 
     @Test
