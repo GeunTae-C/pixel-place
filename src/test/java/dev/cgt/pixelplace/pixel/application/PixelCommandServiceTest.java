@@ -3,10 +3,14 @@ package dev.cgt.pixelplace.pixel.application;
 import dev.cgt.pixelplace.common.constant.BoardConstants;
 import dev.cgt.pixelplace.tile.domain.TileKey;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -23,21 +27,37 @@ class PixelCommandServiceTest {
 
     private final PixelCooldown pixelCooldown = mock(PixelCooldown.class);
     private final PixelWriteService pixelWriteService = mock(PixelWriteService.class);
-    private final PixelCommandService service = new PixelCommandService(pixelCooldown, pixelWriteService);
+    private final PixelBroadcastService pixelBroadcastService = mock(PixelBroadcastService.class);
+    private final PixelCommandService service = new PixelCommandService(
+            pixelCooldown,
+            pixelWriteService,
+            pixelBroadcastService
+    );
 
     @Test
-    // cooldown check -> core write -> cooldown start 순서 고정
-    void writePixelStartsCooldownAfterSuccessfulWrite() {
+    // cooldown check -> core write -> cooldown start -> broadcast 순서 고정
+    void writePixelBroadcastsPixelEventAfterCooldownStartWhenCoreWriteSucceeds() {
         PixelWriteResult result = result();
         when(pixelWriteService.writePixel(7L, 768, 1280, 17)).thenReturn(result);
 
         PixelWriteResult actual = service.writePixel(7L, 768, 1280, 17);
 
         assertSame(result, actual);
-        InOrder inOrder = inOrder(pixelCooldown, pixelWriteService);
+        InOrder inOrder = inOrder(pixelCooldown, pixelWriteService, pixelBroadcastService);
         inOrder.verify(pixelCooldown).checkWritable(7L);
         inOrder.verify(pixelWriteService).writePixel(7L, 768, 1280, 17);
         inOrder.verify(pixelCooldown).startCooldown(7L);
+        ArgumentCaptor<PixelEventMessage> messageCaptor = ArgumentCaptor.forClass(PixelEventMessage.class);
+        inOrder.verify(pixelBroadcastService).broadcast(messageCaptor.capture());
+
+        PixelEventMessage message = messageCaptor.getValue();
+        assertAll(
+                () -> assertEquals("pixel", message.type()),
+                () -> assertEquals(result.x(), message.x()),
+                () -> assertEquals(result.y(), message.y()),
+                () -> assertEquals(result.color(), message.color()),
+                () -> assertEquals(result.eventSeq(), message.eventSeq())
+        );
     }
 
     @Test
@@ -50,6 +70,7 @@ class PixelCommandServiceTest {
 
         verify(pixelCooldown).checkWritable(7L);
         verifyNoInteractions(pixelWriteService);
+        verifyNoInteractions(pixelBroadcastService);
         verifyNoMoreInteractions(pixelCooldown);
     }
 
@@ -63,6 +84,7 @@ class PixelCommandServiceTest {
 
         verify(pixelCooldown).checkWritable(7L);
         verifyNoInteractions(pixelWriteService);
+        verifyNoInteractions(pixelBroadcastService);
         verifyNoMoreInteractions(pixelCooldown);
     }
 
@@ -76,6 +98,7 @@ class PixelCommandServiceTest {
 
         verify(pixelCooldown).checkWritable(7L);
         verify(pixelWriteService).writePixel(7L, -1, 1280, 17);
+        verifyNoInteractions(pixelBroadcastService);
         verifyNoMoreInteractions(pixelCooldown);
     }
 
@@ -89,12 +112,13 @@ class PixelCommandServiceTest {
 
         verify(pixelCooldown).checkWritable(7L);
         verify(pixelWriteService).writePixel(7L, 768, 1280, 17);
+        verifyNoInteractions(pixelBroadcastService);
         verifyNoMoreInteractions(pixelCooldown);
     }
 
     @Test
-    // cooldown set 실패는 이미 성공한 WAL+memory write 결과를 깨지 않음
-    void writePixelReturnsResultWhenCooldownStartFailsAfterSuccessfulWrite() {
+    // cooldown set 실패는 이미 성공한 WAL+memory write 결과를 깨지 않고 broadcast는 계속 시도
+    void writePixelBroadcastsAndReturnsResultWhenCooldownStartFailsAfterSuccessfulWrite() {
         PixelWriteResult result = result();
         when(pixelWriteService.writePixel(7L, 768, 1280, 17)).thenReturn(result);
         doThrow(new PixelCooldownUnavailableException("Pixel cooldown set failed.", new RuntimeException("redis down")))
@@ -106,6 +130,24 @@ class PixelCommandServiceTest {
         verify(pixelCooldown).checkWritable(7L);
         verify(pixelWriteService).writePixel(7L, 768, 1280, 17);
         verify(pixelCooldown).startCooldown(7L);
+        verify(pixelBroadcastService).broadcast(any(PixelEventMessage.class));
+    }
+
+    @Test
+    // broadcast 실패는 이미 성공한 WAL+memory write 결과를 깨지 않음
+    void writePixelReturnsResultWhenBroadcastFailsAfterSuccessfulWrite() {
+        PixelWriteResult result = result();
+        when(pixelWriteService.writePixel(7L, 768, 1280, 17)).thenReturn(result);
+        doThrow(new RuntimeException("websocket down"))
+                .when(pixelBroadcastService).broadcast(any(PixelEventMessage.class));
+
+        PixelWriteResult actual = service.writePixel(7L, 768, 1280, 17);
+
+        assertSame(result, actual);
+        verify(pixelCooldown).checkWritable(7L);
+        verify(pixelWriteService).writePixel(7L, 768, 1280, 17);
+        verify(pixelCooldown).startCooldown(7L);
+        verify(pixelBroadcastService).broadcast(any(PixelEventMessage.class));
     }
 
     @Test
@@ -113,7 +155,7 @@ class PixelCommandServiceTest {
     void writePixelRejectsNonPositiveUserIdBeforeCooldownCheck() {
         assertThrows(IllegalArgumentException.class, () -> service.writePixel(0L, 768, 1280, 17));
 
-        verifyNoInteractions(pixelCooldown, pixelWriteService);
+        verifyNoInteractions(pixelCooldown, pixelWriteService, pixelBroadcastService);
     }
 
     private PixelWriteResult result() {

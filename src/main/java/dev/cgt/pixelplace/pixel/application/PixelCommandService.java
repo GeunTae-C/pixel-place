@@ -15,10 +15,16 @@ public class PixelCommandService {
 
     private final PixelCooldown pixelCooldown;
     private final PixelWriteService pixelWriteService;
+    private final PixelBroadcastService pixelBroadcastService;
 
-    public PixelCommandService(PixelCooldown pixelCooldown, PixelWriteService pixelWriteService) {
+    public PixelCommandService(
+            PixelCooldown pixelCooldown,
+            PixelWriteService pixelWriteService,
+            PixelBroadcastService pixelBroadcastService
+    ) {
         this.pixelCooldown = pixelCooldown;
         this.pixelWriteService = pixelWriteService;
+        this.pixelBroadcastService = pixelBroadcastService;
     }
 
     /*
@@ -40,6 +46,16 @@ public class PixelCommandService {
              * core write rollback 책임 없음, 운영 경고만 남기는 후처리 실패
              */
             log.warn("Pixel cooldown set failed after successful write. userId={}", userId, exception);
+        }
+
+        try {
+            pixelBroadcastService.broadcast(PixelEventMessage.from(result));
+        } catch (RuntimeException exception) {
+            /*
+             * write 성공 이후 전파 실패
+             * WAL/memory/cooldown rollback 사유 아님, 클라이언트 재동기화 대상으로 남김
+             */
+            log.warn("Pixel WebSocket broadcast failed after successful write. eventSeq={}", result.eventSeq(), exception);
         }
 
         return result;
