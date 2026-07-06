@@ -230,6 +230,28 @@ class PixelControllerTest {
     }
 
     @Test
+    // dirty mark 실패는 사용자 요청 오류가 아니므로 400으로 변환 금지
+    void writePixelDoesNotConvertDirtyMarkIllegalStateExceptionToBadRequest() {
+        when(pixelCommandService.writePixel(7L, 768, 1280, 17))
+                .thenThrow(new IllegalStateException("Dirty tile mark failed after successful write. eventSeq=1"));
+
+        ServletException exception = assertThrows(ServletException.class, () ->
+                mockMvc.perform(post("/api/pixels")
+                        .header("X-User-Id", "7")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "x": 768,
+                                  "y": 1280,
+                                  "color": 17
+                                }
+                                """)));
+
+        assertInstanceOf(IllegalStateException.class, exception.getCause());
+        verify(pixelCommandService).writePixel(7L, 768, 1280, 17);
+    }
+
+    @Test
     // 잘못된 사용자 header는 write 승인 경로로 넘기지 않음
     void writePixelWithNonNumericUserIdHeaderReturnsBadRequest() throws Exception {
         mockMvc.perform(post("/api/pixels")

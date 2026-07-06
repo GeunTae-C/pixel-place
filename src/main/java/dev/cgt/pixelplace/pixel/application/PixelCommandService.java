@@ -1,5 +1,6 @@
 package dev.cgt.pixelplace.pixel.application;
 
+import dev.cgt.pixelplace.tile.application.DirtyTileTracker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -15,15 +16,18 @@ public class PixelCommandService {
 
     private final PixelCooldown pixelCooldown;
     private final PixelWriteService pixelWriteService;
+    private final DirtyTileTracker dirtyTileTracker;
     private final PixelBroadcastService pixelBroadcastService;
 
     public PixelCommandService(
             PixelCooldown pixelCooldown,
             PixelWriteService pixelWriteService,
+            DirtyTileTracker dirtyTileTracker,
             PixelBroadcastService pixelBroadcastService
     ) {
         this.pixelCooldown = pixelCooldown;
         this.pixelWriteService = pixelWriteService;
+        this.dirtyTileTracker = dirtyTileTracker;
         this.pixelBroadcastService = pixelBroadcastService;
     }
 
@@ -37,6 +41,8 @@ public class PixelCommandService {
         pixelCooldown.checkWritable(userId);
 
         PixelWriteResult result = pixelWriteService.writePixel(userId, x, y, color);
+
+        markDirty(result);
 
         try {
             pixelCooldown.startCooldown(userId);
@@ -59,6 +65,25 @@ public class PixelCommandService {
         }
 
         return result;
+    }
+
+    private void markDirty(PixelWriteResult result) {
+        try {
+            dirtyTileTracker.markDirty(
+                    result.tileKey(),
+                    result.eventSeq(),
+                    result.tileVersion()
+            );
+        } catch (RuntimeException exception) {
+            /*
+             * WAL fsync와 memory apply 이후 dirty 추적 실패
+             * flush/checkpoint 정합성에 필요한 후처리 실패이므로 성공 응답으로 숨기면 안 됨
+             */
+            throw new IllegalStateException(
+                    "Dirty tile mark failed after successful write. eventSeq=" + result.eventSeq(),
+                    exception
+            );
+        }
     }
 
     private void validateUserId(long userId) {
