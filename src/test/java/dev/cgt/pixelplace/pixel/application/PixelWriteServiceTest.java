@@ -1,6 +1,8 @@
 package dev.cgt.pixelplace.pixel.application;
 
 import dev.cgt.pixelplace.common.constant.BoardConstants;
+import dev.cgt.pixelplace.recovery.application.ServiceNotReadyException;
+import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import dev.cgt.pixelplace.tile.domain.InMemoryTileBoard;
 import dev.cgt.pixelplace.tile.domain.TileKey;
 import dev.cgt.pixelplace.wal.application.WalAppender;
@@ -10,13 +12,26 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
-// PixelWriteService는 write 성공 기준을 WAL fsync로 고정하므로 fake appender로 순서와 실패 불변식을 검증함
+// WAL 1차 내구성, memory core 완료, runtime fatal 차단 순서를 fake 협력자로 검증
 class PixelWriteServiceTest {
 
     @Test
@@ -35,7 +50,7 @@ class PixelWriteServiceTest {
         EventSeqManager eventSeqManager = new EventSeqManager();
         InMemoryTileBoard board = initializedBoard();
         RecordingWalAppender walAppender = new RecordingWalAppender();
-        PixelWriteService service = new PixelWriteService(eventSeqManager, walAppender, board);
+        PixelWriteService service = readyService(eventSeqManager, walAppender, board);
 
         PixelWriteResult result = service.writePixel(7L, 768, 1280, 17);
 
@@ -69,7 +84,7 @@ class PixelWriteServiceTest {
         InMemoryTileBoard board = initializedBoard();
         TileKey tileKey = new TileKey(BoardConstants.Z0_LEVEL, 3, 5);
         InspectingWalAppender walAppender = new InspectingWalAppender(board, tileKey, 0);
-        PixelWriteService service = new PixelWriteService(eventSeqManager, walAppender, board);
+        PixelWriteService service = readyService(eventSeqManager, walAppender, board);
 
         service.writePixel(7L, 768, 1280, 17);
 
@@ -78,17 +93,171 @@ class PixelWriteServiceTest {
     }
 
     @Test
-    // WAL fsync 실패는 write 승인 실패이므로 메모리 반영으로 넘어가면 안됨
-    void walAppendFailureDoesNotApplyMemory() {
+    // WAL 실패 요청은 원인을 보존하고 fatal 전환하며 memory apply로 진행 금지
+    void walAppendFailureMarksNotReadyPropagatesCauseAndDoesNotApplyMemory() {
+        EventSeqManager eventSeqManager = new EventSeqManager();
+        RuntimeException walFailure = new IllegalStateException("WAL fsync failed.");
+        WalAppender walAppender = record -> {
+            throw walFailure;
+        };
+        InMemoryTileBoard board = mock(InMemoryTileBoard.class);
+        ServiceReadiness readiness = readyReadiness();
+        PixelWriteService service = new PixelWriteService(
+                eventSeqManager,
+                walAppender,
+                board,
+                readiness
+        );
+
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class,
+                () -> service.writePixel(7L, 768, 1280, 17)
+        );
+
+        assertSame(walFailure, exception.getCause());
+        assertFalse(readiness.isReady());
+        verifyNoInteractions(board);
+    }
+
+    @Test
+    // durable WAL 이후 memory 실패는 WAL을 지우거나 성공을 반환하지 않고 재시작 복구가 필요한 fatal 상태로 전환
+    void memoryApplyFailureMarksNotReadyAndPropagatesCause() {
+        EventSeqManager eventSeqManager = new EventSeqManager();
+        RecordingWalAppender walAppender = new RecordingWalAppender();
+        InMemoryTileBoard board = mock(InMemoryTileBoard.class);
+        RuntimeException memoryFailure = new IllegalStateException("memory apply failed");
+        when(board.applyPixel(768, 1280, 17)).thenThrow(memoryFailure);
+        ServiceReadiness readiness = readyReadiness();
+        PixelWriteService service = new PixelWriteService(
+                eventSeqManager,
+                walAppender,
+                board,
+                readiness
+        );
+
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class,
+                () -> service.writePixel(7L, 768, 1280, 17)
+        );
+
+        assertSame(memoryFailure, exception.getCause());
+        assertFalse(readiness.isReady());
+        assertEquals(1, walAppender.records.size());
+        verify(board).applyPixel(768, 1280, 17);
+    }
+
+    @Test
+    void successfulWriteKeepsServiceReady() {
         EventSeqManager eventSeqManager = new EventSeqManager();
         InMemoryTileBoard board = initializedBoard();
-        PixelWriteService service = new PixelWriteService(eventSeqManager, new FailingWalAppender(), board);
+        RecordingWalAppender walAppender = new RecordingWalAppender();
+        ServiceReadiness readiness = readyReadiness();
+        PixelWriteService service = new PixelWriteService(
+                eventSeqManager,
+                walAppender,
+                board,
+                readiness
+        );
 
-        assertThrows(IllegalStateException.class, () -> service.writePixel(7L, 768, 1280, 17));
+        service.writePixel(7L, 768, 1280, 17);
 
-        TileKey tileKey = new TileKey(BoardConstants.Z0_LEVEL, 3, 5);
-        assertEquals(BoardConstants.DEFAULT_COLOR_INDEX, board.getRequired(tileKey).pixels()[0]);
-        assertEquals(0L, board.getRequired(tileKey).tileVersion());
+        assertTrue(readiness.isReady());
+    }
+
+    @Test
+    // not-ready는 요청 데이터 오류가 아니며 core validation과 모든 collaborator보다 먼저 전용 예외로 차단
+    void notReadyFailsBeforeValidationEventSeqWalAndMemory() {
+        ServiceReadiness readiness = new ServiceReadiness();
+        EventSeqManager eventSeqManager = mock(EventSeqManager.class);
+        WalAppender walAppender = mock(WalAppender.class);
+        InMemoryTileBoard board = mock(InMemoryTileBoard.class);
+        PixelWriteService service = new PixelWriteService(
+                eventSeqManager,
+                walAppender,
+                board,
+                readiness
+        );
+
+        ServiceNotReadyException exception = assertThrows(
+                ServiceNotReadyException.class,
+                () -> service.writePixel(0L, 768, 1280, 17)
+        );
+
+        assertEquals(ServiceNotReadyException.MESSAGE, exception.getMessage());
+        verifyNoInteractions(eventSeqManager, walAppender, board);
+    }
+
+    @Test
+    // 선행 fatal 동안 monitor에서 대기한 write도 재검사에서 차단되고 collaborator 접근은 첫 요청 1회로 제한
+    void waitingWriteIsRejectedAfterFirstWriteMarksNotReady() throws Exception {
+        ServiceReadiness readiness = readyReadiness();
+        EventSeqManager eventSeqManager = mock(EventSeqManager.class);
+        when(eventSeqManager.allocate()).thenReturn(1L);
+        CountDownLatch firstWalEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstWal = new CountDownLatch(1);
+        CountDownLatch secondCallStarted = new CountDownLatch(1);
+        AtomicInteger walCallCount = new AtomicInteger();
+        RuntimeException walFailure = new IllegalStateException("WAL fsync failed.");
+        WalAppender walAppender = record -> {
+            walCallCount.incrementAndGet();
+            firstWalEntered.countDown();
+            try {
+                if (!releaseFirstWal.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Timed out while holding the write monitor.");
+                }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while holding the write monitor.", exception);
+            }
+            throw walFailure;
+        };
+        InMemoryTileBoard board = mock(InMemoryTileBoard.class);
+        PixelWriteService service = new PixelWriteService(
+                eventSeqManager,
+                walAppender,
+                board,
+                readiness
+        );
+        AtomicReference<Throwable> firstThrown = new AtomicReference<>();
+        AtomicReference<Throwable> secondThrown = new AtomicReference<>();
+        Thread first = new Thread(
+                () -> captureFailure(firstThrown, () -> service.writePixel(7L, 768, 1280, 17)),
+                "pixel-write-first-fatal"
+        );
+        Thread second = new Thread(
+                () -> {
+                    secondCallStarted.countDown();
+                    captureFailure(secondThrown, () -> service.writePixel(0L, 768, 1280, 17));
+                },
+                "pixel-write-waiting"
+        );
+
+        try {
+            first.start();
+            assertTrue(firstWalEntered.await(5, TimeUnit.SECONDS));
+
+            second.start();
+            assertTrue(secondCallStarted.await(5, TimeUnit.SECONDS));
+            awaitBlockedOnWriteMonitor(second);
+            assertEquals(1, walCallCount.get());
+
+            releaseFirstWal.countDown();
+            join(first);
+            join(second);
+        } finally {
+            releaseFirstWal.countDown();
+        }
+
+        IllegalStateException firstException = assertInstanceOf(
+                IllegalStateException.class,
+                firstThrown.get()
+        );
+        assertSame(walFailure, firstException.getCause());
+        assertInstanceOf(ServiceNotReadyException.class, secondThrown.get());
+        assertFalse(readiness.isReady());
+        assertEquals(1, walCallCount.get());
+        verify(eventSeqManager, times(1)).allocate();
+        verifyNoInteractions(board);
     }
 
     @Test
@@ -97,7 +266,7 @@ class PixelWriteServiceTest {
         EventSeqManager eventSeqManager = new EventSeqManager();
         InMemoryTileBoard board = initializedBoard();
         RecordingWalAppender walAppender = new RecordingWalAppender();
-        PixelWriteService service = new PixelWriteService(eventSeqManager, walAppender, board);
+        PixelWriteService service = readyService(eventSeqManager, walAppender, board);
 
         PixelWriteResult first = service.writePixel(7L, 768, 1280, 17);
         PixelWriteResult second = service.writePixel(7L, 769, 1280, 18);
@@ -116,7 +285,7 @@ class PixelWriteServiceTest {
         EventSeqManager eventSeqManager = new EventSeqManager();
         InMemoryTileBoard board = initializedBoard();
         RecordingWalAppender walAppender = new RecordingWalAppender();
-        PixelWriteService service = new PixelWriteService(eventSeqManager, walAppender, board);
+        PixelWriteService service = readyService(eventSeqManager, walAppender, board);
 
         PixelWriteResult first = service.writePixel(7L, 768, 1280, 17);
         PixelWriteResult second = service.writePixel(7L, 1024, 1280, 18);
@@ -136,7 +305,7 @@ class PixelWriteServiceTest {
         EventSeqManager eventSeqManager = new EventSeqManager();
         InMemoryTileBoard board = initializedBoard();
         RecordingWalAppender walAppender = new RecordingWalAppender();
-        PixelWriteService service = new PixelWriteService(eventSeqManager, walAppender, board);
+        PixelWriteService service = readyService(eventSeqManager, walAppender, board);
 
         assertThrows(IllegalArgumentException.class, () -> service.writePixel(0L, 768, 1280, 17));
 
@@ -162,7 +331,7 @@ class PixelWriteServiceTest {
         EventSeqManager eventSeqManager = new EventSeqManager();
         InMemoryTileBoard board = initializedBoard();
         RecordingWalAppender walAppender = new RecordingWalAppender();
-        PixelWriteService service = new PixelWriteService(eventSeqManager, walAppender, board);
+        PixelWriteService service = readyService(eventSeqManager, walAppender, board);
 
         PixelWriteResult result = service.writePixel(
                 7L,
@@ -182,7 +351,7 @@ class PixelWriteServiceTest {
         EventSeqManager eventSeqManager = new EventSeqManager();
         InMemoryTileBoard board = initializedBoard();
         RecordingWalAppender walAppender = new RecordingWalAppender();
-        PixelWriteService service = new PixelWriteService(eventSeqManager, walAppender, board);
+        PixelWriteService service = readyService(eventSeqManager, walAppender, board);
 
         assertThrows(IllegalArgumentException.class, () -> service.writePixel(userId, x, y, color));
 
@@ -196,6 +365,44 @@ class PixelWriteServiceTest {
         return board;
     }
 
+    private PixelWriteService readyService(
+            EventSeqManager eventSeqManager,
+            WalAppender walAppender,
+            InMemoryTileBoard board
+    ) {
+        return new PixelWriteService(eventSeqManager, walAppender, board, readyReadiness());
+    }
+
+    private ServiceReadiness readyReadiness() {
+        ServiceReadiness readiness = new ServiceReadiness();
+        readiness.markReady();
+        return readiness;
+    }
+
+    private void captureFailure(AtomicReference<Throwable> target, Runnable action) {
+        try {
+            action.run();
+            fail("Expected write to fail.");
+        } catch (Throwable throwable) {
+            target.set(throwable);
+        }
+    }
+
+    private void awaitBlockedOnWriteMonitor(Thread thread) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (thread.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        if (thread.getState() != Thread.State.BLOCKED) {
+            fail("Waiting write did not block on PixelWriteService monitor.");
+        }
+    }
+
+    private void join(Thread thread) throws InterruptedException {
+        thread.join(TimeUnit.SECONDS.toMillis(5));
+        assertFalse(thread.isAlive());
+    }
+
     private static class RecordingWalAppender implements WalAppender {
 
         private final List<WalRecord> records = new ArrayList<>();
@@ -203,14 +410,6 @@ class PixelWriteServiceTest {
         @Override
         public void appendAndFsync(WalRecord record) {
             records.add(record);
-        }
-    }
-
-    private static class FailingWalAppender implements WalAppender {
-
-        @Override
-        public void appendAndFsync(WalRecord record) {
-            throw new IllegalStateException("WAL fsync failed.");
         }
     }
 

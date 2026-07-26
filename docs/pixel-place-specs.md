@@ -92,20 +92,37 @@
 
 ## 4) 인증 / 로그인 방향
 
-### 카카오 로그인
-- Spring Security OAuth2 Client로 **카카오 OAuth2 로그인(Authorization Code)** 을 처리한다.
-
-### 서비스 인증 목표
-- 최종 목표는 **JWT 기반 인증**
-- 흐름:
-    1. 카카오 로그인 성공
-    2. 서버가 카카오 userinfo 조회
-    3. 서버가 자체 JWT(access / refresh) 발급
-    4. 이후 API / WebSocket은 우리 JWT로 인증
-
 ### 현재 단계
-- JWT 발급/리프레시 로직은 **후속 구현**
-- 대신 검증 기반 구조를 위해 Resource Server 의존성은 포함한다.
+- 현재 application-level 사용자 식별은 임시 `X-User-Id` header를 사용한다.
+- 이는 실제 인증이 아니며, 최종 카카오 OAuth2 + 서비스 JWT 구현 전의 개발용 식별 방식이다.
+- 현재 Spring Security filter의 실제 동작은 configuration과 실행 결과를 별도로 확인한다.
+
+### 최종 로그인 진입점
+- 사용자 로그인은 **카카오 OAuth2 Authorization Code 방식만 사용**한다.
+- 자체 아이디/비밀번호 회원가입·로그인은 별도 설계 없이 추가하지 않는다.
+
+### 최종 서비스 인증 흐름
+1. Spring Security OAuth2 Client로 카카오 로그인을 처리한다.
+2. 카카오 userinfo에서 `kakaoUserId`를 확인한다.
+3. `users` 테이블에서 해당 카카오 계정과 매핑된 내부 사용자를 조회하거나 신규 생성한다.
+4. pixel-place 서비스용 Access JWT와 Refresh Token을 발급한다.
+5. Access JWT의 `sub`에는 내부 `users.id`를 문자열로 저장한다.
+6. `POST /api/pixels`에서 서비스 Access JWT를 검증한다.
+7. JWT principal에서 내부 `userId`를 획득한다.
+8. 내부 `userId`로 Redis cooldown을 확인한다.
+9. 승인된 픽셀 변경과 WAL record에 내부 `userId`를 사용한다.
+10. flush 시 `pixel_events.user_id`에 내부 `users.id`를 저장한다.
+
+### 토큰 책임 구분
+- 카카오 OAuth access token: 카카오 로그인과 userinfo 확인에 사용한다.
+- 서비스 Access JWT: pixel-place 보호 API 인증에 사용한다.
+- 서비스 Refresh Token: 카카오 재로그인 없이 서비스 Access JWT를 재발급하는 데 사용한다.
+- Refresh Token의 저장, 만료, rotation, 재사용 탐지, 로그아웃·폐기 정책은 13단계에서 확정한다.
+
+### 금지
+- Access JWT `sub`에 `kakaoUserId`를 저장하여 내부 `users.id`와 혼용하지 않는다.
+- request body의 `userId`를 인증 정보로 신뢰하지 않는다.
+- 카카오 OAuth token을 pixel-place API의 장기 인증 토큰으로 그대로 사용하지 않는다.
 
 ---
 
@@ -134,7 +151,7 @@
 
 #### 응답 예시
     {
-      "size": 8192,
+      "boardSize": 8192,
       "tileSize": 256,
       "paletteSize": 256,
       "palette": ["#FFFFFF", "#000000", "..."],
@@ -397,8 +414,11 @@
 - 캐시 정책 보강
 
 ### Phase 6. 인증 추가
-- 카카오 OAuth2 로그인
-- JWT 발급 / 검증 연결
+- 카카오 OAuth2 Authorization Code 로그인
+- `kakaoUserId`와 내부 `users.id` 매핑
+- 서비스 Access JWT + Refresh Token 발급
+- Access JWT `sub`에 내부 `users.id` 저장
+- JWT principal의 내부 userId로 cooldown/WAL/pixel_events 연결
 
 ### Phase 7. 고도화
 - 스냅샷 / 리플레이

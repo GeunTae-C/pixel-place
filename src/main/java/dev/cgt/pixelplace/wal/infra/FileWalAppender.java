@@ -18,8 +18,9 @@ import java.util.Objects;
 /*
  * active WAL 파일에 승인 이벤트를 append하고 fsync까지 수행하는 파일 기반 writer
  *
- * WAL은 성공한 write의 1차 내구성 원본이므로 append + fsync가 끝나기 전에는 write 성공으로 볼 수 없음
+ * WAL은 승인 write의 1차 내구성 원본이며 모든 성공 append는 FileChannel.force(true) 완료를 경계로 삼음
  * 이 클래스가 실패를 던지면 이후 write path는 메모리 board 반영, Redis cooldown, broadcast 단계로 진행하면 안됨
+ * write 또는 force의 I/O 결과가 불확실해지면 poison 상태로 전환하여 같은 프로세스의 추가 append를 차단함
  *
  * append는 하나의 FileChannel을 공유하므로 직렬화되어야 함
  * 여러 스레드가 동시에 파일 끝 위치를 계산하면 JSON Lines 순서가 섞이거나 partial line이 생길 수 있기 때문
@@ -35,7 +36,8 @@ public class FileWalAppender implements WalAppender {
     private final WalRecordJsonCodec walRecordJsonCodec;
 
     private FileChannel channel;
-    private boolean firstAppendRequiresMetadataForce;
+    private boolean poisoned;
+    private IOException poisonCause;
 
     public FileWalAppender(WalProperties walProperties, WalRecordJsonCodec walRecordJsonCodec) {
         this.walProperties = walProperties;
@@ -43,11 +45,12 @@ public class FileWalAppender implements WalAppender {
     }
 
     /*
-     * WalRecord 1건을 active WAL 끝에 append하고 fsync까지 완료함
-     * fsync 실패는 WAL 실패이며 eventSeq gap은 허용되지만 해당 write는 성공으로 처리하면 안됨
+     * WalRecord 1건을 active WAL 끝에 append하고 force(true)까지 완료함
+     * I/O 실패 뒤 partial tail 여부를 확정할 수 없으므로 poison 전환 후 재시작 recovery 전까지 추가 append 차단
      */
     @Override
     public synchronized void appendAndFsync(WalRecord record) {
+        ensureNotPoisoned();
         Objects.requireNonNull(record, "record must not be null");
 
         byte[] line = walRecordJsonCodec.serializeLine(record);
@@ -61,34 +64,42 @@ public class FileWalAppender implements WalAppender {
                 openChannel.write(buffer);
             }
 
-            boolean metadata = shouldForceMetadata();
-            openChannel.force(metadata);
-            markForceSucceeded(metadata);
+            // 파일 내용과 파일 metadata force 완료가 현재 durable WAL tail의 application-level 경계
+            openChannel.force(true);
         } catch (IOException e) {
-            /*
-             * write 중 IOException이 발생하면 파일 끝에 partial line이 남을 수 있음
-             * 현재 정책은 boot recovery에서 잘못된 JSON Lines를 실패로 감지하는 것이며,
-             * 여기서 truncate 복구는 구현하지 않음
-             */
-            throw new IllegalStateException("Failed to append and fsync WAL record. path=" + walProperties.getActiveFile(), e);
+            poisoned = true;
+            poisonCause = e;
+            closeChannelAfterFailure(e);
+
+            // 실패한 마지막 record의 존재 여부가 불명확하므로 자동 복구 없이 fail-stop 전환
+            throw new IllegalStateException(
+                    "Failed to append and fsync WAL record. WAL appender is poisoned and requires restart recovery. path="
+                            + walProperties.getActiveFile(),
+                    e
+            );
         }
     }
 
-    /*
-     * 새 WAL 파일의 첫 append는 파일 생성 메타데이터까지 내구화해야 하므로 force(true)가 필요함
-     * 기존 파일에 이어 쓰는 일반 append는 파일 내용 내구화가 목적이라 force(false)를 사용함
-     */
-    boolean shouldForceMetadata() {
-        return firstAppendRequiresMetadataForce;
+    private void ensureNotPoisoned() {
+        if (poisoned) {
+            // partial WAL 뒤에 새 JSON을 이어 쓰면 active WAL 전체 복구 경계가 무너질 수 있음
+            throw new IllegalStateException(
+                    "WAL appender is poisoned. Restart and recovery are required.",
+                    poisonCause
+            );
+        }
     }
 
-    boolean shouldForceMetadataAfterOpen(boolean newFile) {
-        return newFile;
-    }
+    private void closeChannelAfterFailure(IOException originalFailure) {
+        if (channel == null) {
+            return;
+        }
 
-    private void markForceSucceeded(boolean metadata) {
-        if (metadata) {
-            firstAppendRequiresMetadataForce = false;
+        try {
+            channel.close();
+        } catch (IOException closeFailure) {
+            // close 실패가 최초 write/force 실패 원인을 덮지 않도록 suppressed로 보존
+            originalFailure.addSuppressed(closeFailure);
         }
     }
 
@@ -109,15 +120,18 @@ public class FileWalAppender implements WalAppender {
             throw new IllegalStateException("Active WAL path is a directory. path=" + activeFile);
         }
 
-        boolean newFile = Files.notExists(activeFile);
-        channel = FileChannel.open(
+        channel = openFileChannel(
                 activeFile,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.WRITE,
                 StandardOpenOption.READ
         );
-        firstAppendRequiresMetadataForce = shouldForceMetadataAfterOpen(newFile);
         return channel;
+    }
+
+    // 저수준 write/force/close 실패와 동시성 경계 검증을 위한 package-private test seam
+    FileChannel openFileChannel(Path activeFile, StandardOpenOption... options) throws IOException {
+        return FileChannel.open(activeFile, options);
     }
 
     /*

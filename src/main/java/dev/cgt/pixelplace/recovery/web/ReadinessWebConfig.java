@@ -5,8 +5,8 @@ import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /*
- * recovery readiness guard를 현재 구현된 HTTP API 경계에만 연결하는 MVC 설정
- * actuator, error endpoint, 정적 리소스는 startup recovery 차단 대상에서 제외
+ * startup recovery와 runtime fatal 상태를 차단하는 readiness guard의 MVC 연결 설정
+ * 현재 구현된 보호 API만 연결하며 actuator, error endpoint, 정적 리소스로 범위를 확장하지 않음
  */
 @Configuration
 public class ReadinessWebConfig implements WebMvcConfigurer {

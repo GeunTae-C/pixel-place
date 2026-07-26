@@ -42,6 +42,7 @@ out/
 
 *.sql
 *.yml
+*.zip
 
 셀프백업/
 /codex-instruction.md

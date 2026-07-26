@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.recovery.web;
 
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
+import dev.cgt.pixelplace.recovery.application.ServiceNotReadyException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpStatus;
@@ -12,13 +13,14 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 /*
- * startup recovery 완료 전 read/write HTTP API 진입 차단용 공통 guard
- * 불완전한 메모리 authoritative state 노출과 recovery 중 write 순서 충돌 방지
+ * startup recovery 미완료와 runtime fatal/not-ready 상태의 HTTP API 진입 차단용 공통 guard
+ * WAL durable tail과 memory authoritative state 불일치 상태의 read/write 노출 방지
  */
 @Component
 public class ReadinessGuardInterceptor implements HandlerInterceptor {
 
-    private static final String NOT_READY_RESPONSE_BODY = "{\"message\":\"Service is not ready.\"}";
+    private static final String NOT_READY_RESPONSE_BODY =
+            "{\"message\":\"" + ServiceNotReadyException.MESSAGE + "\"}";
 
     private final ServiceReadiness serviceReadiness;
 
@@ -27,8 +29,8 @@ public class ReadinessGuardInterceptor implements HandlerInterceptor {
     }
 
     /*
-     * recovery 완료 여부 확인 후 controller 진입 허용
-     * ready 전 요청은 부분 복구 상태를 읽거나 변경할 수 있으므로 이 경계에서 503 처리
+     * 현재 서비스 안전 상태 확인 후 controller 진입 허용
+     * recovery 미완료 또는 runtime fatal 상태의 요청은 불일치 상태를 노출할 수 있으므로 이 경계에서 503 처리
      */
     @Override
     public boolean preHandle(

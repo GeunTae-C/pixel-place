@@ -1,13 +1,15 @@
 package dev.cgt.pixelplace.pixel.application;
 
+import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import dev.cgt.pixelplace.tile.application.DirtyTileTracker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /*
- * pixel write command orchestration service
- * cooldown 정책을 core write 앞뒤에 배치하고 WAL-first write 순서는 PixelWriteService에 보존
+ * pixel write command orchestration과 HTTP accepted 전 후처리 경계 담당
+ * 현재 HTTP accepted는 core write와 dirty mark 성공까지이며 DB flush 완료를 요구하지 않음
+ * cooldown start 실패와 broadcast 실패는 이미 완료된 write를 취소하지 않으며, WAL-first 순서는 PixelWriteService에서 보존된다
  */
 @Service
 public class PixelCommandService {
@@ -18,24 +20,29 @@ public class PixelCommandService {
     private final PixelWriteService pixelWriteService;
     private final DirtyTileTracker dirtyTileTracker;
     private final PixelBroadcastService pixelBroadcastService;
+    private final ServiceReadiness serviceReadiness;
 
     public PixelCommandService(
             PixelCooldown pixelCooldown,
             PixelWriteService pixelWriteService,
             DirtyTileTracker dirtyTileTracker,
-            PixelBroadcastService pixelBroadcastService
+            PixelBroadcastService pixelBroadcastService,
+            ServiceReadiness serviceReadiness
     ) {
         this.pixelCooldown = pixelCooldown;
         this.pixelWriteService = pixelWriteService;
         this.dirtyTileTracker = dirtyTileTracker;
         this.pixelBroadcastService = pixelBroadcastService;
+        this.serviceReadiness = serviceReadiness;
     }
 
     /*
-     * 사용자 cooldown 확인 후 승인 가능한 요청만 core write path로 전달
-     * cooldown 시작은 WAL fsync와 memory apply 성공 이후에만 수행
+     * 이미 not-ready인 요청을 application validation과 Redis 접근 전에 차단한 뒤 승인 가능한 요청만 core write로 전달
+     * 현재 HTTP accepted는 core write와 dirty mark 성공까지 요구하며 cooldown/broadcast는 완료 write의 후처리
      */
     public PixelWriteResult writePixel(long userId, int x, int y, int color) {
+        serviceReadiness.requireReady();
+
         validateUserId(userId);
 
         pixelCooldown.checkWritable(userId);
@@ -76,8 +83,8 @@ public class PixelCommandService {
             );
         } catch (RuntimeException exception) {
             /*
-             * WAL fsync와 memory apply 이후 dirty 추적 실패
-             * flush/checkpoint 정합성에 필요한 후처리 실패이므로 성공 응답으로 숨기면 안 됨
+             * WAL fsync와 memory apply 이후 보조 dirty 추적 실패
+             * flush source of truth는 WAL이지만 현재 HTTP accepted 계약에는 dirty mark 성공도 필요
              */
             throw new IllegalStateException(
                     "Dirty tile mark failed after successful write. eventSeq=" + result.eventSeq(),

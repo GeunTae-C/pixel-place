@@ -1,8 +1,12 @@
 package dev.cgt.pixelplace.pixel.application;
 
 import dev.cgt.pixelplace.common.constant.BoardConstants;
+import dev.cgt.pixelplace.recovery.application.ServiceNotReadyException;
+import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import dev.cgt.pixelplace.tile.application.DirtyTileTracker;
+import dev.cgt.pixelplace.tile.domain.InMemoryTileBoard;
 import dev.cgt.pixelplace.tile.domain.TileKey;
+import dev.cgt.pixelplace.wal.application.WalAppender;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
@@ -13,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -32,11 +37,13 @@ class PixelCommandServiceTest {
     private final PixelWriteService pixelWriteService = mock(PixelWriteService.class);
     private final DirtyTileTracker dirtyTileTracker = mock(DirtyTileTracker.class);
     private final PixelBroadcastService pixelBroadcastService = mock(PixelBroadcastService.class);
+    private final ServiceReadiness serviceReadiness = readyReadiness();
     private final PixelCommandService service = new PixelCommandService(
             pixelCooldown,
             pixelWriteService,
             dirtyTileTracker,
-            pixelBroadcastService
+            pixelBroadcastService,
+            serviceReadiness
     );
 
     @Test
@@ -67,7 +74,7 @@ class PixelCommandServiceTest {
     }
 
     @Test
-    // dirty mark 인자는 flush checkpoint 기준 eventSeq와 tile snapshot 기준 tileVersion 모두 필요
+    // dirty mark 인자는 실패 재등록과 추가 snapshot 병합용 최신 eventSeq/tileVersion 관측값 모두 필요
     void writePixelPassesTileKeyEventSeqAndTileVersionToDirtyTracker() {
         PixelWriteResult result = result();
         when(pixelWriteService.writePixel(7L, 768, 1280, 17)).thenReturn(result);
@@ -75,6 +82,58 @@ class PixelCommandServiceTest {
         service.writePixel(7L, 768, 1280, 17);
 
         verify(dirtyTileTracker).markDirty(result.tileKey(), result.eventSeq(), result.tileVersion());
+    }
+
+    @Test
+    // 이미 not-ready인 command는 userId 검증과 Redis를 포함한 모든 write orchestration 진입 금지
+    void writePixelRejectsNotReadyBeforeValidationAndAllCollaborators() {
+        serviceReadiness.markNotReady();
+
+        ServiceNotReadyException exception = assertThrows(
+                ServiceNotReadyException.class,
+                () -> service.writePixel(0L, 768, 1280, 17)
+        );
+
+        assertEquals(ServiceNotReadyException.MESSAGE, exception.getMessage());
+        verifyNoInteractions(pixelCooldown, pixelWriteService, dirtyTileTracker, pixelBroadcastService);
+    }
+
+    @Test
+    // command 검사 직후 fatal 전환과 경쟁한 요청은 core 내부 재검사에서 eventSeq/WAL/memory 이전 차단
+    void writePixelIsBlockedByCoreRecheckWhenReadinessChangesAfterCommandCheck() {
+        ServiceReadiness readiness = readyReadiness();
+        PixelCooldown cooldown = mock(PixelCooldown.class);
+        EventSeqManager eventSeqManager = mock(EventSeqManager.class);
+        WalAppender walAppender = mock(WalAppender.class);
+        InMemoryTileBoard board = mock(InMemoryTileBoard.class);
+        PixelWriteService realWriteService = new PixelWriteService(
+                eventSeqManager,
+                walAppender,
+                board,
+                readiness
+        );
+        DirtyTileTracker tracker = mock(DirtyTileTracker.class);
+        PixelBroadcastService broadcaster = mock(PixelBroadcastService.class);
+        PixelCommandService commandService = new PixelCommandService(
+                cooldown,
+                realWriteService,
+                tracker,
+                broadcaster,
+                readiness
+        );
+        doAnswer(invocation -> {
+            readiness.markNotReady();
+            return null;
+        }).when(cooldown).checkWritable(7L);
+
+        assertThrows(
+                ServiceNotReadyException.class,
+                () -> commandService.writePixel(7L, 768, 1280, 17)
+        );
+
+        verify(cooldown).checkWritable(7L);
+        verify(cooldown, never()).startCooldown(7L);
+        verifyNoInteractions(eventSeqManager, walAppender, board, tracker, broadcaster);
     }
 
     @Test
@@ -220,5 +279,11 @@ class PixelCommandServiceTest {
                 1280,
                 17
         );
+    }
+
+    private static ServiceReadiness readyReadiness() {
+        ServiceReadiness readiness = new ServiceReadiness();
+        readiness.markReady();
+        return readiness;
     }
 }

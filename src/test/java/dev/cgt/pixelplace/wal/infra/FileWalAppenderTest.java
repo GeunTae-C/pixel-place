@@ -9,15 +9,38 @@ import org.junit.jupiter.api.io.TempDir;
 import tools.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 // 파일 WAL appender는 append + fsync 성공을 write 내구성 경계로 삼으므로 실제 임시 파일에 기록해 검증함
 class FileWalAppenderTest {
@@ -96,11 +119,22 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // null record는 내구성 원본에 쓸 수 있는 승인 이벤트가 아니므로 파일 접근 전에 거부함
-    void appendAndFsyncRejectsNullRecord() {
-        FileWalAppender appender = appender(tempDir.resolve("active.wal"));
+    // null 입력은 파일 접근 전 거부하되 I/O poison 원인으로 취급하지 않아 후속 정상 append 허용
+    void nullRecordDoesNotAccessWalOrPoisonAppender() throws IOException {
+        FileChannel channel = writableChannel();
+        AtomicInteger openCount = new AtomicInteger();
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, openCount);
 
         assertThrows(NullPointerException.class, () -> appender.appendAndFsync(null));
+
+        assertEquals(0, openCount.get());
+        verifyNoInteractions(channel);
+
+        appender.appendAndFsync(record(1L));
+
+        assertEquals(1, openCount.get());
+        verify(channel).write(any(ByteBuffer.class));
+        verify(channel).force(true);
     }
 
     @Test
@@ -121,37 +155,324 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // 새 WAL 파일 첫 append는 파일 생성 메타데이터 내구화를 위해 force(true) 정책을 선택함
-    void forcePolicyUsesMetadataForceForNewWalFile() {
-        FileWalAppender appender = appender(tempDir.resolve("new.wal"));
+    void writeIOExceptionIsPropagated() throws IOException {
+        FileChannel channel = writableChannel();
+        IOException writeFailure = new IOException("write failed");
+        when(channel.write(any(ByteBuffer.class))).thenThrow(writeFailure);
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
 
-        assertTrue(appender.shouldForceMetadataAfterOpen(true));
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class,
+                () -> appender.appendAndFsync(record(1L))
+        );
+
+        assertSame(writeFailure, exception.getCause());
     }
 
     @Test
-    // 기존 WAL 파일 append는 파일 내용 내구화만 필요하므로 force(false) 정책을 선택함
-    void forcePolicyUsesContentForceForExistingWalFile() {
-        FileWalAppender appender = appender(tempDir.resolve("existing.wal"));
+    void forceIOExceptionIsPropagated() throws IOException {
+        FileChannel channel = writableChannel();
+        IOException forceFailure = new IOException("force failed");
+        doThrow(forceFailure).when(channel).force(true);
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
 
-        assertFalse(appender.shouldForceMetadataAfterOpen(false));
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class,
+                () -> appender.appendAndFsync(record(1L))
+        );
+
+        assertSame(forceFailure, exception.getCause());
     }
 
     @Test
-    // 새 파일 첫 fsync가 성공한 뒤에는 이후 append가 force(false) 경로로 넘어가야 함
-    void firstMetadataForceIsClearedAfterSuccessfulAppend() {
-        Path wal = tempDir.resolve("active.wal");
-        FileWalAppender appender = appender(wal);
+    // I/O 실패 후 partial tail 뒤에 새 JSON append 차단
+    void ioFailurePoisonsAppenderAndNextAppendFailsImmediately() throws IOException {
+        FileChannel channel = writableChannel();
+        doThrow(new IOException("force failed")).when(channel).force(true);
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
+
+        assertThrows(IllegalStateException.class, () -> appender.appendAndFsync(record(1L)));
+
+        IllegalStateException poisonedFailure = assertThrows(
+                IllegalStateException.class,
+                () -> appender.appendAndFsync(record(2L))
+        );
+        assertTrue(poisonedFailure.getMessage().contains("poisoned"));
+    }
+
+    @Test
+    void poisonedAppenderDoesNotReopenWalChannel() throws IOException {
+        FileChannel channel = writableChannel();
+        doThrow(new IOException("force failed")).when(channel).force(true);
+        AtomicInteger openCount = new AtomicInteger();
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, openCount);
+
+        assertThrows(IllegalStateException.class, () -> appender.appendAndFsync(record(1L)));
+        assertThrows(IllegalStateException.class, () -> appender.appendAndFsync(record(2L)));
+
+        assertEquals(1, openCount.get());
+    }
+
+    @Test
+    void firstIoFailureRemainsExceptionCause() throws IOException {
+        FileChannel channel = writableChannel();
+        IOException firstFailure = new IOException("first force failed");
+        doThrow(firstFailure).when(channel).force(true);
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
+
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class,
+                () -> appender.appendAndFsync(record(1L))
+        );
+
+        assertSame(firstFailure, exception.getCause());
+    }
+
+    @Test
+    // close 실패가 최초 write/force 실패를 대체하지 않고 suppressed로 보존되는 경계
+    void closeFailureKeepsFirstIoFailureAsCauseAndSuppressedDetail() throws IOException {
+        FileChannel channel = writableChannel();
+        IOException forceFailure = new IOException("force failed");
+        IOException closeFailure = new IOException("close failed");
+        doThrow(forceFailure).when(channel).force(true);
+        doThrow(closeFailure).when(channel).close();
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
+
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class,
+                () -> appender.appendAndFsync(record(1L))
+        );
+
+        assertSame(forceFailure, exception.getCause());
+        assertEquals(1, forceFailure.getSuppressed().length);
+        assertSame(closeFailure, forceFailure.getSuppressed()[0]);
+    }
+
+    @Test
+    void poisonedAppendDoesNotAccessChannel() throws IOException {
+        FileChannel channel = writableChannel();
+        doThrow(new IOException("force failed")).when(channel).force(true);
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
+        assertThrows(IllegalStateException.class, () -> appender.appendAndFsync(record(1L)));
+        clearInvocations(channel);
+
+        assertThrows(IllegalStateException.class, () -> appender.appendAndFsync(record(2L)));
+
+        verifyNoInteractions(channel);
+    }
+
+    @Test
+    // 동일 channel의 write/force가 append monitor 안에서 직렬화되는지 검증
+    void concurrentAppendsAreSerialized() throws Exception {
+        FileChannel channel = writableChannel();
+        CountDownLatch firstWriteEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstWrite = new CountDownLatch(1);
+        CountDownLatch secondCallStarted = new CountDownLatch(1);
+        AtomicInteger writeCount = new AtomicInteger();
+        AtomicReference<Thread> secondThread = new AtomicReference<>();
+        when(channel.write(any(ByteBuffer.class))).thenAnswer(invocation -> {
+            int currentWrite = writeCount.incrementAndGet();
+            if (currentWrite == 1) {
+                firstWriteEntered.countDown();
+                assertTrue(releaseFirstWrite.await(5, TimeUnit.SECONDS));
+            }
+            return consume(invocation.getArgument(0));
+        });
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<?> first = executor.submit(() -> appender.appendAndFsync(record(1L)));
+            assertTrue(firstWriteEntered.await(5, TimeUnit.SECONDS));
+
+            Future<?> second = executor.submit(() -> {
+                secondThread.set(Thread.currentThread());
+                secondCallStarted.countDown();
+                appender.appendAndFsync(record(2L));
+            });
+            assertTrue(secondCallStarted.await(5, TimeUnit.SECONDS));
+            awaitBlockedOnAppenderMonitor(secondThread.get());
+            assertEquals(1, writeCount.get());
+
+            releaseFirstWrite.countDown();
+            first.get(5, TimeUnit.SECONDS);
+            second.get(5, TimeUnit.SECONDS);
+            assertEquals(2, writeCount.get());
+        } finally {
+            releaseFirstWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    // 선행 thread poison 이후 monitor 대기 thread의 channel 진입 차단
+    void waitingAppendFailsAtPoisonCheckWithoutStartingChannelWrite() throws Exception {
+        FileChannel channel = writableChannel();
+        IOException writeFailure = new IOException("write failed");
+        CountDownLatch firstWriteEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstWrite = new CountDownLatch(1);
+        CountDownLatch secondCallStarted = new CountDownLatch(1);
+        AtomicReference<Thread> secondThread = new AtomicReference<>();
+        when(channel.write(any(ByteBuffer.class))).thenAnswer(invocation -> {
+            firstWriteEntered.countDown();
+            assertTrue(releaseFirstWrite.await(5, TimeUnit.SECONDS));
+            throw writeFailure;
+        });
+        AtomicInteger openCount = new AtomicInteger();
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, openCount);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<?> first = executor.submit(() -> appender.appendAndFsync(record(1L)));
+            assertTrue(firstWriteEntered.await(5, TimeUnit.SECONDS));
+
+            Future<?> second = executor.submit(() -> {
+                secondThread.set(Thread.currentThread());
+                secondCallStarted.countDown();
+                appender.appendAndFsync(record(2L));
+            });
+            assertTrue(secondCallStarted.await(5, TimeUnit.SECONDS));
+            awaitBlockedOnAppenderMonitor(secondThread.get());
+            verify(channel, times(1)).write(any(ByteBuffer.class));
+
+            releaseFirstWrite.countDown();
+            ExecutionException firstException = assertThrows(
+                    ExecutionException.class,
+                    () -> first.get(5, TimeUnit.SECONDS)
+            );
+            ExecutionException secondException = assertThrows(
+                    ExecutionException.class,
+                    () -> second.get(5, TimeUnit.SECONDS)
+            );
+
+            assertSame(writeFailure, firstException.getCause().getCause());
+            assertTrue(secondException.getCause().getMessage().contains("poisoned"));
+            verify(channel, times(1)).write(any(ByteBuffer.class));
+            assertEquals(1, openCount.get());
+        } finally {
+            releaseFirstWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void newWalFirstAppendUsesForceTrue() throws IOException {
+        FileChannel channel = writableChannel();
+        FileWalAppender appender = controlledAppender(tempDir.resolve("new.wal"), channel, new AtomicInteger());
 
         appender.appendAndFsync(record(1L));
 
-        assertFalse(appender.shouldForceMetadata());
-        appender.close();
+        verify(channel).force(true);
+    }
+
+    @Test
+    void existingWalAppendUsesForceTrue() throws IOException {
+        Path wal = tempDir.resolve("existing.wal");
+        Files.writeString(wal, "");
+        FileChannel channel = writableChannel();
+        FileWalAppender appender = controlledAppender(wal, channel, new AtomicInteger());
+
+        appender.appendAndFsync(record(1L));
+
+        verify(channel).force(true);
+    }
+
+    @Test
+    void secondAppendOnSameWalAlsoUsesForceTrue() throws IOException {
+        FileChannel channel = writableChannel();
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
+
+        appender.appendAndFsync(record(1L));
+        appender.appendAndFsync(record(2L));
+
+        verify(channel, times(2)).force(true);
+    }
+
+    @Test
+    void successfulAppendNeverUsesForceFalse() throws IOException {
+        FileChannel channel = writableChannel();
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
+
+        appender.appendAndFsync(record(1L));
+
+        verify(channel, never()).force(false);
+    }
+
+    @Test
+    // force(true) 완료 전 append 성공 반환 금지
+    void appendDoesNotReturnBeforeForceTrueCompletes() throws Exception {
+        FileChannel channel = writableChannel();
+        CountDownLatch forceEntered = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            forceEntered.countDown();
+            assertTrue(releaseForce.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(channel).force(true);
+        FileWalAppender appender = controlledAppender(tempDir.resolve("active.wal"), channel, new AtomicInteger());
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+
+        try {
+            Future<?> append = executor.submit(() -> appender.appendAndFsync(record(1L)));
+            assertTrue(forceEntered.await(5, TimeUnit.SECONDS));
+            assertFalse(append.isDone());
+
+            releaseForce.countDown();
+            append.get(5, TimeUnit.SECONDS);
+        } finally {
+            releaseForce.countDown();
+            executor.shutdownNow();
+        }
     }
 
     private FileWalAppender appender(Path activeFile) {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
         return new FileWalAppender(properties, new WalRecordJsonCodec(objectMapper));
+    }
+
+    private FileWalAppender controlledAppender(
+            Path activeFile,
+            FileChannel controlledChannel,
+            AtomicInteger openCount
+    ) {
+        WalProperties properties = new WalProperties();
+        properties.setActiveFile(activeFile);
+
+        return new FileWalAppender(properties, new WalRecordJsonCodec(objectMapper)) {
+            @Override
+            FileChannel openFileChannel(Path ignored, StandardOpenOption... options) {
+                openCount.incrementAndGet();
+                return controlledChannel;
+            }
+        };
+    }
+
+    private FileChannel writableChannel() throws IOException {
+        FileChannel channel = mock(FileChannel.class);
+        when(channel.isOpen()).thenReturn(true);
+        when(channel.size()).thenReturn(0L);
+        when(channel.position(anyLong())).thenReturn(channel);
+        when(channel.write(any(ByteBuffer.class))).thenAnswer(
+                invocation -> consume(invocation.getArgument(0))
+        );
+        return channel;
+    }
+
+    private int consume(ByteBuffer buffer) {
+        int remaining = buffer.remaining();
+        buffer.position(buffer.limit());
+        return remaining;
+    }
+
+    private void awaitBlockedOnAppenderMonitor(Thread thread) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (thread.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        if (thread.getState() != Thread.State.BLOCKED) {
+            throw new AssertionError("Second append did not block on FileWalAppender monitor.");
+        }
     }
 
     private FileWalReplaySource replaySource(Path activeFile) {

@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.pixel.application;
 
 import dev.cgt.pixelplace.common.constant.BoardConstants;
+import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import dev.cgt.pixelplace.tile.domain.InMemoryTileBoard;
 import dev.cgt.pixelplace.tile.domain.TileMutationResult;
 import dev.cgt.pixelplace.wal.application.WalAppender;
@@ -10,9 +11,9 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 
 /*
- * HTTP controller가 붙기 전 write path의 핵심 순서를 고정하는 application service
- * write 성공의 1차 내구성 기준은 DB가 아니라 WAL append + fsync 성공이며,
- * 메모리 authoritative state는 WAL fsync가 성공한 뒤에만 변경함
+ * write core의 validation, eventSeq, WAL, memory apply 순서를 고정하는 application service
+ * WAL append + fsync는 1차 내구성 경계이며 core write 완료에는 memory authoritative state 반영도 필요
+ * WAL 또는 memory fatal 뒤에는 not-ready 전환으로 같은 프로세스의 후속 core write 차단
  */
 @Service
 public class PixelWriteService {
@@ -20,31 +21,59 @@ public class PixelWriteService {
     private final EventSeqManager eventSeqManager;
     private final WalAppender walAppender;
     private final InMemoryTileBoard inMemoryTileBoard;
+    private final ServiceReadiness serviceReadiness;
 
     public PixelWriteService(
             EventSeqManager eventSeqManager,
             WalAppender walAppender,
-            InMemoryTileBoard inMemoryTileBoard
+            InMemoryTileBoard inMemoryTileBoard,
+            ServiceReadiness serviceReadiness
     ) {
         this.eventSeqManager = eventSeqManager;
         this.walAppender = walAppender;
         this.inMemoryTileBoard = inMemoryTileBoard;
+        this.serviceReadiness = serviceReadiness;
     }
 
     /*
-     * 승인된 픽셀 write 1건을 처리함
+     * 승인 가능한 픽셀 write 1건의 WAL 1차 내구성과 memory 반영 처리
      * eventSeq 발급, WAL fsync, memory apply 순서가 서로 끼어들면 WAL 순서와 메모리 반영 순서가 달라질 수 있으므로
      * MVP에서는 service 메서드 전체를 직렬화해 승인 순서를 명확히 고정함
      */
     public synchronized PixelWriteResult writePixel(long userId, int x, int y, int color) {
+        // monitor 대기 중 앞선 write가 fatal 전환했으면 validation이나 eventSeq 발급 전 차단
+        serviceReadiness.requireReady();
+
         validateWriteRequest(userId, x, y, color);
 
         long eventSeq = eventSeqManager.allocate();
         WalRecord record = createWalRecord(eventSeq, userId, x, y, color);
 
-        walAppender.appendAndFsync(record);
+        try {
+            walAppender.appendAndFsync(record);
+        } catch (RuntimeException exception) {
+            // WAL 결과가 불확실한 최초 요청은 내부 실패로 전파하고 후속 요청만 not-ready로 차단
+            serviceReadiness.markNotReady();
+            throw new IllegalStateException(
+                    "WAL append/fsync failed. Service was marked not ready and requires recovery. eventSeq="
+                            + eventSeq,
+                    exception
+            );
+        }
 
-        TileMutationResult mutationResult = inMemoryTileBoard.applyPixel(x, y, color);
+        TileMutationResult mutationResult;
+        try {
+            mutationResult = inMemoryTileBoard.applyPixel(x, y, color);
+        } catch (RuntimeException exception) {
+            // durable WAL record와 memory 상태 불일치에서는 새 write와 새 flush plan을 허용할 수 없음
+            serviceReadiness.markNotReady();
+            throw new IllegalStateException(
+                    "WAL fsync succeeded but memory apply failed. "
+                            + "Service was marked not ready and requires recovery. eventSeq=" + eventSeq,
+                    exception
+            );
+        }
+
         return new PixelWriteResult(
                 eventSeq,
                 mutationResult.key(),

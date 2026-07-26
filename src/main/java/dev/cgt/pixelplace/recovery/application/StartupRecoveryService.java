@@ -33,7 +33,7 @@ public class StartupRecoveryService {
         = 다음 eventSeq 발급 기준 관리
 
         ServiceReadiness
-        = recovery 전/후 service ready 상태 표시
+        = recovery 완료와 runtime fatal을 함께 표현하는 service 안전 상태
     */
 
     private final CheckpointReader checkpointReader;
@@ -77,7 +77,11 @@ public class StartupRecoveryService {
             inMemoryTileBoard.loadAll(tileLoadResult.snapshots());
         }
 
-        /* DB 반영 완료 마지막 eventSeq 이후 WAL replay */
+        /*
+         * DB 반영 완료 마지막 eventSeq 이후 WAL replay
+         * authoritative memory 복구만 담당하며 DirtyTileTracker를 채우지 않음
+         * 후속 flush의 필수 affected tile 계산은 checkpoint 이후 WAL record 기준
+         */
         WalReplayBatch replayBatch = walReplaySource.readAfter(checkpointSnapshot.lastFlushedEventSeq());
         for (WalRecord record : replayBatch.records()) {
             // WalReplaySource 계약상 records는 이미 lastFlushedEventSeq 초과 이벤트만 담음

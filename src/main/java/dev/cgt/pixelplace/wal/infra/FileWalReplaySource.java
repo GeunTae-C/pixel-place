@@ -9,17 +9,20 @@ import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 
 /*
  * 파일 기반 WAL replay source 구현체
  *
- * 이 클래스의 책임은 active WAL 파일을 처음부터 끝까지 순차적으로 읽고,
- * recovery 단계에서 메모리 tile state에 다시 적용해야 하는 이벤트 목록을 제공하는 것
+ * 이 클래스의 책임은 active WAL 파일을 처음부터 끝까지 순차적으로 검증하고,
+ * startup recovery와 runtime flush가 checkpoint 이후 실제 record를 공유하도록 제공하는 것
  *
  * 중요한 복구 규칙:
  *
@@ -34,10 +37,14 @@ import java.util.List;
  *
  * 3. WAL의 eventSeq는 반드시 strictly increasing 해야 함
  *    - eventSeq는 전역 이벤트 순서
+ *    - gap은 허용하지만 중복과 역순은 허용하지 않음
  *    - 중복되거나 역전된 eventSeq가 발견되면, 어떤 픽셀 쓰기가 먼저인지 신뢰할 수 없음
  *    - 이 경우 잘못된 상태로 서버를 기동하는 것보다 복구를 중단하는 것이 안전함
  *
- * 4. 이 구현체는 active WAL 하나만 읽음
+ * 4. 마지막 record도 newline으로 종료되어야 함
+ *    - 완전한 JSON처럼 보여도 newline이 없으면 durable record 경계를 확정할 수 없음
+ *
+ * 5. 이 구현체는 active WAL 하나만 읽음
  *    - MVP 기준에서는 WAL rotation / segment replay를 다루지 않음
  *    - 추후 WAL segment 구조가 도입되면 이 클래스 또는 별도 구현체에서 확장함
  */
@@ -81,6 +88,9 @@ public class FileWalReplaySource implements WalReplaySource {
         if (!Files.isRegularFile(activeFile)) {
             throw new IllegalStateException("Active WAL is not a regular file. path=" + activeFile);
         }
+
+        // BufferedReader가 newline 없는 마지막 JSON도 반환하므로 parsing 전에 record 경계 검증
+        validateNewlineTermination(activeFile);
 
         List<WalRecord> replayRecords = new ArrayList<>();
         long walLastEventSeq = 0L;
@@ -137,5 +147,36 @@ public class FileWalReplaySource implements WalReplaySource {
          * 파일이 비어 있으면 0, 이벤트가 있으면 마지막 record의 eventSeq가 됨
          */
         return new WalReplayBatch(replayRecords, walLastEventSeq);
+    }
+
+    private void validateNewlineTermination(Path activeFile) {
+        try {
+            long size = Files.size(activeFile);
+            if (size == 0L) {
+                return;
+            }
+
+            try (FileChannel channel = FileChannel.open(activeFile, StandardOpenOption.READ)) {
+                ByteBuffer buffer = ByteBuffer.allocate(1);
+                channel.position(size - 1L);
+
+                int read = channel.read(buffer);
+                if (read != 1) {
+                    // 마지막 byte를 확정하지 못하면 정상 JSON Lines tail로 간주할 수 없음
+                    throw new IllegalStateException("Failed to read the final WAL byte. path=" + activeFile);
+                }
+
+                buffer.flip();
+                if (buffer.get() != (byte) '\n') {
+                    // 미완료 tail 자동 수정이나 truncate 없이 recovery/runtime scan 실패
+                    throw new IllegalStateException("WAL is not newline-terminated. path=" + activeFile);
+                }
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException(
+                    "Failed to validate WAL newline termination. path=" + activeFile,
+                    e
+            );
+        }
     }
 }
