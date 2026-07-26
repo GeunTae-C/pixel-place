@@ -92,37 +92,36 @@
 
 ## 4) 인증 / 로그인 방향
 
-### 현재 단계
-- 현재 application-level 사용자 식별은 임시 `X-User-Id` header를 사용한다.
-- 이는 실제 인증이 아니며, 최종 카카오 OAuth2 + 서비스 JWT 구현 전의 개발용 식별 방식이다.
-- 현재 Spring Security filter의 실제 동작은 configuration과 실행 결과를 별도로 확인한다.
+### 현재 application-level 사용자 식별
+- `POST /api/pixels`는 임시 `X-User-Id` header에서 `userId`를 읽는다.
+- `X-User-Id`는 실제 인증 수단이 아니라 개발 단계의 application-level 식별값이다.
+- request body는 `x`, `y`, `color`만 가지며 `userId`를 받지 않는다.
 
-### 최종 로그인 진입점
+### 현재 HTTP security filter 상태
+- Spring Security, OAuth2 Client, OAuth2 Resource Server starter가 의존성에 포함되어 있다.
+- 현재 명시적인 `SecurityFilterChain`과 `spring.security` 설정은 없다.
+- 따라서 HTTP 및 WebSocket handshake 접근은 Spring Security auto-configuration의 기본 filter chain 영향을 받는다.
+- controller 단위 `standaloneSetup` 테스트는 filter chain을 포함하지 않으므로 공개 접근의 근거가 아니다.
+- `BoardController` 제한 `@WebMvcTest`에서 unauthenticated JSON 요청은 `401`과 HTTP Basic challenge, HTML 요청은 `/login`으로 `302` redirect가 관측되었고, mock 인증 요청은 readiness `503`에 도달했다.
+- 위 진단은 Board MVC slice의 기본 Security filter와 readiness 우선순위만 확인한다. 전체 application context, Tile/Pixel endpoint, 실제 `/ws` handshake 결과는 검증하지 않았다.
+
+### 최종 로그인 진입점과 인증 흐름
 - 사용자 로그인은 **카카오 OAuth2 Authorization Code 방식만 사용**한다.
-- 자체 아이디/비밀번호 회원가입·로그인은 별도 설계 없이 추가하지 않는다.
+- 자체 아이디/비밀번호 회원가입·로그인은 추가하지 않는다.
+1. 카카오 userinfo에서 `kakaoUserId`를 확인한다.
+2. `users` 테이블에서 대응하는 내부 사용자를 조회하거나 생성한다.
+3. pixel-place 서비스용 **Access JWT 하나만** 발급한다.
+4. Access JWT의 `sub`에는 내부 `users.id`를 문자열로 저장한다.
+5. 보호 API는 `Authorization: Bearer <access-jwt>`를 독립적으로 검증한다.
+6. JWT principal의 내부 `userId`를 Redis cooldown, WAL, `pixel_events.user_id`에 사용한다.
 
-### 최종 서비스 인증 흐름
-1. Spring Security OAuth2 Client로 카카오 로그인을 처리한다.
-2. 카카오 userinfo에서 `kakaoUserId`를 확인한다.
-3. `users` 테이블에서 해당 카카오 계정과 매핑된 내부 사용자를 조회하거나 신규 생성한다.
-4. pixel-place 서비스용 Access JWT와 Refresh Token을 발급한다.
-5. Access JWT의 `sub`에는 내부 `users.id`를 문자열로 저장한다.
-6. `POST /api/pixels`에서 서비스 Access JWT를 검증한다.
-7. JWT principal에서 내부 `userId`를 획득한다.
-8. 내부 `userId`로 Redis cooldown을 확인한다.
-9. 승인된 픽셀 변경과 WAL record에 내부 `userId`를 사용한다.
-10. flush 시 `pixel_events.user_id`에 내부 `users.id`를 저장한다.
-
-### 토큰 책임 구분
-- 카카오 OAuth access token: 카카오 로그인과 userinfo 확인에 사용한다.
-- 서비스 Access JWT: pixel-place 보호 API 인증에 사용한다.
-- 서비스 Refresh Token: 카카오 재로그인 없이 서비스 Access JWT를 재발급하는 데 사용한다.
-- Refresh Token의 저장, 만료, rotation, 재사용 탐지, 로그아웃·폐기 정책은 13단계에서 확정한다.
-
-### 금지
-- Access JWT `sub`에 `kakaoUserId`를 저장하여 내부 `users.id`와 혼용하지 않는다.
-- request body의 `userId`를 인증 정보로 신뢰하지 않는다.
-- 카카오 OAuth token을 pixel-place API의 장기 인증 토큰으로 그대로 사용하지 않는다.
+### 최종 stateless 정책과 토큰 책임
+- 명시적 `SecurityFilterChain`은 13단계에서 구현하며 서버 측 인증 session을 사용하지 않는다.
+- 서비스 Refresh Token은 발급·저장하지 않고, Access JWT 만료 시 카카오 OAuth2 로그인을 다시 수행한다.
+- 카카오 OAuth access token은 카카오 userinfo 확인에만 사용한다.
+- 서비스 Access JWT만 pixel-place 보호 API 인증에 사용한다.
+- Access JWT `sub`에 `kakaoUserId`를 저장하거나 request body의 `userId`를 신뢰하지 않는다.
+- Access JWT 전달·클라이언트 보관 방식과 WebSocket 인증 정책은 13단계에서 함께 확정한다.
 
 ---
 
@@ -153,15 +152,28 @@
     {
       "boardSize": 8192,
       "tileSize": 256,
+      "z": 0,
+      "tileCountX": 32,
+      "tileCountY": 32,
       "paletteSize": 256,
-      "palette": ["#FFFFFF", "#000000", "..."],
+      "palette": ["#000000", "#800000", "#008000", "..."],
       "overviewRefreshSeconds": 10
     }
+
+#### 현재 구현
+- 위 8개 필드를 `BoardInfoResponse`가 반환한다.
+- 배열 순서는 production의 실제 palette index 순서다. 예시는 축약 표기이며 실제 응답은 `paletteSize == palette.size() == 256`을 만족한다.
+- `palette[15] == "#FFFFFF"`이며 빈 보드의 기본 색상 index는 `15`다.
+- controller 자체는 request body나 application-level 사용자 식별값을 사용하지 않는다.
+- 제한 MVC security 진단에서는 unauthenticated JSON `401`, HTML `/login` `302`가 관측되었다. 전체 application context의 실제 접근 결과로 확대 해석하지 않는다.
 
 ### 6.2 전체 보기(Overview)
 - `GET /api/overview`
 
-#### 역할
+#### 현재 구현
+- controller/service가 아직 없어 현재 호출 가능한 API가 아니다.
+
+#### 최종 MVP 목표
 - 보드 전체를 축약한 overview 이미지 반환
 - 탐색용 read-only
 - 최신 상태와 수 초 차이가 있을 수 있음
@@ -179,21 +191,26 @@
 #### 응답
 - 타일 픽셀 데이터 **raw bytes**
 - 포맷: **1 byte/pixel**
-- 타일 1개 원시 크기: `256 × 256 = 65,536 bytes`
+- 압축 전 또는 압축 해제 후 크기: `256 × 256 = 65,536 bytes`
+- HTTP wire body는 gzip 결과이므로 타일 내용에 따라 길이가 달라진다.
 
-#### 전송 방식
-- **gzip/deflate 압축**
-- 캐시 헤더 적용
+#### 현재 응답 헤더
+- `Content-Type: application/octet-stream`
+- `Content-Encoding: gzip`
+- `X-Tile-Version`: 현재 `InMemoryTileBoard`의 실시간 tileVersion
 
-#### 권장 헤더
+#### 후속 cache 목표
 - `ETag`
+- `If-None-Match`
 - `Cache-Control`
-- `X-Tile-Version`
+- `304 Not Modified`
 
 ### 타일 버전 정책
 - 각 타일은 `tileVersion`을 가진다.
 - 해당 타일 내부 픽셀이 변경될 때 `tileVersion`을 증가시킨다.
 - 클라이언트는 mismatch 판단 시 해당 타일만 재요청한다.
+- `X-Tile-Version`은 실시간 메모리 버전이고, DB `tiles.tile_version`은 마지막 flush snapshot 버전이므로 항상 같지는 않다.
+- `tileVersion`은 tile별 버전이고 `eventSeq`는 전체 write의 전역 순서다.
 
 > 타일 포맷은 PNG가 아니라 **raw bytes + gzip** 으로 확정한다.  
 > 이유는 256색 팔레트 구조와 잘 맞고, 서버 인코딩 비용 없이 단순하게 설명 가능하기 때문이다.
@@ -212,19 +229,28 @@
 - 입력 검증
     - 좌표 범위 확인
     - 색상 인덱스 범위 확인
-- 인증 확인
+- 임시 `X-User-Id` application-level 사용자 식별 확인
 - 쿨다운 확인(Redis)
-- 저장
-- 이벤트 로그 추가
+- WAL append + fsync
+- 메모리 타일 반영과 dirty mark
 - WebSocket diff broadcast
 
-#### 응답 권장 예시
+#### 현재 성공 응답 예시
     {
       "accepted": true,
-      "cooldownRemainingMs": 0,
       "eventSeq": 12345,
+      "x": 100,
+      "y": 200,
+      "color": 17,
       "tileVersion": 991
     }
+
+#### 현재 성공 의미
+- WAL append + fsync 성공은 write의 1차 내구성 경계다.
+- core write 완료는 WAL append + fsync와 memory apply가 모두 성공한 상태다.
+- HTTP `200` 성공 응답은 core write와 현재 command 계약상 dirty mark까지 성공한 상태다.
+- DB flush 완료는 HTTP 성공 조건이 아니다.
+- core write 뒤 cooldown start 또는 WebSocket broadcast가 실패해도 완료 write를 취소하지 않는다.
 
 ### 6.5 실시간 업데이트(읽기)
 - **WebSocket endpoint:** `/ws`
@@ -233,7 +259,7 @@
 - **순수 WebSocket(JSON)**
 - STOMP 미사용
 
-### 최소 이벤트 구조 예시
+### 현재 단건 server payload
     {
       "type": "pixel",
       "x": 100,
@@ -242,7 +268,7 @@
       "eventSeq": 12345
     }
 
-### 배치 전송 예시
+### 후속 배치 전송 목표 예시
     {
       "type": "pixels",
       "events": [
@@ -251,12 +277,21 @@
       ]
     }
 
+### 현재 security/readiness 경계
+- WebSocket handler/config 자체에는 application-level 인증 로직이 없다.
+- 실제 `/ws` handshake 접근 제한은 현재 Spring Security filter chain에 따른다.
+- 현재 제한 security 진단에는 WebSocket config/handler가 포함되지 않아 실제 handshake 응답은 미검증이다.
+- MVC `ReadinessGuardInterceptor`는 `/ws` handshake에 직접 적용되지 않는다.
+- not-ready 전환 시 기존 WebSocket session을 강제로 종료하지 않는다.
+- 별도의 readiness handshake guard와 최종 WebSocket 인증 정책은 현재 미구현이며, 인증 정책은 13단계에서 확정한다.
+
 ### 이벤트 순서 정책
 - WebSocket diff 이벤트에는 단조 증가하는 **`eventSeq`** 를 포함한다.
 - 클라이언트는 sequence gap이 감지되면 관련 타일을 재동기화한다.
 
-### 선택 최적화
-- **50ms 단위 배치 전송** 가능
+### 후속 보강
+- 50ms 단위 batch broadcast
+- broadcast 순서 보장과 session별 send 직렬화
 
 > 순수 WebSocket(JSON)을 선택한 이유는 메시지 크기가 작고 구현이 단순하기 때문이다.  
 > 이후 규모가 커지면 메시지 압축 또는 바이너리 프레임을 후속 최적화로 고려할 수 있다.
@@ -303,20 +338,27 @@
 - 사용자 쿨다운 전용
 - 키 형식: `cooldown:user:{userId}`
 - 승인 성공 시에만 TTL `180초` 설정
-- (선택) refresh token 저장
-- (선택) 타일 캐시 / 버전 관리
+- 서비스 Refresh Token은 발급하거나 저장하지 않음
+
+### 타일 버전과 HTTP cache
+- 현재: memory `tileVersion` 증가, Pixel 응답 `tileVersion`, Tile 응답 `X-Tile-Version`
+- 후속: `ETag`, `If-None-Match`, `Cache-Control`, `304 Not Modified` 조건부 HTTP cache
 
 ### WAL
 - 승인된 픽셀 write의 **1차 내구성 저장소**
 - 포맷은 **JSON Lines**
 - 요청마다 `append + fsync`
-- 성공 응답의 의미는 **DB 반영 완료가 아니라 WAL append + fsync 성공**
+- WAL append + fsync 성공은 write의 **1차 내구성 경계**
+- core write 완료는 WAL append + fsync와 memory apply가 모두 성공한 상태
+- 현재 HTTP `200` 성공 응답은 core write와 command 계약상 dirty mark까지 성공한 상태
+- DB flush 완료는 HTTP 성공 조건이 아님
 
 ### MySQL + JPA
-- 사용자(카카오 계정 매핑)
-- DB 후행 타일 상태 저장소(`tiles`)
-- 승인 이벤트 영속 로그(`pixel_events`)
-- DB flush 완료 지점 저장(`wal_checkpoint`)
+- `tiles`: 현재 schema/entity/recovery snapshot load가 존재하지만 snapshot write는 11단계 구현 범위
+- `pixel_events`: 현재 DDL 계약은 존재하지만 WAL record의 DB insert는 11단계 구현 범위
+- `wal_checkpoint`: 현재 recovery read 구조가 존재하지만 flush checkpoint update는 11단계 구현 범위
+- 11단계에서 `pixel_events` insert, `tiles` snapshot write, `wal_checkpoint` update를 하나의 DB transaction으로 구현
+- `users`와 카카오 계정 매핑은 후속 인증 목표
 
 ### 현재 구조에서 DB의 역할
 - 실시간 authoritative state는 DB가 아니라 **메모리 타일 상태**
@@ -343,10 +385,12 @@
 
 ## 10) 레이트리밋 / 쿨다운 정책
 
-### MVP 정책
-- **비로그인 사용자 요청 금지**
-- **로그인 사용자만 픽셀 변경 가능**
-- **사용자당 180초 쿨다운**
+### 최종 MVP endpoint 정책
+- `POST /api/pixels`: 인증된 사용자만 허용하고 사용자당 180초 쿨다운 적용
+- Board, Tile, Overview 조회: 최종 `permitAll`
+- 현재 Overview API는 미구현
+- WebSocket 인증과 handshake 정책: 후속 단계에서 별도 확정
+- 현재 Pixel write: 실제 인증 대신 임시 `X-User-Id` 식별값 사용
 
 ### 현재 결론
 - MVP에서는 **사용자 기준 쿨다운만 우선 적용**
@@ -376,7 +420,9 @@
 
 ---
 
-## 12) MVP 구현 순서
+## 12) 목표 MVP 구현 순서
+
+> 아래 항목은 완료 현황이 아니라 목표 순서다. 현재 구현 여부는 API별 현재 구현 설명과 `pixel-place-details.md`의 통합 계약 매트릭스를 따른다.
 
 ### Phase 1. 백엔드 최소 코어
 - Spring Boot 프로젝트 생성
@@ -416,9 +462,10 @@
 ### Phase 6. 인증 추가
 - 카카오 OAuth2 Authorization Code 로그인
 - `kakaoUserId`와 내부 `users.id` 매핑
-- 서비스 Access JWT + Refresh Token 발급
+- 짧은 수명의 서비스 Access JWT만 발급
 - Access JWT `sub`에 내부 `users.id` 저장
 - JWT principal의 내부 userId로 cooldown/WAL/pixel_events 연결
+- 서비스 Refresh Token 없이 만료 시 카카오 OAuth2 재로그인
 
 ### Phase 7. 고도화
 - 스냅샷 / 리플레이
@@ -428,7 +475,7 @@
 
 ---
 
-## 13) 백엔드 내부 우선순위
+## 13) 후속 목표를 포함한 백엔드 내부 우선순위
 
 1. `BoardMetaService`
 2. `TileReadService`
@@ -442,14 +489,14 @@
 
 ---
 
-## 14) 현재 확정된 선택 사항
+## 14) 설계상 확정된 선택 사항
 
 - 보드 크기: **8192 × 8192**
 - 타일 크기: **256 × 256**
 - 총 타일 수: **1024**
 - 로딩 방식: **뷰포트 기반 타일 로딩**
 - MVP 타일 레벨: **`z=0` 원본만 구현**
-- 전체 보기: **별도 overview 모드 제공**
+- 전체 보기 목표: **별도 overview 모드 제공**(현재 API 미구현)
 - overview 갱신 주기: **10초**
 - 팔레트: **256색 고정 팔레트**
 - 픽셀 저장 표현: **1 byte 팔레트 인덱스**
@@ -458,7 +505,7 @@
 - 실시간 반영 전략: **타일 재요청이 아니라 diff 반영**
 - 이벤트 정합성: **eventSeq 사용**
 - 타일 정합성: **tileVersion 사용**
-- 로그인 방향: **카카오 OAuth2 + JWT(후속)**
+- 로그인 방향: **카카오 OAuth2 + stateless Access JWT only(후속)**
 - 레이트리밋: **로그인 사용자만, 사용자당 180초 쿨다운**
 - 이벤트 로그: **append-only 저장**
 - 구현 방식: **vertical slice**
@@ -467,15 +514,25 @@
 ---
 
 ## 15) 고정 결론(한 줄)
-- **8192×8192 보드, 256×256 타일, 뷰포트 기반 z=0 원본 타일 로딩, 별도 overview 모드, 256색 팔레트 인덱스 저장, raw bytes 타일 API, POST 픽셀 쓰기 API, 순수 WebSocket diff, 사용자당 180초 쿨다운, append-only 이벤트 로그, 카카오 OAuth2 + JWT(후속)**
+- **8192×8192 보드, 256×256 타일, 뷰포트 기반 z=0 원본 타일 로딩, 별도 overview 목표, 256색 팔레트 인덱스 저장, raw bytes 타일 API, POST 픽셀 쓰기 API, 순수 WebSocket diff, 사용자당 180초 쿨다운, append-only 이벤트 로그, 카카오 OAuth2 + stateless Access JWT only(후속)**
 
 ## 16) DDL
 
 ### 현재 기준 DB 역할 요약
-- `users`: 카카오 로그인 사용자 식별용 최소 저장소
 - `tiles`: DB 후행 타일 상태 저장소
 - `pixel_events`: 승인 이벤트 append-only 영속 로그
 - `wal_checkpoint`: 마지막 DB flush 완료 지점 저장
   - `last_flushed_event_seq`는 `pixel_events`와 `tiles`에 모두 반영 완료된 마지막 `eventSeq`다.
   - 이 값 이하의 WAL 이벤트는 boot recovery 시 replay하지 않는다.
   - 이 값은 active WAL 파일의 마지막 `eventSeq`인 `walLastEventSeq`와 다르다.
+
+### 현재 SQL 계약
+- 현재 `pixel_place.sql`에는 위 3개 테이블만 있으며 `users` 테이블과 FK는 없다.
+- `pixel_events.event_seq`는 `WalRecord.eventSeq`를 저장하는 non-auto-increment primary key다.
+- `pixel_events.user_id`는 현재 임시 `X-User-Id` 값이고 일반 컬럼이다.
+- `pixel_events.created_at`은 DB flush 시각이 아니라 WAL record의 원래 생성 시각이다.
+- `tiles.tile_version`은 마지막 DB flush snapshot의 버전이다.
+
+### 후속 인증 목표
+- `users` 테이블에서 `kakaoUserId`와 내부 `users.id`를 매핑한다.
+- Access JWT `sub`와 `pixel_events.user_id`에는 내부 `users.id`를 사용하고 FK를 검토한다.

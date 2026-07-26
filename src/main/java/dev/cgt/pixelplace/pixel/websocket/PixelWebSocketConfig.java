@@ -7,7 +7,9 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
 
 /*
  * pixel-place raw WebSocket endpoint 설정
- * MVP에서는 읽기 broadcast 채널로 보고 /ws 연결을 인증 없이 허용
+ * 현재 handler/config 자체에 application-level 인증 로직 없음
+ * 실제 /ws handshake 접근 제한은 현재 Spring Security filter chain에 따름
+ * 최종 WebSocket 인증 정책은 13단계 확정 대상
  */
 @Configuration
 @EnableWebSocket

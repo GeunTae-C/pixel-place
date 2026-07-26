@@ -16,7 +16,9 @@ public class BoardController {
 
     /*
      * 클라이언트가 보드 크기와 palette를 알고 첫 화면을 준비하도록 현재 서버의 고정 설정을 반환
-     * 요청 body나 인증 정보는 필요 없으며, tile 데이터나 overview 이미지는 포함하지 않음
+     * request body와 application-level 사용자 식별 정보 사용 없음
+     * 실제 unauthenticated 접근 가능 여부는 현재 Spring Security filter chain에 따름
+     * tile 데이터나 overview 이미지는 포함하지 않음
      */
     @GetMapping
     public ResponseEntity<BoardInfoResponse> getBoardInfo() {
