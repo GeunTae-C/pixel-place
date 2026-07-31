@@ -4,7 +4,7 @@ import dev.cgt.pixelplace.wal.application.WalRecordParser;
 import dev.cgt.pixelplace.wal.application.WalReplayBatch;
 import dev.cgt.pixelplace.wal.application.WalReplaySource;
 import dev.cgt.pixelplace.wal.domain.WalRecord;
-import org.springframework.context.annotation.Primary;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
@@ -19,10 +19,11 @@ import java.util.ArrayList;
 import java.util.List;
 
 /*
- * 파일 기반 WAL replay source 구현체
+ * 기본 profile의 실제 파일 기반 WAL replay source 구현체
  *
  * 이 클래스의 책임은 active WAL 파일을 처음부터 끝까지 순차적으로 검증하고,
  * startup recovery와 runtime flush가 checkpoint 이후 실제 record를 공유하도록 제공하는 것
+ * stub profile과 상호 배타 활성화하여 WalReplaySource bean 유일성 보장
  *
  * 중요한 복구 규칙:
  *
@@ -48,8 +49,8 @@ import java.util.List;
  *    - MVP 기준에서는 WAL rotation / segment replay를 다루지 않음
  *    - 추후 WAL segment 구조가 도입되면 이 클래스 또는 별도 구현체에서 확장함
  */
-@Primary
 @Component
+@Profile("!stub")
 public class FileWalReplaySource implements WalReplaySource {
 
     private final WalProperties walProperties;

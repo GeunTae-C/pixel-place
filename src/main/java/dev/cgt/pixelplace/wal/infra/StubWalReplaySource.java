@@ -7,12 +7,13 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 
-// 실제 WAL 구현 전이므로 빈 replay 결과와 기본 walLastEventSeq를 주는 stub
+// stub profile에서 startup recovery WAL replay 입력을 빈 결과로 대체하는 adapter
+// production FileWalReplaySource 미구현 대체가 아니며 runtime flush 입력으로 사용하면 안 됨
 @Component
 @Profile("stub")
-// 실제 인프라를 붙이지 않는 테스트/개발 profile에서만 사용하는 임시 stub
 public class StubWalReplaySource implements WalReplaySource {
 
+    // active WAL 조회 없이 replay record와 walLastEventSeq의 결정론적 초기값 제공
     @Override
     public WalReplayBatch readAfter(long lastFlushedEventSeq) {
         return new WalReplayBatch(List.of(), 0L);

@@ -415,20 +415,21 @@ Content-Type: application/json
 
 ### `POST /api/pixels`
 1. 현재 Spring Security filter 처리. 실제 Pixel 응답은 제한 진단 범위 밖이라 미검증
-2. MVC readiness guard를 통과한 뒤 controller가 `X-User-Id`와 body를 binding
-3. command 진입 직후 application validation/cooldown보다 먼저 readiness 재검사
-4. userId 검증과 Redis `cooldown:user:{userId}` 확인
-5. `PTTL > 0`이면 `429`로 종료
-6. core의 `synchronized` 진입 직후 validation/eventSeq/WAL보다 먼저 readiness 재검사
-7. 좌표/색상 범위 검증과 `(x, y) → (tx, ty)` 계산
-8. `AtomicLong`으로 `eventSeq` 발급하고 WAL record 생성
-9. WAL append + 요청 단위 fsync로 1차 내구성 경계 확보
-10. 메모리 타일 상태 반영과 `tileVersion++`
-11. dirty 타일 표시 성공 뒤에만 HTTP `200` 성공 응답 조건 확정
-12. Redis cooldown `180초` TTL 설정 시도. 실패해도 완료 write 유지
-13. `type`, `x`, `y`, `color`, `eventSeq` 단건 WebSocket diff broadcast 시도. 실패해도 완료 write 유지
-14. `accepted`, `eventSeq`, `x`, `y`, `color`, `tileVersion` 응답 반환
-15. 후속 11단계 flush worker가 DB 반영 예정
+2. MVC readiness guard 확인
+3. controller의 `X-User-Id`/body binding과 `requiredX()`/`requiredY()`/`requiredColor()` 누락 검사
+4. `PixelCommandService` 진입 직후 readiness 재검사
+5. userId 검증과 Redis `cooldown:user:{userId}` 확인
+6. `PTTL > 0`이면 `429`로 종료
+7. `PixelWriteService`의 `synchronized` 진입 직후 readiness 재검사
+8. core에서 userId/좌표/색상 범위 재검증
+9. `AtomicLong`으로 `eventSeq` 발급
+10. `(x, y)`에서 `tx`/`ty`를 계산하면서 WAL record 생성
+11. WAL append와 요청 단위 fsync로 1차 내구성 경계 확보
+12. 메모리 타일 상태 반영과 `tileVersion++`
+13. dirty 타일 표시 성공 뒤에만 현재 HTTP `200` 성공 조건 확정
+14. Redis cooldown 시작과 WebSocket broadcast 후처리. 실패해도 완료 write 유지
+15. `accepted`, `eventSeq`, `x`, `y`, `color`, `tileVersion` HTTP `200` 응답 반환
+16. 후속 11단계 flush worker가 DB 반영 예정
 
 ---
 
@@ -790,27 +791,24 @@ GET /api/tiles/**
 - 14단계 rotation/segment에서도 17단계 완료 전에는 directory metadata의 엄격한 내구성을 보장하지 않으며, 실제 parent-directory fsync는 17단계에서 구현한다.
 
 ### 픽셀 요청 처리에서 WAL 흐름
-1. JWT 인증
-2. Redis 쿨다운 확인
-3. 쿨다운 중이면 즉시 `429`
-4. body 검증
-5. 좌표 / 색상 범위 검증
-6. 타일 좌표 계산
-7. `AtomicLong`으로 `eventSeq` 발급
-8. WAL 레코드 생성
-9. WAL append
-10. 요청 단위 fsync 수행
-11. fsync 성공으로 write의 1차 내구성 경계 확보
-12. 메모리 타일 상태 반영
-13. `tileVersion++`
-14. dirty 타일 표시
-15. core write와 dirty mark 성공으로 현재 HTTP `200` 성공 응답 조건 확정
-16. Redis 쿨다운 TTL 180초 설정 시도
-17. cooldown start 실패는 완료 write를 취소하지 않고 로그만 남김
-18. WebSocket diff 전송 시도
-19. broadcast 실패는 완료 write를 취소하지 않고 로그만 남김
-20. HTTP `200` 성공 응답 반환
-21. 이후 flush worker가 DB 반영
+1. 현재 Spring Security filter 처리. 실제 Pixel 응답은 제한 진단 범위 밖이라 미검증
+2. MVC readiness guard 확인
+3. controller의 `X-User-Id`/body binding과 `requiredX()`/`requiredY()`/`requiredColor()` 누락 검사
+4. `PixelCommandService` 진입 직후 readiness 재검사
+5. userId 검증과 Redis `cooldown:user:{userId}` 확인
+6. `PTTL > 0`이면 `429`로 종료
+7. `PixelWriteService`의 `synchronized` 진입 직후 readiness 재검사
+8. core에서 userId/좌표/색상 범위 재검증
+9. `AtomicLong`으로 `eventSeq` 발급
+10. `(x, y)`에서 `tx`/`ty`를 계산하면서 WAL record 생성
+11. WAL append와 요청 단위 fsync로 1차 내구성 경계 확보
+12. 메모리 타일 상태 반영과 `tileVersion++`
+13. dirty 타일 표시 성공 뒤에만 현재 HTTP `200` 성공 조건 확정
+14. Redis cooldown 시작과 WebSocket broadcast 후처리. 실패해도 완료 write 유지
+15. `accepted`, `eventSeq`, `x`, `y`, `color`, `tileVersion` HTTP `200` 응답 반환
+16. 후속 11단계 flush worker가 DB 반영 예정
+
+JWT principal 기반 사용자 식별은 13단계의 후속 목표다. 현재 흐름의 `X-User-Id`와 혼합하지 않는다. MVC readiness guard를 통과한 뒤 runtime fatal 전환과 HTTP binding 오류가 경쟁할 수 있으므로 command-level readiness가 모든 header/body binding 오류보다 항상 우선한다고 단정하지 않는다.
 
 ### WAL replay
 부팅 시 순서:
@@ -1524,3 +1522,45 @@ dev.cgt.pixelplace
 - 공통 ErrorResponse/errorCode 처리
 - ETag/If-None-Match/Cache-Control/304 조건부 cache
 - WebSocket batch/order/session별 send 직렬화 보강
+
+## 12) stub profile 범위와 recovery adapter 선택
+
+### profile의 책임
+
+`stub` profile은 모든 외부 인프라를 제거하는 profile이 아니라 startup recovery의 입력 adapter만 결정론적 stub으로 교체하는 profile이다.
+
+| recovery 입력 port | 기본 profile | `stub` profile | 현재 production 소비자 |
+|---|---|---|---|
+| `CheckpointReader` | `JpaCheckpointReader` (`!stub`) | `StubCheckpointReader` (`stub`) | `StartupRecoveryService` |
+| `TileSnapshotLoader` | `JpaTileSnapshotLoader` (`!stub`) | `StubTileSnapshotLoader` (`stub`) | `StartupRecoveryService` |
+| `WalReplaySource` | `FileWalReplaySource` (`!stub`) | `StubWalReplaySource` (`stub`) | `StartupRecoveryService` |
+
+각 profile에서는 위 port별 bean이 정확히 하나만 활성화된다. 세 stub은 production adapter 미구현을 대신하는 임시체가 아니며 checkpoint 0, z=0 snapshot 전체 미존재, 빈 WAL replay라는 startup recovery 입력만 대체한다.
+
+### 대체하지 않는 infrastructure
+
+`stub` profile에서도 다음 production infrastructure는 남을 수 있다.
+
+- `FileWalAppender`와 실제 WAL append 경로
+- Redis cooldown adapter
+- DataSource/JPA auto-configuration과 Spring Data repository
+- recovery 입력 외의 production bean
+
+따라서 `stub`은 DB/Redis/WAL이 없는 전체 application profile이 아니다. 외부 인프라가 없는 제한 context 테스트는 recovery adapter bean 선택만 검증하고 adapter의 DB/WAL 메서드를 호출하지 않는다.
+
+### runtime 소비자 안전장치
+
+Spring profile의 bean 교체는 특정 injection 지점이 아니라 해당 port의 모든 소비자에게 적용된다. 현재 세 port의 production 소비자는 `StartupRecoveryService`뿐이고 `FlushWorker`/scheduler는 아직 없지만, 11단계 구현 전 전체 소비자를 다시 검색해야 한다.
+
+10.6 정책대로 runtime flush는 `WalReplaySource.readAfter(...)`를 재사용한다. recovery용과 runtime flush용 WAL read port를 10.7 또는 11단계에서 임의로 분리하지 않는다.
+
+다음 조합은 실제 WAL과 DB checkpoint 정합성을 깨뜨릴 수 있으므로 허용하지 않는다.
+
+```text
+stub profile 활성
++ FileWalAppender 실제 WAL 기록
++ StubWalReplaySource runtime WAL read
++ 실제 pixel write 또는 활성 FlushWorker/scheduler
+```
+
+`stub` profile의 정상 기능 테스트 범위는 startup recovery와 제한 context bean 선택 테스트다. 이 profile에서 실제 pixel write, `FileWalAppender` 기록, runtime flush/scheduler, DB persistence 정합성 검증을 수행하지 않는다. `FlushWorker` 자체 테스트는 profile 대신 constructor fake/mock을 직접 주입한다.

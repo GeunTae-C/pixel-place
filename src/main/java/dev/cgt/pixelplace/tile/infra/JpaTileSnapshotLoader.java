@@ -5,15 +5,15 @@ import dev.cgt.pixelplace.tile.application.TileLoadResult;
 import dev.cgt.pixelplace.tile.application.TileSnapshotLoader;
 import dev.cgt.pixelplace.tile.application.TileStateSnapshot;
 import dev.cgt.pixelplace.tile.domain.TileKey;
-import org.springframework.context.annotation.Primary;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
 
-// TileSnapshotLoader 포트의 실제 JPA adapter
-// recovery 서비스가 DB read side를 JPA repository에 직접 묶지 않도록, z=0 snapshot 조회와 변환을 이 경계에서 끝냄
-@Primary
+// 기본 profile의 실제 z=0 tile snapshot JPA adapter, DB 조회와 변환 경계 담당
+// stub profile과 상호 배타 활성화하여 TileSnapshotLoader bean 유일성 보장
 @Component
+@Profile("!stub")
 public class JpaTileSnapshotLoader implements TileSnapshotLoader {
 
     private final TileJpaRepository tileJpaRepository;
@@ -22,7 +22,7 @@ public class JpaTileSnapshotLoader implements TileSnapshotLoader {
         this.tileJpaRepository = tileJpaRepository;
     }
 
-    // @Primary는 기존 stub 구현과 빈 충돌 없이 실제 JPA 구현을 recovery에 우선 연결하기 위한 선택
+    // startup recovery용 z=0 전체 snapshot 조회, 부분 snapshot은 조용한 복구 대신 실패 처리
     @Override
     public TileLoadResult loadZ0Tiles() {
         List<TileEntity> tileEntities = tileJpaRepository.findAllByZOrderByTyAscTxAsc(BoardConstants.Z0_LEVEL);

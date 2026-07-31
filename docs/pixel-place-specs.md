@@ -364,10 +364,12 @@
 - 실시간 authoritative state는 DB가 아니라 **메모리 타일 상태**
 - DB는 **WAL 뒤를 따라가는 후행 저장소 + 복구 시작점**
 - 서버 재시작 시:
-  1. DB `tiles` 전체 로드
-  2. `wal_checkpoint.last_flushed_event_seq` 확인
-  3. DB 반영 완료 마지막 eventSeq 이후 WAL replay
-  4. 메모리 상태 복구
+  1. `wal_checkpoint.last_flushed_event_seq` 확인
+  2. DB `tiles` 전체 로드 또는 all-white pre-init
+  3. active WAL을 끝까지 읽어 `walLastEventSeq` 확인
+  4. `lastFlushedEventSeq` 이후 WAL record replay
+  5. `lastIssuedEventSeq = max(lastFlushedEventSeq, walLastEventSeq)` 초기화
+  6. 복구 완료 후 ready 전환
 
 ### 픽셀 이벤트 로그 정책
 - 픽셀 이벤트 로그는 **append-only 방식**으로 저장한다.
