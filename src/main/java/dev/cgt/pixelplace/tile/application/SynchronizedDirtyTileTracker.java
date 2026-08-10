@@ -4,9 +4,11 @@ import dev.cgt.pixelplace.tile.domain.TileKey;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /*
  * DirtyTileTracker의 synchronized 기반 보조 상태 구현체
@@ -23,12 +25,7 @@ public class SynchronizedDirtyTileTracker implements DirtyTileTracker {
      */
     @Override
     public synchronized void markDirty(TileKey tileKey, long eventSeq, long tileVersion) {
-        DirtyTile next = new DirtyTile(tileKey, eventSeq, tileVersion);
-        DirtyTile current = dirtyTiles.get(tileKey);
-
-        if (current == null || eventSeq > current.latestEventSeq()) {
-            dirtyTiles.put(tileKey, next);
-        }
+        merge(new DirtyTile(tileKey, eventSeq, tileVersion));
     }
 
     /*
@@ -40,5 +37,33 @@ public class SynchronizedDirtyTileTracker implements DirtyTileTracker {
         List<DirtyTile> drained = new ArrayList<>(dirtyTiles.values());
         dirtyTiles.clear();
         return drained;
+    }
+
+    /*
+     * 실제 drain 목록 전체를 먼저 검증·복사한 뒤 한 critical section에서 최신값 병합
+     * 잘못된 입력이 중간에 있어도 일부 복구 상태를 남기지 않음
+     */
+    @Override
+    public synchronized void restoreDirtyTiles(Collection<DirtyTile> dirtyTilesToRestore) {
+        Objects.requireNonNull(dirtyTilesToRestore, "dirtyTiles must not be null");
+
+        List<DirtyTile> validated = new ArrayList<>(dirtyTilesToRestore.size());
+        for (DirtyTile dirtyTile : dirtyTilesToRestore) {
+            DirtyTile source = Objects.requireNonNull(dirtyTile, "dirtyTiles must not contain null");
+            validated.add(new DirtyTile(
+                    source.tileKey(),
+                    source.latestEventSeq(),
+                    source.latestTileVersion()
+            ));
+        }
+
+        validated.forEach(this::merge);
+    }
+
+    private void merge(DirtyTile next) {
+        DirtyTile current = dirtyTiles.get(next.tileKey());
+        if (current == null || next.latestEventSeq() > current.latestEventSeq()) {
+            dirtyTiles.put(next.tileKey(), next);
+        }
     }
 }

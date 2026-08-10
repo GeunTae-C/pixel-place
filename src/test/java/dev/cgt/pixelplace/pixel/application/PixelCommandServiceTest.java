@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.pixel.application;
 
 import dev.cgt.pixelplace.common.constant.BoardConstants;
+import dev.cgt.pixelplace.flush.application.FlushBoundaryCoordinator;
 import dev.cgt.pixelplace.recovery.application.ServiceNotReadyException;
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import dev.cgt.pixelplace.tile.application.DirtyTileTracker;
@@ -11,11 +12,22 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
+
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -34,12 +46,14 @@ import static org.mockito.Mockito.when;
 class PixelCommandServiceTest {
 
     private final PixelCooldown pixelCooldown = mock(PixelCooldown.class);
+    private final FlushBoundaryCoordinator flushBoundaryCoordinator = new FlushBoundaryCoordinator();
     private final PixelWriteService pixelWriteService = mock(PixelWriteService.class);
     private final DirtyTileTracker dirtyTileTracker = mock(DirtyTileTracker.class);
     private final PixelBroadcastService pixelBroadcastService = mock(PixelBroadcastService.class);
     private final ServiceReadiness serviceReadiness = readyReadiness();
     private final PixelCommandService service = new PixelCommandService(
             pixelCooldown,
+            flushBoundaryCoordinator,
             pixelWriteService,
             dirtyTileTracker,
             pixelBroadcastService,
@@ -116,6 +130,7 @@ class PixelCommandServiceTest {
         PixelBroadcastService broadcaster = mock(PixelBroadcastService.class);
         PixelCommandService commandService = new PixelCommandService(
                 cooldown,
+                new FlushBoundaryCoordinator(),
                 realWriteService,
                 tracker,
                 broadcaster,
@@ -270,6 +285,129 @@ class PixelCommandServiceTest {
         verifyNoInteractions(pixelCooldown, pixelWriteService, dirtyTileTracker, pixelBroadcastService);
     }
 
+    @Test
+    // Redis 사전 확인과 성공 후처리는 boundary 밖, core write와 dirty mark만 같은 callback 내부
+    void writeAndDirtyMarkShareBoundaryWhileCooldownAndBroadcastStayOutside() {
+        AtomicBoolean insideBoundary = new AtomicBoolean();
+        FlushBoundaryCoordinator trackingCoordinator = new FlushBoundaryCoordinator() {
+            @Override
+            public <T> T coordinate(Supplier<T> action) {
+                assertFalse(insideBoundary.get());
+                insideBoundary.set(true);
+                try {
+                    return super.coordinate(action);
+                } finally {
+                    insideBoundary.set(false);
+                }
+            }
+        };
+        PixelCooldown cooldown = mock(PixelCooldown.class);
+        PixelWriteService writeService = mock(PixelWriteService.class);
+        DirtyTileTracker tracker = mock(DirtyTileTracker.class);
+        PixelBroadcastService broadcaster = mock(PixelBroadcastService.class);
+        PixelWriteResult result = result();
+        doAnswer(invocation -> {
+            assertFalse(insideBoundary.get());
+            return null;
+        }).when(cooldown).checkWritable(7L);
+        when(writeService.writePixel(7L, 768, 1280, 17)).thenAnswer(invocation -> {
+            assertTrue(insideBoundary.get());
+            return result;
+        });
+        doAnswer(invocation -> {
+            assertTrue(insideBoundary.get());
+            return null;
+        }).when(tracker).markDirty(result.tileKey(), result.eventSeq(), result.tileVersion());
+        doAnswer(invocation -> {
+            assertFalse(insideBoundary.get());
+            return null;
+        }).when(cooldown).startCooldown(7L);
+        doAnswer(invocation -> {
+            assertFalse(insideBoundary.get());
+            return null;
+        }).when(broadcaster).broadcast(any(PixelEventMessage.class));
+        PixelCommandService commandService = new PixelCommandService(
+                cooldown,
+                trackingCoordinator,
+                writeService,
+                tracker,
+                broadcaster,
+                readyReadiness()
+        );
+
+        PixelWriteResult actual = commandService.writePixel(7L, 768, 1280, 17);
+
+        assertSame(result, actual);
+        assertFalse(insideBoundary.get());
+    }
+
+    @Test
+    // dirty mark 실패도 callback 밖으로 전파되면서 coordinator lock은 반드시 해제
+    void dirtyFailureReleasesCoordinatorAndSkipsSuccessPostProcessing() {
+        PixelWriteResult result = result();
+        when(pixelWriteService.writePixel(7L, 768, 1280, 17)).thenReturn(result);
+        doThrow(new IllegalStateException("dirty failed"))
+                .when(dirtyTileTracker)
+                .markDirty(result.tileKey(), result.eventSeq(), result.tileVersion());
+
+        assertThrows(IllegalStateException.class, () -> service.writePixel(7L, 768, 1280, 17));
+
+        assertEquals("released", flushBoundaryCoordinator.coordinate(() -> "released"));
+        verify(pixelCooldown, never()).startCooldown(7L);
+        verifyNoInteractions(pixelBroadcastService);
+    }
+
+    @Test
+    // coordinator 대기 중 fatal 전환된 요청은 callback 진입 뒤 core monitor 재검사에서 차단
+    void writeWaitingAtBoundaryIsRejectedByCoreReadinessRecheck() throws Exception {
+        BlockingCoordinator blockingCoordinator = new BlockingCoordinator();
+        ServiceReadiness readiness = readyReadiness();
+        PixelCooldown cooldown = mock(PixelCooldown.class);
+        EventSeqManager eventSeqManager = mock(EventSeqManager.class);
+        WalAppender walAppender = mock(WalAppender.class);
+        InMemoryTileBoard board = mock(InMemoryTileBoard.class);
+        PixelWriteService realWriteService = new PixelWriteService(
+                eventSeqManager,
+                walAppender,
+                board,
+                readiness
+        );
+        DirtyTileTracker tracker = mock(DirtyTileTracker.class);
+        PixelBroadcastService broadcaster = mock(PixelBroadcastService.class);
+        PixelCommandService commandService = new PixelCommandService(
+                cooldown,
+                blockingCoordinator,
+                realWriteService,
+                tracker,
+                broadcaster,
+                readiness
+        );
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+
+        try {
+            Future<PixelWriteResult> future = executor.submit(
+                    () -> commandService.writePixel(7L, 768, 1280, 17)
+            );
+            assertTrue(blockingCoordinator.awaitEntered());
+
+            readiness.markNotReady();
+            blockingCoordinator.release();
+
+            ExecutionException failure = assertThrows(
+                    ExecutionException.class,
+                    () -> future.get(5, TimeUnit.SECONDS)
+            );
+            assertInstanceOf(ServiceNotReadyException.class, failure.getCause());
+            verify(cooldown).checkWritable(7L);
+            verify(cooldown, never()).startCooldown(7L);
+            verifyNoInteractions(eventSeqManager, walAppender, board, tracker, broadcaster);
+        } finally {
+            blockingCoordinator.release();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     private PixelWriteResult result() {
         return new PixelWriteResult(
                 1L,
@@ -285,5 +423,33 @@ class PixelCommandServiceTest {
         ServiceReadiness readiness = new ServiceReadiness();
         readiness.markReady();
         return readiness;
+    }
+
+    private static final class BlockingCoordinator extends FlushBoundaryCoordinator {
+
+        private final CountDownLatch entered = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+
+        @Override
+        public <T> T coordinate(Supplier<T> action) {
+            entered.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Boundary release timed out.");
+                }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("Boundary wait was interrupted.", exception);
+            }
+            return super.coordinate(action);
+        }
+
+        private boolean awaitEntered() throws InterruptedException {
+            return entered.await(5, TimeUnit.SECONDS);
+        }
+
+        private void release() {
+            release.countDown();
+        }
     }
 }

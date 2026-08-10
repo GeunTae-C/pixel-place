@@ -2,6 +2,7 @@ package dev.cgt.pixelplace.tile.application;
 
 import dev.cgt.pixelplace.tile.domain.TileKey;
 
+import java.util.Collection;
 import java.util.List;
 
 /*
@@ -21,4 +22,10 @@ public interface DirtyTileTracker {
      * 반환 항목은 tracker 내부에서 제거되며 WAL 범위 결정과 DB flush 자체는 담당하지 않음
      */
     List<DirtyTile> drainDirtyTiles();
+
+    /*
+     * plan capture 또는 persistence 실패 뒤 실제 drain 목록만 batch 복구
+     * WAL affected key나 bootstrap 전체 target을 synthetic dirty로 만드는 용도가 아님
+     */
+    void restoreDirtyTiles(Collection<DirtyTile> dirtyTiles);
 }

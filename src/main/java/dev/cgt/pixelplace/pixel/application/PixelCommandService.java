@@ -1,5 +1,6 @@
 package dev.cgt.pixelplace.pixel.application;
 
+import dev.cgt.pixelplace.flush.application.FlushBoundaryCoordinator;
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import dev.cgt.pixelplace.tile.application.DirtyTileTracker;
 import org.slf4j.Logger;
@@ -17,6 +18,7 @@ public class PixelCommandService {
     private static final Logger log = LoggerFactory.getLogger(PixelCommandService.class);
 
     private final PixelCooldown pixelCooldown;
+    private final FlushBoundaryCoordinator flushBoundaryCoordinator;
     private final PixelWriteService pixelWriteService;
     private final DirtyTileTracker dirtyTileTracker;
     private final PixelBroadcastService pixelBroadcastService;
@@ -24,12 +26,14 @@ public class PixelCommandService {
 
     public PixelCommandService(
             PixelCooldown pixelCooldown,
+            FlushBoundaryCoordinator flushBoundaryCoordinator,
             PixelWriteService pixelWriteService,
             DirtyTileTracker dirtyTileTracker,
             PixelBroadcastService pixelBroadcastService,
             ServiceReadiness serviceReadiness
     ) {
         this.pixelCooldown = pixelCooldown;
+        this.flushBoundaryCoordinator = flushBoundaryCoordinator;
         this.pixelWriteService = pixelWriteService;
         this.dirtyTileTracker = dirtyTileTracker;
         this.pixelBroadcastService = pixelBroadcastService;
@@ -47,9 +51,11 @@ public class PixelCommandService {
 
         pixelCooldown.checkWritable(userId);
 
-        PixelWriteResult result = pixelWriteService.writePixel(userId, x, y, color);
-
-        markDirty(result);
+        PixelWriteResult result = flushBoundaryCoordinator.coordinate(() -> {
+            PixelWriteResult writeResult = pixelWriteService.writePixel(userId, x, y, color);
+            markDirty(writeResult);
+            return writeResult;
+        });
 
         try {
             pixelCooldown.startCooldown(userId);

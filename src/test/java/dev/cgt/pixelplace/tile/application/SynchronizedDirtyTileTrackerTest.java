@@ -4,6 +4,7 @@ import dev.cgt.pixelplace.common.constant.BoardConstants;
 import dev.cgt.pixelplace.tile.domain.TileKey;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -127,6 +128,77 @@ class SynchronizedDirtyTileTrackerTest {
     @Test
     void markDirtyRejectsNonPositiveTileVersion() {
         assertThrows(IllegalArgumentException.class, () -> tracker.markDirty(tileKey(3, 5), 10L, 0L));
+    }
+
+    @Test
+    void drainedTilesAreReturnedAgainAfterRestore() {
+        TileKey tileKey = tileKey(3, 5);
+        tracker.markDirty(tileKey, 10L, 2L);
+        List<DirtyTile> drained = tracker.drainDirtyTiles();
+
+        tracker.restoreDirtyTiles(drained);
+
+        assertDirtyTile(drainAsMap().get(tileKey), tileKey, 10L, 2L);
+    }
+
+    @Test
+    void restoreKeepsNewerCurrentEventSeq() {
+        TileKey tileKey = tileKey(3, 5);
+        tracker.markDirty(tileKey, 12L, 4L);
+
+        tracker.restoreDirtyTiles(List.of(new DirtyTile(tileKey, 10L, 99L)));
+
+        assertDirtyTile(drainAsMap().get(tileKey), tileKey, 12L, 4L);
+    }
+
+    @Test
+    void restoreReplacesCurrentValueWhenRestoredEventSeqIsNewer() {
+        TileKey tileKey = tileKey(3, 5);
+        tracker.markDirty(tileKey, 10L, 2L);
+
+        tracker.restoreDirtyTiles(List.of(new DirtyTile(tileKey, 12L, 7L)));
+
+        assertDirtyTile(drainAsMap().get(tileKey), tileKey, 12L, 7L);
+    }
+
+    @Test
+    void restoreKeepsCurrentValueWhenEventSeqIsEqual() {
+        TileKey tileKey = tileKey(3, 5);
+        tracker.markDirty(tileKey, 10L, 2L);
+
+        tracker.restoreDirtyTiles(List.of(new DirtyTile(tileKey, 10L, 99L)));
+
+        assertDirtyTile(drainAsMap().get(tileKey), tileKey, 10L, 2L);
+    }
+
+    @Test
+    void restoreRejectsNullCollectionWithoutMutatingCurrentState() {
+        TileKey tileKey = tileKey(3, 5);
+        tracker.markDirty(tileKey, 10L, 2L);
+
+        assertThrows(NullPointerException.class, () -> tracker.restoreDirtyTiles(null));
+
+        assertDirtyTile(drainAsMap().get(tileKey), tileKey, 10L, 2L);
+    }
+
+    @Test
+    void restoreRejectsNullElementWithoutPartialMutation() {
+        TileKey tileKey = tileKey(3, 5);
+        List<DirtyTile> invalid = Arrays.asList(new DirtyTile(tileKey, 10L, 2L), null);
+
+        assertThrows(NullPointerException.class, () -> tracker.restoreDirtyTiles(invalid));
+
+        assertTrue(tracker.drainDirtyTiles().isEmpty());
+    }
+
+    @Test
+    void restoreUsesEventSeqForRecencyAndPreservesItsTileVersion() {
+        TileKey tileKey = tileKey(3, 5);
+        tracker.markDirty(tileKey, 20L, 3L);
+
+        tracker.restoreDirtyTiles(List.of(new DirtyTile(tileKey, 19L, 200L)));
+
+        assertDirtyTile(drainAsMap().get(tileKey), tileKey, 20L, 3L);
     }
 
     private Map<TileKey, DirtyTile> drainAsMap() {

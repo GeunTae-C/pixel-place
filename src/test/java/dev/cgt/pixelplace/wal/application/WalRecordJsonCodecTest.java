@@ -48,7 +48,7 @@ class WalRecordJsonCodecTest {
         assertEquals(1L, parsed.eventSeq());
         assertEquals(7L, parsed.userId());
         assertEquals(17, parsed.color());
-        assertEquals(LocalDateTime.of(2026, 4, 3, 6, 0, 0, 123_000_000), parsed.createdAt());
+        assertEquals(LocalDateTime.of(2026, 4, 3, 6, 0, 0, 123_456_789), parsed.createdAt());
     }
 
     @Test
@@ -67,7 +67,7 @@ class WalRecordJsonCodecTest {
                 768,
                 1280,
                 17,
-                LocalDateTime.of(2026, 4, 3, 6, 0, 0, 123_000_000)
+                LocalDateTime.of(2026, 4, 3, 6, 0, 0, 123_456_789)
         );
     }
 }
