@@ -1,5 +1,8 @@
 package dev.cgt.pixelplace.tile.infra;
 
+import dev.cgt.pixelplace.common.constant.BoardConstants;
+import dev.cgt.pixelplace.flush.application.FlushTileSnapshot;
+import dev.cgt.pixelplace.tile.domain.TileKey;
 import jakarta.persistence.Column;
 import jakarta.persistence.Embeddable;
 import jakarta.persistence.EmbeddedId;
@@ -12,6 +15,10 @@ import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Objects;
 
+/*
+ * DB 후행 저장소의 복구 시작점과 flush snapshot을 같은 tiles row에 매핑하는 JPA entity
+ * 실시간 authoritative state는 갖지 않으며 flush 입력 byte[]를 내부에 직접 공유하지 않음
+ */
 @Entity
 @Table(name = "tiles")
 public class TileEntity {
@@ -40,6 +47,27 @@ public class TileEntity {
     private LocalDateTime updatedAt;
 
     protected TileEntity() {
+    }
+
+    /* captured key/bytes/tileVersion만 사용하고 live memory 재조회 없이 flush entity 생성 */
+    public static TileEntity fromFlushSnapshot(FlushTileSnapshot snapshot) {
+        FlushTileSnapshot source = Objects.requireNonNull(snapshot, "snapshot must not be null");
+        TileKey key = Objects.requireNonNull(source.tileKey(), "snapshot tileKey must not be null");
+        byte[] pixels = Objects.requireNonNull(source.pixels(), "snapshot pixels must not be null");
+        if (pixels.length != BoardConstants.TILE_PIXEL_COUNT) {
+            throw new IllegalArgumentException(
+                    "snapshot pixels length must be " + BoardConstants.TILE_PIXEL_COUNT
+            );
+        }
+        if (source.tileVersion() < 0) {
+            throw new IllegalArgumentException("snapshot tileVersion must not be negative");
+        }
+
+        TileEntity entity = new TileEntity();
+        entity.id = new TileId(key.z(), key.tx(), key.ty());
+        entity.data = Arrays.copyOf(pixels, pixels.length);
+        entity.tileVersion = source.tileVersion();
+        return entity;
     }
 
     public TileId getId() {

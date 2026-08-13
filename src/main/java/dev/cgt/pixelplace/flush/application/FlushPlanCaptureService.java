@@ -135,8 +135,11 @@ public class FlushPlanCaptureService {
                     bootstrapState
             );
         } catch (RuntimeException | Error captureFailure) {
-            restoreDrainedDirtyTiles(drainedDirtyTiles, captureFailure);
-            throw captureFailure;
+            Throwable primaryFailure = restoreDrainedDirtyTiles(drainedDirtyTiles, captureFailure);
+            if (primaryFailure instanceof Error error) {
+                throw error;
+            }
+            throw (RuntimeException) primaryFailure;
         }
     }
 
@@ -247,17 +250,36 @@ public class FlushPlanCaptureService {
         }
     }
 
-    private void restoreDrainedDirtyTiles(
+    private Throwable restoreDrainedDirtyTiles(
             List<DirtyTile> drainedDirtyTiles,
             Throwable captureFailure
     ) {
         try {
             // 실제 drain 목록만 복구하며 WAL affected/full bootstrap key synthetic 등록 금지
             dirtyTileTracker.restoreDirtyTiles(drainedDirtyTiles);
+            return captureFailure;
         } catch (RuntimeException | Error restoreFailure) {
-            if (restoreFailure != captureFailure) {
-                captureFailure.addSuppressed(restoreFailure);
-            }
+            return selectPrimaryFailure(captureFailure, restoreFailure);
+        }
+    }
+
+    private Throwable selectPrimaryFailure(Throwable firstFailure, Throwable laterFailure) {
+        if (firstFailure instanceof Error) {
+            addSuppressed(firstFailure, laterFailure);
+            return firstFailure;
+        }
+        if (laterFailure instanceof Error) {
+            // RuntimeException 뒤 복구 Error를 숨기지 않고 최초 Error를 최종 주 예외로 승격
+            addSuppressed(laterFailure, firstFailure);
+            return laterFailure;
+        }
+        addSuppressed(firstFailure, laterFailure);
+        return firstFailure;
+    }
+
+    private void addSuppressed(Throwable primaryFailure, Throwable secondaryFailure) {
+        if (primaryFailure != secondaryFailure) {
+            primaryFailure.addSuppressed(secondaryFailure);
         }
     }
 

@@ -538,6 +538,64 @@ class FlushPlanCaptureServiceTest {
     }
 
     @Test
+    void captureRuntimeFailureAndRestoreErrorRethrowsSameRestoreErrorWithCaptureSuppressed() {
+        Fixture fixture = new Fixture();
+        DirtyTile dirty = new DirtyTile(KEY_A, 1L, 1L);
+        List<DirtyTile> drained = List.of(dirty);
+        RuntimeException captureFailure = new RuntimeException("capture failed");
+        AssertionError restoreError = new AssertionError("restore fatal");
+        fixture.batch(List.of(record(1L, KEY_A)), 1L);
+        when(fixture.dirtyTileTracker.drainDirtyTiles()).thenReturn(drained);
+        when(fixture.board.getRequired(KEY_A)).thenThrow(captureFailure);
+        doThrow(restoreError).when(fixture.dirtyTileTracker).restoreDirtyTiles(drained);
+
+        AssertionError actual = assertThrows(AssertionError.class, fixture.service::capturePlan);
+
+        assertSame(restoreError, actual);
+        assertEquals(1, actual.getSuppressed().length);
+        assertSame(captureFailure, actual.getSuppressed()[0]);
+        verify(fixture.dirtyTileTracker).restoreDirtyTiles(drained);
+    }
+
+    @Test
+    void captureErrorAndRestoreRuntimeFailureKeepsSameCaptureErrorPrimary() {
+        Fixture fixture = new Fixture();
+        DirtyTile dirty = new DirtyTile(KEY_A, 1L, 1L);
+        List<DirtyTile> drained = List.of(dirty);
+        AssertionError captureError = new AssertionError("capture fatal");
+        RuntimeException restoreFailure = new RuntimeException("restore failed");
+        fixture.batch(List.of(record(1L, KEY_A)), 1L);
+        when(fixture.dirtyTileTracker.drainDirtyTiles()).thenReturn(drained);
+        when(fixture.board.getRequired(KEY_A)).thenThrow(captureError);
+        doThrow(restoreFailure).when(fixture.dirtyTileTracker).restoreDirtyTiles(drained);
+
+        AssertionError actual = assertThrows(AssertionError.class, fixture.service::capturePlan);
+
+        assertSame(captureError, actual);
+        assertEquals(1, actual.getSuppressed().length);
+        assertSame(restoreFailure, actual.getSuppressed()[0]);
+        verify(fixture.dirtyTileTracker).restoreDirtyTiles(drained);
+    }
+
+    @Test
+    void sameCaptureAndRestoreThrowableIsNotSelfSuppressed() {
+        Fixture fixture = new Fixture();
+        DirtyTile dirty = new DirtyTile(KEY_A, 1L, 1L);
+        List<DirtyTile> drained = List.of(dirty);
+        AssertionError sameError = new AssertionError("same fatal");
+        fixture.batch(List.of(record(1L, KEY_A)), 1L);
+        when(fixture.dirtyTileTracker.drainDirtyTiles()).thenReturn(drained);
+        when(fixture.board.getRequired(KEY_A)).thenThrow(sameError);
+        doThrow(sameError).when(fixture.dirtyTileTracker).restoreDirtyTiles(drained);
+
+        AssertionError actual = assertThrows(AssertionError.class, fixture.service::capturePlan);
+
+        assertSame(sameError, actual);
+        assertEquals(0, actual.getSuppressed().length);
+        verify(fixture.dirtyTileTracker).restoreDirtyTiles(drained);
+    }
+
+    @Test
     // WAL scan부터 snapshot 완료까지 같은 coordinator를 공유하여 후속 write가 plan에 섞이지 않음
     void sharedBoundaryBlocksCommandCoreUntilPlanCaptureCompletes() throws Exception {
         ServiceReadiness readiness = readyReadiness();
