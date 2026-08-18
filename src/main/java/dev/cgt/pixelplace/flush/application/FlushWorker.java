@@ -1,5 +1,6 @@
 package dev.cgt.pixelplace.flush.application;
 
+import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import dev.cgt.pixelplace.tile.application.DirtyTile;
 import dev.cgt.pixelplace.tile.application.DirtyTileTracker;
 import org.springframework.context.annotation.Profile;
@@ -19,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class FlushWorker {
 
     private final FlushSingleFlightGuard flushSingleFlightGuard;
+    private final ServiceReadiness serviceReadiness;
     private final FlushPlanCaptureService flushPlanCaptureService;
     private final FlushTransactionExecutor flushTransactionExecutor;
     private final PendingAmbiguousFlushStore pendingAmbiguousFlushStore;
@@ -27,6 +29,7 @@ public class FlushWorker {
 
     public FlushWorker(
             FlushSingleFlightGuard flushSingleFlightGuard,
+            ServiceReadiness serviceReadiness,
             FlushPlanCaptureService flushPlanCaptureService,
             FlushTransactionExecutor flushTransactionExecutor,
             PendingAmbiguousFlushStore pendingAmbiguousFlushStore,
@@ -34,6 +37,7 @@ public class FlushWorker {
             DirtyTileTracker dirtyTileTracker
     ) {
         this.flushSingleFlightGuard = flushSingleFlightGuard;
+        this.serviceReadiness = serviceReadiness;
         this.flushPlanCaptureService = flushPlanCaptureService;
         this.flushTransactionExecutor = flushTransactionExecutor;
         this.pendingAmbiguousFlushStore = pendingAmbiguousFlushStore;
@@ -56,6 +60,9 @@ public class FlushWorker {
     }
 
     private FlushRunResult runCycle() {
+        // fatal 확인을 pending 조회보다 먼저 수행하되 temporary not-ready reconciliation은 허용
+        serviceReadiness.requireNotFatal();
+
         Optional<PendingAmbiguousFlush> pending = pendingAmbiguousFlushStore.current();
         if (pending.isPresent()) {
             return reconcilePending(pending.orElseThrow());
@@ -148,7 +155,52 @@ public class FlushWorker {
     }
 
     private FlushRunResult failAmbiguous(PendingAmbiguousFlush candidate, Throwable transactionFailure) {
-        Throwable primaryFailure = installPendingWithPrimary(candidate, transactionFailure);
+        Throwable installFailure = null;
+        try {
+            // ambiguous dirty는 tracker에 즉시 복구하지 않고 pending 하나에만 보존
+            pendingAmbiguousFlushStore.installIfAbsent(candidate);
+        } catch (RuntimeException | Error failure) {
+            installFailure = failure;
+        }
+
+        Optional<PendingAmbiguousFlush> observedPending = null;
+        Throwable currentFailure = null;
+        try {
+            // 정상 반환과 예외 반환 모두 exact candidate 사후확인 없이는 설치 완료로 간주 금지
+            observedPending = pendingAmbiguousFlushStore.current();
+        } catch (RuntimeException | Error failure) {
+            currentFailure = failure;
+        }
+
+        if (currentFailure == null
+                && observedPending != null
+                && observedPending.orElse(null) == candidate) {
+            return failConfirmedAmbiguous(candidate, transactionFailure, installFailure);
+        }
+
+        // pending 소유권 추측 대신 failure 전파 전에 process-local irreversible fail-closed 설치
+        serviceReadiness.markFatalNotReady();
+        Throwable confirmationFailure = currentFailure != null
+                ? currentFailure
+                : new IllegalStateException(
+                        "Pending ambiguous flush exact instance could not be confirmed."
+                );
+        return failClosedAmbiguous(
+                candidate,
+                transactionFailure,
+                installFailure,
+                confirmationFailure
+        );
+    }
+
+    private FlushRunResult failConfirmedAmbiguous(
+            PendingAmbiguousFlush candidate,
+            Throwable transactionFailure,
+            Throwable installFailure
+    ) {
+        Throwable primaryFailure = installFailure == null
+                ? transactionFailure
+                : selectPrimaryFailure(transactionFailure, installFailure);
         if (primaryFailure instanceof Error error) {
             throw error;
         }
@@ -156,6 +208,34 @@ public class FlushWorker {
                 "Flush commit outcome is ambiguous. target=" + candidate.flushTargetEventSeq(),
                 primaryFailure
         );
+    }
+
+    private FlushRunResult failClosedAmbiguous(
+            PendingAmbiguousFlush candidate,
+            Throwable transactionFailure,
+            Throwable installFailure,
+            Throwable confirmationFailure
+    ) {
+        Error primaryError = firstError(
+                transactionFailure,
+                installFailure,
+                confirmationFailure
+        );
+        if (primaryError != null) {
+            addSuppressedOnce(primaryError, transactionFailure);
+            addSuppressedOnce(primaryError, installFailure);
+            addSuppressedOnce(primaryError, confirmationFailure);
+            throw primaryError;
+        }
+
+        FlushFailClosedException fatalFailure = new FlushFailClosedException(
+                "Pending ambiguous flush installation could not be confirmed. target="
+                        + candidate.flushTargetEventSeq(),
+                transactionFailure
+        );
+        addSuppressedOnce(fatalFailure, installFailure);
+        addSuppressedOnce(fatalFailure, confirmationFailure);
+        throw fatalFailure;
     }
 
     private Throwable restoreWithPrimary(List<DirtyTile> drainedDirtyTiles, Throwable primaryFailure) {
@@ -167,31 +247,27 @@ public class FlushWorker {
         }
     }
 
-    private Throwable installPendingWithPrimary(
-            PendingAmbiguousFlush candidate,
-            Throwable primaryFailure
-    ) {
-        try {
-            // ambiguous dirty는 tracker에 즉시 복구하지 않고 pending 하나에만 보존
-            pendingAmbiguousFlushStore.installIfAbsent(candidate);
-            return primaryFailure;
-        } catch (RuntimeException | Error installFailure) {
-            return selectPrimaryFailure(primaryFailure, installFailure);
-        }
-    }
-
     private Throwable selectPrimaryFailure(Throwable firstFailure, Throwable laterFailure) {
         if (firstFailure instanceof Error) {
-            addSuppressed(firstFailure, laterFailure);
+            addSuppressedOnce(firstFailure, laterFailure);
             return firstFailure;
         }
         if (laterFailure instanceof Error) {
             // 복구 Error 승격은 DB outcome과 dirty/pending 소유권 판정을 바꾸지 않음
-            addSuppressed(laterFailure, firstFailure);
+            addSuppressedOnce(laterFailure, firstFailure);
             return laterFailure;
         }
-        addSuppressed(firstFailure, laterFailure);
+        addSuppressedOnce(firstFailure, laterFailure);
         return firstFailure;
+    }
+
+    private Error firstError(Throwable... failures) {
+        for (Throwable failure : failures) {
+            if (failure instanceof Error error) {
+                return error;
+            }
+        }
+        return null;
     }
 
     private RuntimeException asRuntimeExceptionOrRethrowError(Throwable failure) {
@@ -201,9 +277,17 @@ public class FlushWorker {
         return (RuntimeException) failure;
     }
 
-    private void addSuppressed(Throwable primaryFailure, Throwable secondaryFailure) {
-        if (secondaryFailure != primaryFailure) {
-            primaryFailure.addSuppressed(secondaryFailure);
+    private void addSuppressedOnce(Throwable primaryFailure, Throwable secondaryFailure) {
+        if (secondaryFailure == null
+                || secondaryFailure == primaryFailure
+                || secondaryFailure == primaryFailure.getCause()) {
+            return;
         }
+        for (Throwable existing : primaryFailure.getSuppressed()) {
+            if (existing == secondaryFailure) {
+                return;
+            }
+        }
+        primaryFailure.addSuppressed(secondaryFailure);
     }
 }

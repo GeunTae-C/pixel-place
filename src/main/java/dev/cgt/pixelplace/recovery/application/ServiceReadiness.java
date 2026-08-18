@@ -9,11 +9,11 @@ import org.springframework.stereotype.Component;
 @Component
 public class ServiceReadiness {
 
-    private boolean ready;
+    private State state = State.NOT_READY;
 
     /* 현재 보호 대상 요청과 core write를 처리할 수 있는지 확인 */
     public synchronized boolean isReady() {
-        return ready;
+        return state == State.READY;
     }
 
     /*
@@ -21,18 +21,43 @@ public class ServiceReadiness {
      * not-ready는 요청 데이터 오류가 아니므로 전용 예외로만 표현
      */
     public synchronized void requireReady() {
-        if (!ready) {
+        if (state != State.READY) {
+            throw new ServiceNotReadyException();
+        }
+    }
+
+    /* temporary not-ready의 pending reconciliation은 허용하고 irreversible fatal만 차단 */
+    public synchronized void requireNotFatal() {
+        if (state == State.FATAL_NOT_READY) {
             throw new ServiceNotReadyException();
         }
     }
 
     /* startup recovery 전체 성공 뒤에만 보호 대상 요청 처리 허용 */
     public synchronized void markReady() {
-        ready = true;
+        if (state != State.FATAL_NOT_READY) {
+            state = State.READY;
+        }
     }
 
-    /* recovery 시작 또는 runtime fatal 발생 시 보호 API와 후속 core write 차단 */
+    /* recovery 시작 같은 temporary not-ready 전환, irreversible fatal 해제 책임은 갖지 않음 */
     public synchronized void markNotReady() {
-        ready = false;
+        if (state != State.FATAL_NOT_READY) {
+            state = State.NOT_READY;
+        }
+    }
+
+    /*
+     * pending 소유권을 확인할 수 없는 process-local 치명 상태의 단방향 설치
+     * collaborator 호출 없는 synchronized 상태 변경 하나로 완료하여 실패 전파보다 먼저 fail-closed 보장
+     */
+    public synchronized void markFatalNotReady() {
+        state = State.FATAL_NOT_READY;
+    }
+
+    private enum State {
+        NOT_READY,
+        READY,
+        FATAL_NOT_READY
     }
 }
