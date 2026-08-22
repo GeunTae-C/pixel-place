@@ -7,7 +7,10 @@ import dev.cgt.pixelplace.checkpoint.infra.WalCheckpointJpaRepository;
 import dev.cgt.pixelplace.flush.application.DbBootstrapClassifier;
 import dev.cgt.pixelplace.flush.application.FlushBoundaryCoordinator;
 import dev.cgt.pixelplace.flush.application.FlushPlanCaptureService;
+import dev.cgt.pixelplace.pixel.application.EventSeqManager;
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
+import dev.cgt.pixelplace.recovery.application.StartupRecoveryDbViewCaptureService;
+import dev.cgt.pixelplace.recovery.application.StartupRecoveryService;
 import dev.cgt.pixelplace.tile.application.DirtyTileTracker;
 import dev.cgt.pixelplace.tile.application.TileMetadataReader;
 import dev.cgt.pixelplace.tile.application.TileSnapshotLoader;
@@ -25,9 +28,11 @@ import dev.cgt.pixelplace.wal.infra.WalProperties;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
+import java.lang.reflect.Field;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -40,6 +45,7 @@ class RecoveryAdapterProfileTest {
             assertSingleBean(context, CheckpointReader.class, JpaCheckpointReader.class);
             assertSingleBean(context, TileSnapshotLoader.class, JpaTileSnapshotLoader.class);
             assertSingleBean(context, WalReplaySource.class, FileWalReplaySource.class);
+            assertCommonCaptureAndRecoveryWiring(context);
         }
     }
 
@@ -49,6 +55,9 @@ class RecoveryAdapterProfileTest {
             assertSingleBean(context, CheckpointReader.class, StubCheckpointReader.class);
             assertSingleBean(context, TileSnapshotLoader.class, StubTileSnapshotLoader.class);
             assertSingleBean(context, WalReplaySource.class, StubWalReplaySource.class);
+            assertCommonCaptureAndRecoveryWiring(context);
+            assertTrue(context.getBeansOfType(StartupRecoveryDbViewCaptureService.class).values().stream()
+                    .noneMatch(bean -> bean.getClass().getSimpleName().contains("Stub")));
         }
     }
 
@@ -86,6 +95,7 @@ class RecoveryAdapterProfileTest {
         context.registerBean(WalRecordParser.class, () -> mock(WalRecordParser.class));
         context.registerBean(DirtyTileTracker.class, () -> mock(DirtyTileTracker.class));
         context.registerBean(InMemoryTileBoard.class, () -> mock(InMemoryTileBoard.class));
+        context.registerBean(EventSeqManager.class, EventSeqManager::new);
         context.registerBean(ServiceReadiness.class, ServiceReadiness::new);
 
         context.register(
@@ -97,12 +107,43 @@ class RecoveryAdapterProfileTest {
                 StubWalReplaySource.class,
                 CanonicalZ0TileKeys.class,
                 DbBootstrapClassifier.class,
+                StartupRecoveryDbViewCaptureService.class,
+                StartupRecoveryService.class,
                 FlushBoundaryCoordinator.class,
                 JpaTileMetadataReader.class,
                 FlushPlanCaptureService.class
         );
         context.refresh();
         return context;
+    }
+
+    private void assertCommonCaptureAndRecoveryWiring(AnnotationConfigApplicationContext context) {
+        assertSingleBean(
+                context,
+                StartupRecoveryDbViewCaptureService.class,
+                StartupRecoveryDbViewCaptureService.class
+        );
+        assertSingleBean(context, StartupRecoveryService.class, StartupRecoveryService.class);
+        assertSingleBean(context, DbBootstrapClassifier.class, DbBootstrapClassifier.class);
+
+        StartupRecoveryDbViewCaptureService capture =
+                context.getBean(StartupRecoveryDbViewCaptureService.class);
+        assertSame(context.getBean(CheckpointReader.class), field(capture, "checkpointReader"));
+        assertSame(context.getBean(TileSnapshotLoader.class), field(capture, "tileSnapshotLoader"));
+
+        StartupRecoveryService recovery = context.getBean(StartupRecoveryService.class);
+        assertSame(capture, field(recovery, "dbViewCaptureService"));
+        assertSame(context.getBean(DbBootstrapClassifier.class), field(recovery, "dbBootstrapClassifier"));
+    }
+
+    private Object field(Object target, String fieldName) {
+        try {
+            Field field = target.getClass().getDeclaredField(fieldName);
+            field.setAccessible(true);
+            return field.get(target);
+        } catch (ReflectiveOperationException exception) {
+            throw new AssertionError("Failed to inspect recovery wiring field: " + fieldName, exception);
+        }
     }
 
     private <T> void assertSingleBean(

@@ -34,7 +34,7 @@ import java.util.List;
  * 2. active WAL 파일은 끝까지 읽음
  *    - replay 대상 이벤트가 아니더라도 WAL 전체의 마지막 eventSeq를 알아야 함
  *    - walLastEventSeq는 DB 반영 완료 지점이 아니라 active WAL 파일에서 발견한 마지막 eventSeq
- *    - boot 이후 마지막 발급 eventSeq는 max(lastFlushedEventSeq, walLastEventSeq)를 기준으로 결정되어야 하기 때문
+ *    - recovery가 checkpoint/tail/records invariant를 검증한 뒤 WAL tail을 발급 seed로 사용하기 때문
  *
  * 3. WAL의 eventSeq는 반드시 strictly increasing 해야 함
  *    - eventSeq는 전역 이벤트 순서

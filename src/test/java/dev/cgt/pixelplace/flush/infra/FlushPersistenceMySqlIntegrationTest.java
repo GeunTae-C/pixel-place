@@ -1,29 +1,67 @@
 package dev.cgt.pixelplace.flush.infra;
 
 import dev.cgt.pixelplace.checkpoint.application.CheckpointFence;
+import dev.cgt.pixelplace.checkpoint.application.CheckpointReader;
 import dev.cgt.pixelplace.checkpoint.infra.JpaCheckpointFence;
+import dev.cgt.pixelplace.checkpoint.infra.JpaCheckpointReader;
 import dev.cgt.pixelplace.common.constant.BoardConstants;
 import dev.cgt.pixelplace.flush.application.DbBootstrapClassifier;
 import dev.cgt.pixelplace.flush.application.DbBootstrapState;
+import dev.cgt.pixelplace.flush.application.FlushBoundaryCoordinator;
 import dev.cgt.pixelplace.flush.application.FlushDbState;
 import dev.cgt.pixelplace.flush.application.FlushPersistenceService;
 import dev.cgt.pixelplace.flush.application.FlushPlan;
+import dev.cgt.pixelplace.flush.application.FlushPlanCaptureService;
+import dev.cgt.pixelplace.flush.application.FlushReconciliationService;
+import dev.cgt.pixelplace.flush.application.FlushRunResult;
+import dev.cgt.pixelplace.flush.application.FlushSingleFlightGuard;
 import dev.cgt.pixelplace.flush.application.FlushTileSnapshot;
 import dev.cgt.pixelplace.flush.application.FlushTransactionOutcome;
 import dev.cgt.pixelplace.flush.application.FlushTransactionResult;
+import dev.cgt.pixelplace.flush.application.FlushWorker;
+import dev.cgt.pixelplace.flush.application.PendingAmbiguousFlushStore;
+import dev.cgt.pixelplace.pixel.application.EventSeqManager;
+import dev.cgt.pixelplace.pixel.application.PixelBroadcastService;
+import dev.cgt.pixelplace.pixel.application.PixelCommandService;
+import dev.cgt.pixelplace.pixel.application.PixelCooldown;
 import dev.cgt.pixelplace.pixel.application.PixelEventWriter;
+import dev.cgt.pixelplace.pixel.application.PixelWriteResult;
+import dev.cgt.pixelplace.pixel.application.PixelWriteService;
 import dev.cgt.pixelplace.pixel.infra.JpaPixelEventWriter;
+import dev.cgt.pixelplace.recovery.application.ServiceNotReadyException;
+import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
+import dev.cgt.pixelplace.recovery.application.StartupRecoveryDbViewCaptureService;
+import dev.cgt.pixelplace.recovery.application.StartupRecoveryService;
+import dev.cgt.pixelplace.tile.application.SynchronizedDirtyTileTracker;
 import dev.cgt.pixelplace.tile.application.TileMetadataReader;
+import dev.cgt.pixelplace.tile.application.TileStateSnapshot;
 import dev.cgt.pixelplace.tile.application.TileSnapshotWriter;
 import dev.cgt.pixelplace.tile.domain.CanonicalZ0TileKeys;
+import dev.cgt.pixelplace.tile.domain.InMemoryTileBoard;
 import dev.cgt.pixelplace.tile.domain.TileKey;
+import dev.cgt.pixelplace.tile.domain.TileState;
 import dev.cgt.pixelplace.tile.infra.JpaTileMetadataReader;
+import dev.cgt.pixelplace.tile.infra.JpaTileSnapshotLoader;
 import dev.cgt.pixelplace.tile.infra.JpaTileSnapshotWriter;
+import dev.cgt.pixelplace.wal.application.WalRecordJsonCodec;
+import dev.cgt.pixelplace.wal.application.WalRecordParser;
+import dev.cgt.pixelplace.wal.application.WalReplayBatch;
 import dev.cgt.pixelplace.wal.domain.WalRecord;
+import dev.cgt.pixelplace.wal.infra.FileWalAppender;
+import dev.cgt.pixelplace.wal.infra.FileWalReplaySource;
+import dev.cgt.pixelplace.wal.infra.WalProperties;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
@@ -37,7 +75,9 @@ import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.DefaultTransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
 import java.io.IOException;
@@ -65,16 +105,20 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.UnaryOperator;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /*
- * 로컬 pixel_place_test catalog와 root DDL에서 events/tiles/checkpoint physical transaction 원자성 검증
- * 전체 application, Redis, startup recovery, scheduler와 test-managed transaction은 사용하지 않음
+ * 로컬 pixel_place_test와 root DDL에서 persistence 원자성 및 fresh runtime restart 경계 검증
+ * 제한 JPA context와 실제 recovery/worker만 사용하며 Redis, 자동 scheduler, test-managed transaction 제외
  */
 @DataJpaTest(properties = {
         "spring.jpa.hibernate.ddl-auto=none",
@@ -85,16 +129,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 @ActiveProfiles("mysql-integration")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock(value = "pixel_place_test", mode = ResourceAccessMode.READ_WRITE)
 @Import({
         CanonicalZ0TileKeys.class,
         DbBootstrapClassifier.class,
         JpaTileMetadataReader.class,
         JpaCheckpointFence.class,
+        JpaCheckpointReader.class,
+        JpaTileSnapshotLoader.class,
+        StartupRecoveryDbViewCaptureService.class,
         JpaPixelEventWriter.class,
         JpaTileSnapshotWriter.class,
         FlushPersistenceService.class,
         ProgrammaticFlushTransactionExecutor.class,
-        JpaFlushDbStateProbe.class
+        JpaFlushDbStateProbe.class,
+        FlushReconciliationService.class
 })
 class FlushPersistenceMySqlIntegrationTest {
 
@@ -117,6 +167,9 @@ class FlushPersistenceMySqlIntegrationTest {
     private CheckpointFence checkpointFence;
 
     @Autowired
+    private CheckpointReader checkpointReader;
+
+    @Autowired
     private TileMetadataReader tileMetadataReader;
 
     @Autowired
@@ -133,6 +186,15 @@ class FlushPersistenceMySqlIntegrationTest {
 
     @Autowired
     private ProgrammaticFlushTransactionExecutor transactionExecutor;
+
+    @Autowired
+    private StartupRecoveryDbViewCaptureService recoveryDbViewCaptureService;
+
+    @Autowired
+    private FlushReconciliationService flushReconciliationService;
+
+    @TempDir
+    Path tempDirectory;
 
     private final CanonicalZ0TileKeys canonicalKeys = new CanonicalZ0TileKeys();
 
@@ -538,6 +600,487 @@ class FlushPersistenceMySqlIntegrationTest {
         }
     }
 
+    @Test
+    // 같은 MySQL commit 상태와 WAL bytes만 넘겨 fresh process-local graph 경계 검증
+    void freshRuntimeRestartFlushesWalOnlyRecoveryAndPreventsDoubleReplay() throws Exception {
+        prepareBootstrap();
+        Path walPath = tempDirectory.resolve("runtime-a-b-c-d.wal");
+        byte[] whiteTile = TileState.allWhite().pixels();
+        assertFalse(Files.exists(walPath));
+
+        FreshRuntimeGraph runtimeA = null;
+        FreshRuntimeGraph runtimeB = null;
+        FreshRuntimeGraph runtimeC = null;
+        FreshRuntimeGraph runtimeD = null;
+        try {
+            assertTrue(AopUtils.isAopProxy(recoveryDbViewCaptureService));
+            runtimeA = createFreshRuntime(walPath);
+            assertRuntimePristine(runtimeA);
+            assertNoActualTransaction();
+            runtimeA.recover();
+            assertTrue(runtimeA.serviceReadiness.isReady());
+            assertEquals(BoardConstants.Z0_TILE_COUNT, runtimeA.board.size());
+            assertArrayEquals(whiteTile, runtimeA.board.getRequired(KEY_A).pixels());
+
+            assertNoActualTransaction();
+            PixelWriteResult eventOne = runtimeA.write(7L, 0, 0, 17);
+            assertEquals(1L, eventOne.eventSeq());
+            assertEquals(1L, eventOne.tileVersion());
+            WalReplayBatch runtimeAWal = runtimeA.fileWalReplaySource.readAfter(0L);
+            assertEquals(1L, runtimeAWal.walLastEventSeq());
+            assertEquals(1, runtimeAWal.records().size());
+            LocalDateTime eventOneCreatedAt = runtimeAWal.records().get(0).createdAt();
+
+            assertNoActualTransaction();
+            assertEquals(FlushRunResult.COMMITTED, runtimeA.flush());
+            assertEquals(1, eventCount(1L));
+            assertEquals(eventOneCreatedAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS), eventCreatedAt(1L));
+            assertEquals(BoardConstants.Z0_TILE_COUNT, tileCount());
+            assertArrayEquals(runtimeA.board.getRequired(KEY_A).pixels(), tileData(KEY_A));
+            assertEquals(runtimeA.board.getRequired(KEY_A).tileVersion(), tileVersion(KEY_A));
+            assertArrayEquals(whiteTile, tileData(KEY_B));
+            assertEquals(0L, tileVersion(KEY_B));
+            assertEquals(1L, checkpoint());
+            assertDirtyEmpty(runtimeA);
+            assertTrue(runtimeA.pendingAmbiguousFlushStore.current().isEmpty());
+            long walSizeAfterRuntimeA = Files.size(walPath);
+            assertTrue(walSizeAfterRuntimeA > 0L);
+
+            runtimeA.retire();
+            runtimeB = createFreshRuntime(walPath);
+            assertFreshRuntimeIsolation(runtimeA, runtimeB);
+            assertRetiredRuntimeRejected(runtimeA);
+            runtimeA = null;
+            assertRuntimePristine(runtimeB);
+
+            byte[] committedEventOneBytes = tileData(KEY_A);
+            long committedEventOneVersion = tileVersion(KEY_A);
+            assertNoActualTransaction();
+            runtimeB.recover();
+            assertTrue(runtimeB.fileWalReplaySource.readAfter(1L).records().isEmpty());
+            assertArrayEquals(committedEventOneBytes, runtimeB.board.getRequired(KEY_A).pixels());
+            assertEquals(committedEventOneVersion, runtimeB.board.getRequired(KEY_A).tileVersion());
+            assertEquals(1L, runtimeB.eventSeqManager.currentLastIssued());
+            assertDirtyEmpty(runtimeB);
+            assertTrue(runtimeB.pendingAmbiguousFlushStore.current().isEmpty());
+            assertTrue(runtimeB.serviceReadiness.isReady());
+
+            assertNoActualTransaction();
+            PixelWriteResult eventTwo = runtimeB.write(7L, 1, 0, 19);
+            assertEquals(2L, eventTwo.eventSeq());
+            assertEquals(committedEventOneVersion + 1L, eventTwo.tileVersion());
+            assertEquals(1, eventCount());
+            assertEquals(1L, checkpoint());
+            assertArrayEquals(committedEventOneBytes, tileData(KEY_A));
+            WalReplayBatch runtimeBWal = runtimeB.fileWalReplaySource.readAfter(1L);
+            assertEquals(2L, runtimeBWal.walLastEventSeq());
+            assertEquals(List.of(2L), runtimeBWal.records().stream().map(WalRecord::eventSeq).toList());
+            assertEquals(19, Byte.toUnsignedInt(runtimeB.board.getRequired(KEY_A).pixels()[1]));
+
+            runtimeB.retire();
+            runtimeC = createFreshRuntime(walPath);
+            assertFreshRuntimeIsolation(runtimeB, runtimeC);
+            assertRetiredRuntimeRejected(runtimeB);
+            runtimeB = null;
+            assertRuntimePristine(runtimeC);
+
+            assertNoActualTransaction();
+            runtimeC.recover();
+            assertEquals(2L, runtimeC.eventSeqManager.currentLastIssued());
+            assertEquals(19, Byte.toUnsignedInt(runtimeC.board.getRequired(KEY_A).pixels()[1]));
+            assertEquals(committedEventOneVersion + 1L, runtimeC.board.getRequired(KEY_A).tileVersion());
+            assertEquals(1, eventCount());
+            assertEquals(1L, checkpoint());
+            assertDirtyEmpty(runtimeC);
+            assertTrue(runtimeC.pendingAmbiguousFlushStore.current().isEmpty());
+            assertTrue(runtimeC.serviceReadiness.isReady());
+
+            byte[] recoveredEventTwoBytes = runtimeC.board.getRequired(KEY_A).pixels();
+            long recoveredEventTwoVersion = runtimeC.board.getRequired(KEY_A).tileVersion();
+            byte[] unchangedTileBytes = tileData(KEY_B);
+            long unchangedTileVersion = tileVersion(KEY_B);
+            long walSizeBeforeRuntimeCFlush = Files.size(walPath);
+            assertNoActualTransaction();
+            assertEquals(FlushRunResult.COMMITTED, runtimeC.flush());
+            assertEquals(1, eventCount(1L));
+            assertEquals(1, eventCount(2L));
+            assertEquals(2, eventCount());
+            assertEquals(2L, checkpoint());
+            assertArrayEquals(recoveredEventTwoBytes, tileData(KEY_A));
+            assertEquals(recoveredEventTwoVersion, tileVersion(KEY_A));
+            assertArrayEquals(unchangedTileBytes, tileData(KEY_B));
+            assertEquals(unchangedTileVersion, tileVersion(KEY_B));
+            assertDirtyEmpty(runtimeC);
+            assertTrue(runtimeC.pendingAmbiguousFlushStore.current().isEmpty());
+            assertEquals(walSizeBeforeRuntimeCFlush, Files.size(walPath));
+
+            runtimeC.retire();
+            runtimeD = createFreshRuntime(walPath);
+            assertFreshRuntimeIsolation(runtimeC, runtimeD);
+            assertRetiredRuntimeRejected(runtimeC);
+            runtimeC = null;
+            assertRuntimePristine(runtimeD);
+
+            WalReplayBatch noReplayBatch = runtimeD.fileWalReplaySource.readAfter(2L);
+            assertEquals(2L, noReplayBatch.walLastEventSeq());
+            assertTrue(noReplayBatch.records().isEmpty());
+            assertNoActualTransaction();
+            runtimeD.recover();
+            assertEquals(2L, runtimeD.eventSeqManager.currentLastIssued());
+            assertArrayEquals(recoveredEventTwoBytes, runtimeD.board.getRequired(KEY_A).pixels());
+            assertEquals(recoveredEventTwoVersion, runtimeD.board.getRequired(KEY_A).tileVersion());
+            assertEquals(19, Byte.toUnsignedInt(runtimeD.board.getRequired(KEY_A).pixels()[1]));
+            assertEquals(1, eventCount(1L));
+            assertEquals(1, eventCount(2L));
+            assertEquals(2L, checkpoint());
+            assertDirtyEmpty(runtimeD);
+            assertTrue(runtimeD.pendingAmbiguousFlushStore.current().isEmpty());
+            assertTrue(runtimeD.serviceReadiness.isReady());
+            assertEquals(walSizeBeforeRuntimeCFlush, Files.size(walPath));
+
+            runtimeD.retire();
+            assertRetiredRuntimeRejected(runtimeD);
+            runtimeD = null;
+        } finally {
+            retireQuietly(runtimeA);
+            retireQuietly(runtimeB);
+            retireQuietly(runtimeC);
+            retireQuietly(runtimeD);
+        }
+    }
+
+    @TestFactory
+    // 실제 MySQL의 잘못된 checkpoint/tile shape를 case별 fresh recovery/plan-capture graph에서 fail-fast 검증
+    Stream<DynamicTest> inconsistentDatabaseShapesFailBeforeWalMemorySeedReadyAndWorker() {
+        List<DatabaseFailureCase> cases = List.of(
+                new DatabaseFailureCase("positive checkpoint and zero tiles", "positive-zero", () -> {
+                    resetDatabaseToBootstrap();
+                    executeGuardedUpdate(
+                            "UPDATE wal_checkpoint SET last_flushed_event_seq = 1 WHERE checkpoint_name = 'main'"
+                    );
+                }),
+                new DatabaseFailureCase("partial z zero rows", "partial-z0", () -> {
+                    resetDatabaseToBootstrap();
+                    preparePartialDatabase();
+                }),
+                new DatabaseFailureCase("canonical rows plus non z zero row", "extra-z", () -> {
+                    resetDatabaseToBootstrap();
+                    prepareInitialized();
+                    executeGuardedUpdate(
+                            "INSERT INTO tiles(z, tx, ty, data, tile_version) VALUES (?, ?, ?, ?, ?)",
+                            1,
+                            0,
+                            0,
+                            ZERO_TILE,
+                            0L
+                    );
+                }),
+                new DatabaseFailureCase("missing main checkpoint", "missing-main", () -> {
+                    resetDatabaseToBootstrap();
+                    prepareInitialized();
+                    executeGuardedUpdate("DELETE FROM wal_checkpoint WHERE checkpoint_name = 'main'");
+                })
+        );
+
+        return cases.stream().map(failureCase -> DynamicTest.dynamicTest(
+                failureCase.name(),
+                () -> assertDatabaseFailureCase(failureCase)
+        ));
+    }
+
+    @TestFactory
+    // 실제 WAL scan 뒤 조립된 잘못된 batch도 memory/seed/ready 이전에 차단
+    Stream<DynamicTest> inconsistentWalBatchesFailBeforeMemorySeedReadyAndWorker() {
+        List<WalFailureCase> cases = List.of(
+                new WalFailureCase(
+                        "WAL tail before checkpoint",
+                        "tail-before-checkpoint",
+                        2L,
+                        UnaryOperator.identity()
+                ),
+                new WalFailureCase(
+                        "empty records with larger tail",
+                        "empty-larger-tail",
+                        0L,
+                        batch -> new WalReplayBatch(List.of(), batch.walLastEventSeq())
+                ),
+                new WalFailureCase(
+                        "last replay record and tail mismatch",
+                        "last-tail-mismatch",
+                        0L,
+                        batch -> new WalReplayBatch(batch.records(), batch.walLastEventSeq() + 1L)
+                )
+        );
+
+        return cases.stream().map(failureCase -> DynamicTest.dynamicTest(
+                failureCase.name(),
+                () -> assertWalFailureCase(failureCase)
+        ));
+    }
+
+    private FreshRuntimeGraph createFreshRuntime(Path walPath) {
+        return createFreshRuntime(walPath, null, false);
+    }
+
+    private FreshRuntimeGraph createFreshRuntime(
+            Path walPath,
+            UnaryOperator<WalReplayBatch> replayBatchTransform
+    ) {
+        return createFreshRuntime(
+                walPath,
+                Objects.requireNonNull(replayBatchTransform, "replayBatchTransform must not be null"),
+                true
+        );
+    }
+
+    private FreshRuntimeGraph createFreshRuntime(
+            Path walPath,
+            UnaryOperator<WalReplayBatch> replayBatchTransform,
+            boolean failureObservationEnabled
+    ) {
+        InMemoryTileBoard board = failureObservationEnabled
+                ? new TrackingInMemoryTileBoard()
+                : new InMemoryTileBoard();
+        EventSeqManager eventSeqManager = new EventSeqManager();
+        ServiceReadiness serviceReadiness = new ServiceReadiness();
+        SynchronizedDirtyTileTracker dirtyTileTracker = new SynchronizedDirtyTileTracker();
+        FlushBoundaryCoordinator flushBoundaryCoordinator = new FlushBoundaryCoordinator();
+        FlushSingleFlightGuard flushSingleFlightGuard = new FlushSingleFlightGuard();
+        PendingAmbiguousFlushStore pendingAmbiguousFlushStore = new PendingAmbiguousFlushStore();
+
+        WalProperties walProperties = new WalProperties();
+        walProperties.setActiveFile(walPath);
+        ObjectMapper objectMapper = new ObjectMapper();
+        FileWalAppender fileWalAppender = new FileWalAppender(
+                walProperties,
+                new WalRecordJsonCodec(objectMapper)
+        );
+        FileWalReplaySource fileWalReplaySource = failureObservationEnabled
+                ? new TrackingFileWalReplaySource(
+                        walProperties,
+                        new WalRecordParser(objectMapper),
+                        replayBatchTransform
+                )
+                : new FileWalReplaySource(walProperties, new WalRecordParser(objectMapper));
+        StartupRecoveryService startupRecoveryService = new StartupRecoveryService(
+                recoveryDbViewCaptureService,
+                dbBootstrapClassifier,
+                canonicalKeys,
+                fileWalReplaySource,
+                board,
+                eventSeqManager,
+                serviceReadiness
+        );
+        PixelWriteService pixelWriteService = new PixelWriteService(
+                eventSeqManager,
+                fileWalAppender,
+                board,
+                serviceReadiness
+        );
+        PixelCooldown noOpCooldown = new PixelCooldown() {
+            @Override
+            public void checkWritable(long userId) {
+                // 실제 Redis 없이 command/write/dirty 경계만 검증하는 제한 fixture
+            }
+
+            @Override
+            public void startCooldown(long userId) {
+                // 성공 write 이후 Redis 후처리 책임 제외
+            }
+        };
+        PixelBroadcastService noOpBroadcast = message -> {
+            // 실제 WebSocket 없이 durable runtime 상태 전이만 검증
+        };
+        PixelCommandService pixelCommandService = new PixelCommandService(
+                noOpCooldown,
+                flushBoundaryCoordinator,
+                pixelWriteService,
+                dirtyTileTracker,
+                noOpBroadcast,
+                serviceReadiness
+        );
+        FlushPlanCaptureService flushPlanCaptureService = new FlushPlanCaptureService(
+                serviceReadiness,
+                checkpointReader,
+                tileMetadataReader,
+                dbBootstrapClassifier,
+                flushBoundaryCoordinator,
+                fileWalReplaySource,
+                dirtyTileTracker,
+                board
+        );
+        FlushWorker flushWorker = new FlushWorker(
+                flushSingleFlightGuard,
+                serviceReadiness,
+                flushPlanCaptureService,
+                transactionExecutor,
+                pendingAmbiguousFlushStore,
+                flushReconciliationService,
+                dirtyTileTracker
+        );
+
+        return new FreshRuntimeGraph(
+                board,
+                eventSeqManager,
+                serviceReadiness,
+                dirtyTileTracker,
+                flushBoundaryCoordinator,
+                flushSingleFlightGuard,
+                pendingAmbiguousFlushStore,
+                fileWalAppender,
+                fileWalReplaySource,
+                startupRecoveryService,
+                pixelWriteService,
+                pixelCommandService,
+                flushPlanCaptureService,
+                flushWorker
+        );
+    }
+
+    private void assertRuntimePristine(FreshRuntimeGraph runtime) {
+        assertFalse(runtime.serviceReadiness.isReady());
+        assertEquals(0L, runtime.eventSeqManager.currentLastIssued());
+        assertEquals(BoardConstants.Z0_TILE_COUNT, runtime.board.size());
+        assertDirtyEmpty(runtime);
+        assertTrue(runtime.pendingAmbiguousFlushStore.current().isEmpty());
+        assertFalse(runtime.retired());
+    }
+
+    private void assertFreshRuntimeIsolation(FreshRuntimeGraph previous, FreshRuntimeGraph current) {
+        assertNotSame(previous.board, current.board);
+        assertNotSame(previous.eventSeqManager, current.eventSeqManager);
+        assertNotSame(previous.serviceReadiness, current.serviceReadiness);
+        assertNotSame(previous.dirtyTileTracker, current.dirtyTileTracker);
+        assertNotSame(previous.flushBoundaryCoordinator, current.flushBoundaryCoordinator);
+        assertNotSame(previous.flushSingleFlightGuard, current.flushSingleFlightGuard);
+        assertNotSame(previous.pendingAmbiguousFlushStore, current.pendingAmbiguousFlushStore);
+        assertNotSame(previous.fileWalAppender, current.fileWalAppender);
+        assertNotSame(previous.fileWalReplaySource, current.fileWalReplaySource);
+        assertNotSame(previous.startupRecoveryService, current.startupRecoveryService);
+        assertNotSame(previous.pixelWriteService, current.pixelWriteService);
+        assertNotSame(previous.pixelCommandService, current.pixelCommandService);
+        assertNotSame(previous.flushPlanCaptureService, current.flushPlanCaptureService);
+        assertNotSame(previous.flushWorker, current.flushWorker);
+    }
+
+    private void assertRetiredRuntimeRejected(FreshRuntimeGraph runtime) {
+        assertTrue(runtime.retired());
+        assertFalse(runtime.serviceReadiness.isReady());
+        assertThrows(ServiceNotReadyException.class, runtime.flushWorker::flushOnce);
+    }
+
+    private void retireQuietly(FreshRuntimeGraph runtime) {
+        if (runtime != null) {
+            runtime.retire();
+        }
+    }
+
+    private void assertDirtyEmpty(FreshRuntimeGraph runtime) {
+        assertTrue(runtime.dirtyTileTracker.drainDirtyTiles().isEmpty());
+    }
+
+    private void assertNoActualTransaction() {
+        assertFalse(
+                TransactionSynchronizationManager.isActualTransactionActive(),
+                "Production call must start without a test-managed outer transaction."
+        );
+    }
+
+    private void assertDatabaseFailureCase(DatabaseFailureCase failureCase) {
+        failureCase.setup().run();
+        if (!failureCase.fileStem().equals("missing-main")) {
+            assertEquals(
+                    DbBootstrapState.INCONSISTENT,
+                    dbBootstrapClassifier.classify(checkpoint(), tileMetadataReader.readAllTileKeys())
+            );
+        }
+
+        FreshRuntimeGraph recoveryRuntime = createFreshRuntime(
+                tempDirectory.resolve(failureCase.fileStem() + "-recovery.wal"),
+                UnaryOperator.identity()
+        );
+        int initialMemoryMutationCalls = recoveryRuntime.memoryMutationCalls();
+        try {
+            assertRuntimePristine(recoveryRuntime);
+            assertNoActualTransaction();
+            assertThrows(IllegalStateException.class, recoveryRuntime::recover);
+            assertEquals(0, recoveryRuntime.replayReadCount());
+            assertEquals(initialMemoryMutationCalls, recoveryRuntime.memoryMutationCalls());
+            assertEquals(0L, recoveryRuntime.eventSeqManager.currentLastIssued());
+            assertFalse(recoveryRuntime.serviceReadiness.isReady());
+            assertDirtyEmpty(recoveryRuntime);
+            assertTrue(recoveryRuntime.pendingAmbiguousFlushStore.current().isEmpty());
+            assertEquals(0, recoveryRuntime.workerInvocationCount());
+        } finally {
+            recoveryRuntime.retire();
+        }
+
+        FreshRuntimeGraph planRuntime = createFreshRuntime(
+                tempDirectory.resolve(failureCase.fileStem() + "-plan.wal"),
+                UnaryOperator.identity()
+        );
+        int initialPlanMemoryMutationCalls = planRuntime.memoryMutationCalls();
+        try {
+            assertRuntimePristine(planRuntime);
+            planRuntime.serviceReadiness.markReady();
+            assertNoActualTransaction();
+            assertThrows(IllegalStateException.class, planRuntime.flushPlanCaptureService::capturePlan);
+            assertEquals(0, planRuntime.replayReadCount());
+            assertEquals(initialPlanMemoryMutationCalls, planRuntime.memoryMutationCalls());
+            assertEquals(0L, planRuntime.eventSeqManager.currentLastIssued());
+            assertTrue(planRuntime.serviceReadiness.isReady());
+            assertDirtyEmpty(planRuntime);
+            assertTrue(planRuntime.pendingAmbiguousFlushStore.current().isEmpty());
+            assertEquals(0, planRuntime.workerInvocationCount());
+        } finally {
+            planRuntime.retire();
+        }
+    }
+
+    private void assertWalFailureCase(WalFailureCase failureCase) {
+        resetDatabaseToBootstrap();
+        prepareInitialized();
+        executeGuardedUpdate(
+                "UPDATE wal_checkpoint SET last_flushed_event_seq = ? WHERE checkpoint_name = 'main'",
+                failureCase.checkpoint()
+        );
+
+        Path walPath = tempDirectory.resolve(failureCase.fileStem() + ".wal");
+        FreshRuntimeGraph runtime = createFreshRuntime(walPath, failureCase.batchTransform());
+        try {
+            runtime.fileWalAppender.appendAndFsync(
+                    record(1L, KEY_A, 17, LocalDateTime.of(2026, 4, 3, 6, 0))
+            );
+            assertTrue(Files.exists(walPath));
+            assertTrue(Files.size(walPath) > 0L);
+            int initialMemoryMutationCalls = runtime.memoryMutationCalls();
+
+            assertRuntimePristine(runtime);
+            assertNoActualTransaction();
+            assertThrows(IllegalStateException.class, runtime::recover);
+            assertEquals(1, runtime.replayReadCount());
+            assertEquals(initialMemoryMutationCalls, runtime.memoryMutationCalls());
+            assertEquals(0L, runtime.eventSeqManager.currentLastIssued());
+            assertFalse(runtime.serviceReadiness.isReady());
+            assertDirtyEmpty(runtime);
+            assertTrue(runtime.pendingAmbiguousFlushStore.current().isEmpty());
+            assertEquals(0, runtime.workerInvocationCount());
+        } catch (IOException exception) {
+            throw new AssertionError("Failed to inspect test WAL.", exception);
+        } finally {
+            runtime.retire();
+        }
+    }
+
+    private void resetDatabaseToBootstrap() {
+        executeGuardedUpdate("DELETE FROM pixel_events");
+        executeGuardedUpdate("DELETE FROM tiles");
+        executeGuardedUpdate("DELETE FROM wal_checkpoint");
+        executeGuardedUpdate(
+                "INSERT INTO wal_checkpoint(checkpoint_name, last_flushed_event_seq) VALUES ('main', 0)"
+        );
+    }
+
     private void prepareBootstrap() {
         executeGuardedUpdate("DELETE FROM tiles");
         assertEquals(DbBootstrapState.BOOTSTRAP_PENDING, dbBootstrapClassifier.classify(
@@ -680,6 +1223,14 @@ class FlushPersistenceMySqlIntegrationTest {
 
     private int eventCount() {
         return jdbcTemplate.queryForObject("SELECT COUNT(*) FROM pixel_events", Integer.class);
+    }
+
+    private int eventCount(long eventSeq) {
+        return jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM pixel_events WHERE event_seq = ?",
+                Integer.class,
+                eventSeq
+        );
     }
 
     private int tileCount() {
@@ -908,10 +1459,12 @@ class FlushPersistenceMySqlIntegrationTest {
     }
 
     private void dropTestTables(Connection connection) throws SQLException {
-        requireTestCatalog(connection);
         try (Statement statement = connection.createStatement()) {
+            requireTestCatalog(connection);
             statement.executeUpdate("DROP TABLE IF EXISTS pixel_events");
+            requireTestCatalog(connection);
             statement.executeUpdate("DROP TABLE IF EXISTS tiles");
+            requireTestCatalog(connection);
             statement.executeUpdate("DROP TABLE IF EXISTS wal_checkpoint");
         }
     }
@@ -920,9 +1473,9 @@ class FlushPersistenceMySqlIntegrationTest {
             Connection connection,
             List<String> executableStatements
     ) throws SQLException {
-        requireTestCatalog(connection);
         try (Statement statement = connection.createStatement()) {
             for (String executable : executableStatements) {
+                requireTestCatalog(connection);
                 statement.execute(executable);
             }
         }
@@ -1037,5 +1590,177 @@ class FlushPersistenceMySqlIntegrationTest {
                 "pixel_events|idx_pixel_events_user_id|1|1|user_id",
                 "wal_checkpoint|PRIMARY|0|1|checkpoint_name"
         );
+    }
+
+    private final class FreshRuntimeGraph {
+
+        private final InMemoryTileBoard board;
+        private final EventSeqManager eventSeqManager;
+        private final ServiceReadiness serviceReadiness;
+        private final SynchronizedDirtyTileTracker dirtyTileTracker;
+        private final FlushBoundaryCoordinator flushBoundaryCoordinator;
+        private final FlushSingleFlightGuard flushSingleFlightGuard;
+        private final PendingAmbiguousFlushStore pendingAmbiguousFlushStore;
+        private final FileWalAppender fileWalAppender;
+        private final FileWalReplaySource fileWalReplaySource;
+        private final StartupRecoveryService startupRecoveryService;
+        private final PixelWriteService pixelWriteService;
+        private final PixelCommandService pixelCommandService;
+        private final FlushPlanCaptureService flushPlanCaptureService;
+        private final FlushWorker flushWorker;
+
+        private boolean retired;
+        private int workerInvocationCount;
+
+        private FreshRuntimeGraph(
+                InMemoryTileBoard board,
+                EventSeqManager eventSeqManager,
+                ServiceReadiness serviceReadiness,
+                SynchronizedDirtyTileTracker dirtyTileTracker,
+                FlushBoundaryCoordinator flushBoundaryCoordinator,
+                FlushSingleFlightGuard flushSingleFlightGuard,
+                PendingAmbiguousFlushStore pendingAmbiguousFlushStore,
+                FileWalAppender fileWalAppender,
+                FileWalReplaySource fileWalReplaySource,
+                StartupRecoveryService startupRecoveryService,
+                PixelWriteService pixelWriteService,
+                PixelCommandService pixelCommandService,
+                FlushPlanCaptureService flushPlanCaptureService,
+                FlushWorker flushWorker
+        ) {
+            this.board = board;
+            this.eventSeqManager = eventSeqManager;
+            this.serviceReadiness = serviceReadiness;
+            this.dirtyTileTracker = dirtyTileTracker;
+            this.flushBoundaryCoordinator = flushBoundaryCoordinator;
+            this.flushSingleFlightGuard = flushSingleFlightGuard;
+            this.pendingAmbiguousFlushStore = pendingAmbiguousFlushStore;
+            this.fileWalAppender = fileWalAppender;
+            this.fileWalReplaySource = fileWalReplaySource;
+            this.startupRecoveryService = startupRecoveryService;
+            this.pixelWriteService = pixelWriteService;
+            this.pixelCommandService = pixelCommandService;
+            this.flushPlanCaptureService = flushPlanCaptureService;
+            this.flushWorker = flushWorker;
+        }
+
+        private void recover() {
+            requireActive();
+            startupRecoveryService.recover();
+        }
+
+        private PixelWriteResult write(long userId, int x, int y, int color) {
+            requireActive();
+            return pixelCommandService.writePixel(userId, x, y, color);
+        }
+
+        private FlushRunResult flush() {
+            requireActive();
+            workerInvocationCount++;
+            return flushWorker.flushOnce();
+        }
+
+        private void retire() {
+            if (retired) {
+                return;
+            }
+            serviceReadiness.markNotReady();
+            fileWalAppender.close();
+            retired = true;
+        }
+
+        private boolean retired() {
+            return retired;
+        }
+
+        private int workerInvocationCount() {
+            return workerInvocationCount;
+        }
+
+        private int memoryMutationCalls() {
+            if (board instanceof TrackingInMemoryTileBoard trackingBoard) {
+                return trackingBoard.memoryMutationCalls();
+            }
+            throw new IllegalStateException("Memory mutation observation is not enabled for this runtime.");
+        }
+
+        private int replayReadCount() {
+            if (fileWalReplaySource instanceof TrackingFileWalReplaySource trackingSource) {
+                return trackingSource.readCount();
+            }
+            throw new IllegalStateException("WAL read observation is not enabled for this runtime.");
+        }
+
+        private void requireActive() {
+            if (retired) {
+                throw new IllegalStateException("Retired runtime graph must not be reused.");
+            }
+        }
+    }
+
+    private static final class TrackingInMemoryTileBoard extends InMemoryTileBoard {
+
+        private int memoryMutationCalls;
+
+        @Override
+        public synchronized void initializeAllWhite() {
+            memoryMutationCalls++;
+            super.initializeAllWhite();
+        }
+
+        @Override
+        public synchronized void loadAll(List<TileStateSnapshot> snapshots) {
+            memoryMutationCalls++;
+            super.loadAll(snapshots);
+        }
+
+        @Override
+        public synchronized void applyReplayRecord(int x, int y, int color) {
+            memoryMutationCalls++;
+            super.applyReplayRecord(x, y, color);
+        }
+
+        private int memoryMutationCalls() {
+            return memoryMutationCalls;
+        }
+    }
+
+    private static final class TrackingFileWalReplaySource extends FileWalReplaySource {
+
+        private final UnaryOperator<WalReplayBatch> batchTransform;
+        private int readCount;
+
+        private TrackingFileWalReplaySource(
+                WalProperties walProperties,
+                WalRecordParser walRecordParser,
+                UnaryOperator<WalReplayBatch> batchTransform
+        ) {
+            super(walProperties, walRecordParser);
+            this.batchTransform = Objects.requireNonNull(batchTransform, "batchTransform must not be null");
+        }
+
+        @Override
+        public WalReplayBatch readAfter(long lastFlushedEventSeq) {
+            readCount++;
+            return Objects.requireNonNull(
+                    batchTransform.apply(super.readAfter(lastFlushedEventSeq)),
+                    "batchTransform returned null"
+            );
+        }
+
+        private int readCount() {
+            return readCount;
+        }
+    }
+
+    private record DatabaseFailureCase(String name, String fileStem, Runnable setup) {
+    }
+
+    private record WalFailureCase(
+            String name,
+            String fileStem,
+            long checkpoint,
+            UnaryOperator<WalReplayBatch> batchTransform
+    ) {
     }
 }

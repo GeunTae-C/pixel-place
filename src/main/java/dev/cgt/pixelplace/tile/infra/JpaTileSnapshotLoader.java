@@ -7,6 +7,9 @@ import dev.cgt.pixelplace.tile.application.TileStateSnapshot;
 import dev.cgt.pixelplace.tile.domain.TileKey;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -22,31 +25,21 @@ public class JpaTileSnapshotLoader implements TileSnapshotLoader {
         this.tileJpaRepository = tileJpaRepository;
     }
 
-    // startup recovery용 z=0 전체 snapshot 조회, 부분 snapshot은 조용한 복구 대신 실패 처리
+    /* capture transaction에 참여하여 전체 key metadata 뒤 z=0 bytes를 같은 DB snapshot에서 조회 */
     @Override
+    @Transactional(
+            readOnly = true,
+            isolation = Isolation.REPEATABLE_READ,
+            propagation = Propagation.REQUIRED
+    )
     public TileLoadResult loadZ0Tiles() {
+        List<TileKey> databaseTileKeys = tileJpaRepository.findAllTileKeysOrderByZTyTx();
         List<TileEntity> tileEntities = tileJpaRepository.findAllByZOrderByTyAscTxAsc(BoardConstants.Z0_LEVEL);
-
-        // DB tiles가 비어 있으면 최초 부팅 상태로 보고,
-        // application 계층에서 all-white pre-init 경로를 타게 함
-        if (tileEntities.isEmpty()) {
-            return TileLoadResult.allMissingResult();
-        }
-
-        // DB snapshot은 전체 존재 또는 전체 미존재만 허용함
-        // 일부 누락은 조용한 부분 복구 대신 recovery 실패로 다뤄야 함
-        if (tileEntities.size() != BoardConstants.Z0_TILE_COUNT) {
-            throw new IllegalStateException("Expected 0 or " + BoardConstants.Z0_TILE_COUNT
-                    + " z=0 tile rows, but found " + tileEntities.size() + ".");
-        }
-
-        // z=0 전체 1024개 row가 모두 있으면,
-        // DB 후행 저장소 snapshot을 recovery가 사용할 TileStateSnapshot 목록으로 변환함
         List<TileStateSnapshot> snapshots = tileEntities.stream()
                 .map(this::toSnapshot)
                 .toList();
 
-        return TileLoadResult.fullyLoaded(snapshots);
+        return new TileLoadResult(databaseTileKeys, snapshots);
     }
 
     // JPA 엔티티를 application 계층 전달 타입으로 변환해,

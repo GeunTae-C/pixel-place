@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
 @Profile("stub")
 public class StubTileSnapshotLoader implements TileSnapshotLoader {
 
-    // DB 조회 없이 all-white pre-init 경로용 결정론적 입력 제공
+    /* DB 조회 없이 empty key/empty snapshot bootstrap 입력 제공 */
     @Override
     public TileLoadResult loadZ0Tiles() {
         return TileLoadResult.allMissingResult();

@@ -4,14 +4,11 @@ import java.time.LocalDateTime;
 
 /*
  * WAL에 기록되는 승인 이벤트의 단위
- * write 성공의 1차 내구성 기준이므로, recovery와 flush worker가 같은 eventSeq를 기준으로 재사용함
+ * write 성공의 1차 내구성 기준이며 다음 경계에서 동일한 eventSeq 계약으로 사용함
  *
- * 이 객체는 replay 전용이 아님
- * 앞으로:
  * 1. write path에서 WAL에 append할 이벤트 단위
  * 2. recovery에서 replay할 이벤트 단위
  * 3. flush worker에서 pixel_events에 저장할 이벤트 단위
- * 로 같이 쓰일 수 있음
  */
 public record WalRecord(
 				// 전체 서비스에서 단조 증가하는 전역 이벤트 순번. tileVersion과는 별개

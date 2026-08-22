@@ -18,7 +18,7 @@ public class EventSeqManager {
 
     /*
      * boot recovery가 끝나기 전에 마지막 발급 완료 eventSeq를 주입함
-     * seed는 max(lastFlushedEventSeq, walLastEventSeq)여야 하며, 음수 seed는 복구 기준점이 깨진 상태이므로 거부함
+     * startup recovery가 checkpoint/tail/records invariant를 검증한 WAL tail을 seed로 전달
      */
     public void initializeLastIssued(long seed) {
         if (seed < 0) {

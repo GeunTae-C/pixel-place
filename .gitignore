@@ -44,8 +44,16 @@ out/
 *.yml
 *.zip
 
+
 셀프백업/
 /codex-instruction.md
 명령문/
 /docs/review-protocol.md
 /AGENTS.md
+
+# Graphify 생성 산출물
+/graphify-out/
+
+# 로컬 Codex 설정 및 작업용 프롬프트
+/.codex/
+/prompt.txt

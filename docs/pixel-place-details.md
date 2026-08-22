@@ -429,7 +429,7 @@ Content-Type: application/json
 13. dirty 타일 표시 성공 뒤에만 현재 HTTP `200` 성공 조건 확정
 14. Redis cooldown 시작과 WebSocket broadcast 후처리. 실패해도 완료 write 유지
 15. `accepted`, `eventSeq`, `x`, `y`, `color`, `tileVersion` HTTP `200` 응답 반환
-16. 후속 11단계 flush worker가 DB 반영 예정
+16. default runtime의 1초 fixed-delay scheduler가 `FlushWorker.flushOnce()`를 호출해 DB를 후행 반영
 
 ---
 
@@ -465,6 +465,9 @@ Content-Type: application/json
 ### created_at
 - `pixel_events.created_at`은 별도로 둔다.
 - 이 값은 **이벤트 승인 시각 기록용**이다.
+- WAL codec과 immutable flush plan은 `WalRecord.createdAt`의 원래 나노초 필드를 보존한다.
+- DB entity mapping 경계에서만 `ChronoUnit.MILLIS`로 truncate하고 `DATETIME(3)`에 저장한다.
+- 시간값은 정렬, checkpoint 또는 tie-breaker로 사용하지 않는다. 순서 조회는 `ORDER BY event_seq`를 사용한다.
 
 ---
 
@@ -658,6 +661,8 @@ Content-Type: application/json
 - 현재 `user_id`는 임시 `X-User-Id`를 저장하는 일반 컬럼
 - 현재 users FK를 적용하지 않음
 - `created_at`에는 DB flush 시각이 아니라 WAL record의 원래 `createdAt`을 저장
+- WAL과 immutable plan은 원래 `createdAt` 정밀도를 보존하고, `PixelEventEntity` 생성 경계에서만 밀리초로 truncate
+- DDL 정밀도는 `DATETIME(3)`이며 event ordering은 `created_at`이 아닌 `event_seq`만 사용
 
 ---
 
@@ -674,6 +679,8 @@ Content-Type: application/json
 #### 설계 포인트
 - 단일 서버 MVP에서는 `"main"` 1개 row 사용
 - `last_flushed_event_seq`는 **완전 flush 완료 지점**이어야 한다
+- setup SQL은 `main = 0`을 idempotent하게 seed하지만 기존 값을 0으로 덮어쓰지 않는다
+- runtime repository는 누락된 `main` row를 자동 생성하지 않고 fail-fast한다
 
 ---
 
@@ -806,19 +813,24 @@ GET /api/tiles/**
 13. dirty 타일 표시 성공 뒤에만 현재 HTTP `200` 성공 조건 확정
 14. Redis cooldown 시작과 WebSocket broadcast 후처리. 실패해도 완료 write 유지
 15. `accepted`, `eventSeq`, `x`, `y`, `color`, `tileVersion` HTTP `200` 응답 반환
-16. 후속 11단계 flush worker가 DB 반영 예정
+16. default runtime의 1초 fixed-delay scheduler가 `FlushWorker.flushOnce()`를 호출해 DB를 후행 반영
 
 JWT principal 기반 사용자 식별은 13단계의 후속 목표다. 현재 흐름의 `X-User-Id`와 혼합하지 않는다. MVC readiness guard를 통과한 뒤 runtime fatal 전환과 HTTP binding 오류가 경쟁할 수 있으므로 command-level readiness가 모든 header/body binding 오류보다 항상 우선한다고 단정하지 않는다.
 
 ### WAL replay
 부팅 시 순서:
-1. `wal_checkpoint.last_flushed_event_seq` 읽기
-2. DB `tiles` 전체 로드
-3. WAL 마지막 레코드의 `eventSeq` 확인
-4. lastFlushedEventSeq 이후 WAL만 순서대로 replay
-5. 메모리 상태 복구
-6. `lastIssuedEventSeq = max(lastFlushedEventSeq, walLastEventSeq)` 초기화
-7. 서비스 오픈
+1. public `StartupRecoveryDbViewCaptureService`의 명시적 read-only `REPEATABLE_READ` transaction 시작
+2. `main` checkpoint, 전체 DB tile key metadata, z=0 tile bytes를 순서대로 같은 DB snapshot에서 조회
+3. immutable `StartupRecoveryDbView` 반환과 함께 capture transaction 종료
+4. 공통 `DbBootstrapClassifier`로 `0 rows + checkpoint 0`, canonical 1,024 rows, inconsistent 상태 판정
+5. classifier 결과와 실제 snapshot key/byte length/version shape를 WAL read 전에 재검증
+6. active WAL 전체 scan 뒤 `walLastEventSeq >= checkpoint`와 replay batch empty/non-empty tail invariant 검증
+7. bootstrap-pending이면 memory를 all-white로 초기화하고, initialized이면 canonical 1,024 snapshots를 load
+8. checkpoint 이후 WAL record를 순서대로 memory에 replay
+9. 검증된 `walLastEventSeq`를 `EventSeqManager`의 마지막 발급값으로 초기화
+10. 모든 단계가 성공한 뒤에만 ready 전환
+
+capture transaction은 DB view 조립까지만 포함한다. bootstrap classifier, WAL scan, memory load/replay, eventSeq seed와 ready 전환까지 transaction을 늘리지 않는다. partial/extra z/범위 밖 key/checkpoint mismatch/row 누락과 WAL tail 불일치는 memory 변경 전에 fail-fast하며 자동 보정하지 않는다.
 
 recovery replay는 `DirtyTileTracker`를 채우지 않는다. 따라서 checkpoint 이후 WAL record가 memory에 replay된 뒤에도 dirty tracker는 비어 있을 수 있으며, runtime flush는 WAL에서 affected `TileKey`를 다시 계산해야 한다.
 
@@ -832,7 +844,8 @@ recovery replay는 `DirtyTileTracker`를 채우지 않는다. 따라서 checkpoi
 - `walLastEventSeq`
   - active WAL 파일을 끝까지 읽어서 확인한 마지막 `eventSeq`다.
   - replay 대상 여부와 관계없이 계산한다.
-  - boot 이후 `lastIssuedEventSeq`는 `max(lastFlushedEventSeq, walLastEventSeq)`로 초기화하고, 다음 allocate 값은 그보다 1 큰 값이다.
+  - startup recovery가 `walLastEventSeq >= lastFlushedEventSeq`와 replay batch tail invariant를 먼저 검증한다.
+  - 검증 성공 뒤 `lastIssuedEventSeq`는 `walLastEventSeq`로 초기화하고, 다음 allocate 값은 그보다 1 큰 값이다.
 
 - 두 값의 차이
   - `lastFlushedEventSeq`는 DB가 어디까지 따라왔는지를 나타낸다.
@@ -842,7 +855,7 @@ recovery replay는 `DirtyTileTracker`를 채우지 않는다. 따라서 checkpoi
 
 #### 현재 MVP
 - active WAL 파일 1개를 사용한다.
-- 현재 startup recovery는 active WAL 전체를 scan하며, 11단계 MVP runtime flush도 같은 active WAL 전체 scan으로 구현한다.
+- 현재 startup recovery와 runtime flush는 모두 active WAL 전체를 scan한다.
 - WAL rotation/segment는 아직 구현하지 않는다.
 - archive WAL cleanup은 아직 구현하지 않는다.
 - active WAL 자동 truncate도 구현하지 않는다.
@@ -864,10 +877,18 @@ flush worker는 **이미 WAL에 승인되어 있고 메모리에 반영된 상�
 3. 두 저장이 모두 완료된 boundary를 `wal_checkpoint`에 기록
 
 ### flush 트리거 조건
-- **1초 경과**
-- 또는 **1000건 누적**
+- default profile에서 `pixel-place.flush.fixed-delay=1s`를 사용하는 fixed-delay trigger 하나만 활성화한다.
+- 첫 실행 initial delay도 같은 설정값이다.
+- `FlushScheduler`는 `FlushWorker.flushOnce()`를 호출하는 adapter이며 flush 정책이나 DB transaction을 소유하지 않는다.
+- scheduled method는 `scheduler = "flushTaskScheduler"`를 명시한다.
+- `flushTaskScheduler`는 `defaultCandidate = false`이고 `@Primary` 또는 fallback bean name `taskScheduler`를 사용하지 않는다.
+- Boot 기본 `taskScheduler`와 별도 bean으로 격리되므로 qualifier 없는 다른 `@Scheduled` task는 정상 기본 scheduler를 사용한다.
+- `stub` profile에서는 scheduler와 runtime flush bean이 비활성이다.
+- 1000건 누적 또는 write-count 기반 trigger는 구현하지 않았다.
 
-둘 중 먼저 도달한 조건으로 flush를 시작한다.
+fixed-delay는 이전 invocation 종료 뒤 다음 간격을 보장하지만 whole-cycle single-flight를 대체하지 않는다. application `RuntimeException`은 scheduler adapter가 기록하고 정상 반환해 다음 invocation을 유지한다. adapter 밖으로 나온 raw JVM-level `Error`는 전용 `FlushSchedulingErrorHandler`가 원래 `Error`와 stack trace를 ERROR level로 기록하려 시도한 뒤 같은 instance로 재전파하여 해당 repeating task를 중단한다.
+
+전용 handler는 `TaskUtils`의 전파/억제 상수를 직접 재사용하지 않는다. raw `Error` logging 실패는 원래 suppressed 순서와 identity를 보존하고 distinct logging failure만 한 번 뒤에 추가할 수 있으며, 원래 `Error`가 항상 primary다. non-Error는 logging 성공 또는 logging `RuntimeException` 뒤 정상 반환하여 scheduling continuity를 유지하고, logging 자체의 `Error`는 삼키지 않고 재전파한다.
 
 ### 핵심 불변식
 `wal_checkpoint.last_flushed_event_seq` 는  
@@ -890,43 +911,32 @@ active WAL 전체의 `eventSeq`는 strictly increasing 해야 하지만 gap은 �
 - ready 상태에서 immutable plan capture를 마친 뒤 발생한 후속 fatal은 기존 plan을 취소하지 않으며, 그 plan은 capture한 `flushTargetEventSeq`까지만 transaction을 완료할 수 있다.
 
 ### flush worker 처리 순서
-1. single-flight guard를 try-acquire한다. 이미 실행 중인 flush가 있으면 아무 작업 없이 반환한다.
-2. coordinator 밖에서 readiness를 1차 확인한다. not-ready면 예외를 전파하고 새 plan 없이 종료한다.
-3. `lastFlushedEventSeq`, DB z=0 tile row 수와 canonical key 완전성을 조회한다.
-4. `0 rows + checkpoint 0`은 bootstrap-pending, canonical z=0 1,024 rows는 initialized로 판정한다.
-5. 1~1,023 rows, 조회한 z=0 snapshot의 canonical tx/ty 불완전·범위 밖 tx/ty 포함 또는 `0 rows + checkpoint > 0`이면 dirty drain과 새 plan 전에 실패한다.
-6. `FlushBoundaryCoordinator`를 획득하고 즉시 readiness를 2차 확인한다. not-ready면 WAL scan 전에 실패한다.
-7. 같은 coordinator boundary에서 active WAL 파일 상태, 크기, 마지막 newline, 전체 record와 strictly increasing 순서를 검증한다.
-8. checkpoint 이후 실제 WAL record와 WAL affected `TileKey`를 확정한다.
-9. boundary 순간 durable WAL tail을 `flushTargetEventSeq`로 정한다.
-10. 대상 WAL record가 없으면 dirty tracker를 drain하지 않은 no-op plan을 만든다. bootstrap-pending이어도 DB는 0 rows로 유지한다.
-11. 대상 WAL record가 있으면 dirty tiles를 drain한다.
-12. bootstrap-pending이면 canonical z=0 전체 1,024개, initialized이면 `walAffectedTileKeys ∪ drainedDirtyTileKeys`를 snapshot target으로 정한다.
-13. target tile bytes를 deep copy하고 `tileVersion`을 capture한 뒤 captured snapshot 기준 dirty boundary 불변식을 검증한다.
-14. bootstrap mode와 target snapshot을 포함한 immutable flush plan을 만든다.
-15. no-op과 예외를 포함한 모든 경로에서 `finally`로 coordinator를 해제한다.
-16. coordinator 밖에서 no-op plan이면 반환한다.
-17. non-no-op plan이면 coordinator 밖에서 `pixel_events`, `tiles`, `wal_checkpoint`를 하나의 DB transaction으로 저장한다. 최초 transaction의 tile 저장 대상은 전체 1,024 rows다.
-18. transaction 실패 결과를 명확한 rollback 또는 ambiguous commit으로 분류한다.
-19. 실패 시 실제 drain한 dirty tiles만 재등록하고 synthetic 전체 target은 재등록하지 않는다.
-20. ambiguous commit이면 같은 plan을 즉시 재실행하지 않는다.
-21. 다음 flush는 DB checkpoint와 tile bootstrap 상태를 새로 조회하여 네 상태 분기로 reconciliation한다.
-22. 모든 경로에서 single-flight guard를 해제한다.
+1. whole-cycle single-flight guard를 try-acquire하고, 이미 실행 중이면 `SKIPPED_ALREADY_RUNNING`을 반환한다.
+2. cycle 첫 검사로 fatal-only `requireNotFatal()`을 호출한다. temporary not-ready는 이미 설치된 pending reconciliation을 막지 않는다.
+3. pending이 있으면 WAL scan, dirty drain과 새 plan capture 없이 먼저 exact reconciliation한다.
+4. pending이 없으면 `FlushPlanCaptureService`가 일반 `requireReady()`를 검사하고 checkpoint와 BLOB 없는 전체 tile key metadata를 조회한다.
+5. 공통 `DbBootstrapClassifier`가 `BOOTSTRAP_PENDING`, `INITIALIZED`, `INCONSISTENT`를 판정하고 inconsistent 상태는 WAL/dirty 접근 전에 실패시킨다.
+6. `FlushBoundaryCoordinator` 안에서 readiness를 다시 검사한 뒤 active WAL 전체 scan, newline/순서/tail 검증, dirty drain, target snapshot deep copy와 immutable plan 생성을 완료한다.
+7. checkpoint 이후 WAL record가 없으면 dirty를 drain하지 않은 no-op plan을 반환한다.
+8. bootstrap-pending non-no-op plan은 canonical z=0 전체 1,024 snapshots, initialized plan은 WAL affected와 drained dirty key 합집합 snapshots를 포함한다.
+9. coordinator 밖에서 `pixel_events`, captured `tiles`, conditional checkpoint advance를 `REQUIRES_NEW` physical transaction 하나로 실행한다.
+10. transaction 시작 실패 또는 body 실패 뒤 rollback 완료가 확인된 경우만 definite rollback이며 실제 drained dirty를 restore한다.
+11. commit 호출 중 실패, rollback 완료 미확인, executor의 예기치 않은 실패와 invalid result는 ambiguous outcome으로 처리한다.
+12. 모든 성공·실패·raw Error 경로에서 single-flight guard를 해제한다.
 
 ### 실패 시 처리 원칙
 - `pixel_events`, `tiles`, checkpoint는 반드시 하나의 transaction으로 처리한다.
 - commit이 시도되지 않았고 rollback 완료까지 확인된 경우에만 명확한 rollback으로 분류한다.
 - commit 호출 중 예외, connection 종료, timeout, commit 시도 여부 불명 또는 rollback 완료 미확인 상태는 ambiguous commit으로 분류한다.
 - 예외 class나 message만으로 rollback 완료를 추정하지 않는다. 분류할 수 없는 transaction 실패도 ambiguous commit으로 처리한다.
-- 명확한 rollback과 ambiguous commit 모두 실제 drain한 dirty tiles만 재등록한다.
-- WAL record, WAL affected `TileKey`, `flushTargetEventSeq`와 최초 full snapshot의 synthetic 전체 target은 별도 재등록하지 않는다. checkpoint가 갱신되지 않았다면 다음 flush가 WAL에서 다시 계산한다.
-- ambiguous commit 직후 같은 plan을 재실행하지 않는다. 다음 flush는 아래 네 분기를 적용한다.
-  - `checkpoint >= 이전 target` + canonical z=0 1,024 rows: 이전 transaction commit 처리, 동일 WAL 범위와 plan 재실행 금지
-  - 이전 mode `BOOTSTRAP_FULL` + `checkpoint < 이전 target` + `0 rows + checkpoint 0`: bootstrap 미반영, 현재 checkpoint 이후 WAL로 최초 full 1,024 plan 재생성
-  - 이전 mode `INITIALIZED_INCREMENTAL` + `checkpoint < 이전 target` + canonical z=0 1,024 rows: initialized 일반 reconciliation, 현재 checkpoint 이후 WAL로 새 일반 합집합 plan 생성
-  - mode/state mismatch 또는 partial/inconsistent DB 상태: 새 plan, dirty drain, transaction과 checkpoint 갱신 없이 실패
-- ambiguous commit 뒤 재등록된 stale dirty는 최대 z=0 tile 수인 1,024개로 bounded된 보조 상태로만 허용하며 checkpoint, target 또는 commit 결과 판정에 사용하지 않는다.
-- 성공 시에는 drain 결과를 재등록하지 않는다.
+- definite rollback에서만 실제 drained dirty를 즉시 restore한다. WAL record, WAL affected key, target과 synthetic 전체 target은 별도 재등록하지 않는다.
+- ambiguous outcome에서는 drained dirty를 tracker에 즉시 restore하지 않는다. `expected + target + DbBootstrapState + 실제 drained dirty`를 immutable `PendingAmbiguousFlush` candidate에 보존한다.
+- `installIfAbsent(candidate)`의 정상 반환과 예외 모두 `current()`가 exact same candidate instance인지 재확인한다.
+- exact candidate가 확인되면 설치 완료로 인정하고 `AmbiguousFlushCommitException`을 전파한다. 다음 invocation은 새 plan보다 pending reconciliation을 먼저 수행한다.
+- pending이 null/empty/different이거나 `current()` 확인이 실패하면 dirty를 restore하지 않고 같은 process의 irreversible fatal-not-ready를 먼저 설치한 뒤 실패를 전파한다.
+- fatal 설치는 non-throwing·idempotent process-local 상태 전환이며 `markReady()`나 `markNotReady()`로 해제되지 않는다. 후속 protected write, pending 조회/reconciliation, WAL scan, dirty drain, 새 plan capture와 DB transaction을 모두 차단한다.
+- exact candidate 없이 새 persistence를 허용하면 outcome unknown transaction과 겹쳐 duplicate persistence가 가능하므로 같은 process에서는 fatal을 자동 clear하지 않는다.
+- fresh process 재시작과 durable DB checkpoint/WAL bytes 기반 startup recovery가 복구 경계다. fatal state와 memory-only pending을 별도 persistence에 저장하지 않는다.
 
 ## 10.5) flush boundary / checkpoint 의미 확정
 
@@ -960,7 +970,7 @@ lastFlushedEventSeq < eventSeq <= flushTargetEventSeq
 동일 `eventSeq` 중복과 역순은 WAL corruption으로 처리한다. target까지 모든 정수 `eventSeq`가 존재해야 한다는 검증은 하지 않는다.
 
 ### WAL이 source of truth인 이유
-11단계 MVP flush worker는 `pixel_events` 저장 대상과 필수 tile snapshot 대상을 WAL에서 계산한다.
+현재 MVP flush worker는 `pixel_events` 저장 대상과 필수 tile snapshot 대상을 WAL에서 계산한다.
 
 ```text
 pixel_events 저장 대상:
@@ -1170,7 +1180,7 @@ not-ready 전환 이후에는 새로운 flush plan의 시작과 capture를 금�
 서비스가 ready이고 flush가 허용되는 상태라면 durable WAL tail까지의 모든 성공 WAL record가 memory에 반영되어 있어야 한다. WAL fsync 뒤 memory apply 실패는 이 불변식을 깨므로 fatal이며, not-ready 상태에서 WAL tail과 memory의 불일치를 감춘 새 plan을 만들지 않는다.
 
 ### WAL 전체 스캔의 MVP 한계
-현재 startup recovery는 active WAL 파일 1개를 처음부터 끝까지 scan한다. 11단계 MVP runtime flush도 같은 방식으로 구현하며, rotation/segment/archive cleanup, WAL read offset과 자동 truncate는 후속 범위다.
+현재 startup recovery와 runtime flush는 active WAL 파일 1개를 처음부터 끝까지 scan한다. rotation/segment/archive cleanup, WAL read offset과 자동 truncate는 후속 범위다.
 
 ### WAL record가 없는 경우
 checkpoint 이후 실제 WAL record가 없으면 dirty tracker 상태와 무관하게 checkpoint를 전진시키지 않는다. bootstrap-pending이어도 dirty drain과 DB write 없이 no-op plan만 만들고 coordinator 밖에서 반환하며 DB `tiles`는 0 rows로 유지한다.
@@ -1192,10 +1202,7 @@ active WAL 파일 상태와 크기 확인, 마지막 newline 검증, 전체 reco
 ### parent-directory fsync 미적용 한계
 현재는 parent directory fsync를 수행하지 않으므로 file creation과 directory entry의 엄격한 crash durability를 보장하지 않는다. 14단계 rotation/segment도 같은 한계를 유지하며 parent-directory fsync 실제 구현은 17단계 범위다.
 
-### ambiguous commit 이후 stale dirty hint 처리
-ambiguous commit 뒤 실제 drain dirty를 보수적으로 재등록하면 이미 DB에 commit된 상태에서도 stale dirty hint가 남을 수 있다. 이 상태는 최대 z=0 tile 수인 1,024개로 bounded된 보조 상태로 허용하며 checkpoint, target, 필수 WAL 범위 또는 commit 결과 판정에 사용하지 않는다.
-
-### 실패 후 dirty 재등록
+### 실패 후 dirty 소유권
 현재 dirty tracker의 `drainDirtyTiles()`는 현재 쌓인 dirty tile 목록을 반환하고 내부 목록을 비운다.
 
 따라서 다음 문제가 생길 수 있다.
@@ -1207,24 +1214,16 @@ checkpoint는 안 올라감
 하지만 dirty tracker는 이미 비워짐
 ```
 
-이 경우 보조 dirty 상태를 잃지 않도록 실제 drain한 항목만 재등록한다.
+definite rollback은 checkpoint 미갱신과 rollback 완료가 확인된 상태이므로 실제 drain한 항목만 tracker에 restore한다. restore 시 이미 더 최신 dirty가 있으면 `SynchronizedDirtyTileTracker`의 큰 `eventSeq`/version 보존 정책을 따른다.
 
 ```text
-명확한 rollback:
-checkpoint 미갱신
-실제로 drain한 DirtyTile만 다시 markDirty
-
 ambiguous commit:
-동일 plan 즉시 재실행 금지
-실제로 drain한 DirtyTile만 보수적으로 다시 markDirty
-다음 flush의 DB checkpoint 재조회로 결과 reconciliation
-
-재등록 시 이미 더 최신 dirty가 있으면 기존 SynchronizedDirtyTileTracker 정책대로 더 큰 eventSeq가 유지된다.
+tracker 즉시 restore 금지
+expected + target + bootstrap state + 실제 drained dirty를 pending candidate에 보존
+다음 flush는 새 plan 전에 exact reconciliation
 ```
 
-WAL record, WAL affected `TileKey`, `flushTargetEventSeq`와 최초 full snapshot의 synthetic 전체 target은 별도로 재등록하지 않는다. checkpoint 이후 WAL 범위와 bootstrap 상태에서 다음 flush가 자동으로 다시 계산한다. ambiguous commit 뒤 남을 수 있는 stale dirty도 checkpoint, target 또는 commit 결과 판정 기준으로 사용하지 않는다.
-
-ambiguous commit 뒤에는 이전 immutable plan의 `bootstrapMode`와 target을 reconciliation 결과가 확정될 때까지 보존한다. DB 상태만 보고 bootstrap 또는 initialized 재계획을 선택하지 않는다.
+WAL record, WAL affected `TileKey`, `flushTargetEventSeq`와 최초 full snapshot의 synthetic 전체 target은 별도로 재등록하지 않는다. pending은 WAL/snapshot/full plan을 저장하지 않으며 과거 immutable plan을 재실행하는 경로가 아니다.
 
 ### DB transaction 필수
 `pixel_events`, `tiles`, `wal_checkpoint`는 반드시 하나의 DB transaction으로 처리한다. checkpoint 갱신은 transaction 내부의 application-level 마지막 작업이다.
@@ -1259,51 +1258,37 @@ rollback 완료를 확인할 수 없는 경우
 명확한 rollback은 commit이 시도되지 않았고 rollback 완료까지 확인된 경우로만 제한한다. 분류할 수 없는 transaction 실패도 ambiguous commit이다.
 
 ### DB checkpoint 기반 ambiguous commit reconciliation
-ambiguous commit이면 동일 plan을 즉시 다시 실행하지 않는다. 다음 flush가 coordinator 밖에서 DB checkpoint와 tile bootstrap 상태를 새로 조회해 다음 네 분기를 적용한다.
+ambiguous commit이면 동일 plan을 즉시 다시 실행하지 않는다. 다음 flush는 새 plan보다 pending을 먼저 읽고, `JpaFlushDbStateProbe`의 별도 transaction에서 main checkpoint lock과 전체 key metadata를 관측해 exact equality만 판정한다.
 
 ```text
-checkpoint >= 이전 target + canonical z=0 1,024 rows:
-이전 transaction이 commit된 것으로 처리
-동일 WAL 범위와 동일 plan 재실행 금지
+commit 확인:
+observed checkpoint == pending.flushTargetEventSeq
+AND observed state == INITIALIZED
+→ pending dirty 폐기
+→ exact same pending clear
 
-이전 plan.bootstrapMode = BOOTSTRAP_FULL
-AND checkpoint < 이전 target
-AND 0 rows + checkpoint 0:
-bootstrap transaction 미반영으로 처리
-현재 checkpoint 이후 WAL을 다시 읽어 최초 full 1,024 snapshot plan 재생성
+rollback 확인(Bootstrap pending):
+observed checkpoint == pending.expectedLastFlushedEventSeq == 0
+AND observed state == BOOTSTRAP_PENDING
+→ pending dirty restore
+→ restore 성공 뒤 exact same pending clear
 
-이전 plan.bootstrapMode = INITIALIZED_INCREMENTAL
-AND checkpoint < 이전 target
-AND canonical z=0 1,024 rows:
-initialized 상태의 일반 reconciliation
-현재 checkpoint 이후 WAL을 다시 읽어
-WAL affected TileKey ∪ drained dirty TileKey의 새 일반 plan 생성
+rollback 확인(Initialized):
+observed checkpoint == pending.expectedLastFlushedEventSeq
+AND observed state == INITIALIZED
+→ pending dirty restore
+→ restore 성공 뒤 exact same pending clear
 
-이전 bootstrapMode와 DB 상태가 일치하지 않음
-또는 1~1,023 rows
-또는 조회한 z=0 snapshot의 canonical tx/ty 불완전·범위 밖 tx/ty 포함
-또는 0 rows + checkpoint > 0:
-불일치 상태로 실패
-새 plan, dirty drain, DB transaction과 checkpoint 갱신 금지
+그 밖의 checkpoint/state 조합:
+pending 유지
+새 plan 금지
+fail-fast
 ```
 
-어느 분기에서도 이전 immutable plan을 그대로 즉시 재실행하지 않는다. `INSERT IGNORE`나 eventSeq 중복 skip으로 결과 불명확 상태를 은폐하지 않는다.
-
-ambiguous commit 로그에는 다음 정보를 포함한다.
-
-```text
-lastFlushedEventSeq
-flushTargetEventSeq
-WAL record 수
-snapshot tile 수
-실제 drain dirty 수
-이전 immutable plan의 bootstrapMode
-transaction 예외
-다음 cycle에서 checkpoint reconciliation이 필요하다는 사실
-```
+`checkpoint >= target`이나 `checkpoint < target` 같은 범위 판정은 사용하지 않는다. 다른 flush 결과를 이전 transaction에 귀속하거나 같은 reconciliation invocation에서 재계획하지 않으며, `INSERT IGNORE`나 eventSeq 중복 skip으로 결과 불명확 상태를 은폐하지 않는다.
 
 ### MVP에서 금지할 구현
-11단계 flush worker 구현 시 다음 구현을 금지한다.
+현재 flush worker 계약에서 다음 구현을 금지한다.
 
 ```text
 dirty tracker가 비어 있다는 이유만으로 flush를 no-op 처리하는 구현
@@ -1332,75 +1317,40 @@ DB 저장 중 장시간 write 전체를 막는 구현
 WebSocket broadcast나 overview 성공 여부를 checkpoint 조건에 포함하는 구현
 ```
 
-### 11단계에서 구현하지 않을 것
-11단계 flush worker 구현 범위에서 다음은 구현하지 않는다.
+### 현재 MVP 범위 밖
+현재 flush/recovery MVP는 다음을 구현하지 않는다.
 
 ```text
-WebSocket
-overview
 WAL rotation/segment
+WAL archive/index/offset/truncate
 group commit
-Redis state 저장
-z=1/z=2 downsample
-JWT/security
-frontend viewer
+partial WAL line 자동 복구
+JDBC/Hibernate batch tuning
+다중 인스턴스 distributed flush lock
+Redis flush coordination
+ShedLock/Quartz
+pending ambiguous state persistence
+동일 immutable plan 자동 재실행
+1000건 누적 또는 write-count trigger
+flush 전용 scheduler의 application 전역 기본 scheduler 등록
+production metrics/alert 체계와 custom scheduler thread-pool tuning
 ```
 
-이미 구현된 WebSocket broadcast 연동을 변경하거나 확장하지 않는다. Redis cooldown 정책을 변경하지 않는다.
+single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application instance의 동시 flush를 막는 분산 lock이 아니다. active WAL 전체 scan은 coordinator 안에서 수행하므로 WAL이 커지면 write blocking 시간이 길어질 수 있다. parent-directory fsync도 적용하지 않는다.
 
-### 11단계 구현 흐름
-11단계에서는 아래 흐름을 기준으로 구현한다.
+후속 최적화 판단을 위해 checkpoint lag, WAL backlog, 한 plan의 event/tile 수와 byte 크기, coordinator 보유 시간, WAL scan 시간과 DB transaction 시간을 측정 후보로 둔다. canonical 1,024-tile bootstrap은 운영 예정 heap에서 peak heap과 전체 transaction elapsed time을 실측한다. 현재 단계에서 production metric/alert나 근거 없는 통과 임계값을 추가하지 않는다.
 
-```text
-1. flush single-flight guard try-acquire
-2. coordinator 밖 readiness 1차 확인, not-ready면 새 plan 없이 실패
-3. lastFlushedEventSeq, DB z=0 tile row 수와 canonical key 완전성 조회
-4. `0 rows + checkpoint 0`은 bootstrap-pending, canonical 1,024 rows는 initialized로 판정
-5. 1~1,023 rows, 조회한 z=0 snapshot의 canonical tx/ty 불완전·범위 밖 tx/ty 포함 또는 `0 rows + checkpoint > 0`이면 dirty drain과 새 plan 전에 실패
-6. FlushBoundaryCoordinator 획득
-7. coordinator 획득 직후 readiness 2차 확인, not-ready면 WAL scan 전에 실패
-8. active WAL 파일 상태, 크기, 마지막 newline 검증
-9. WAL 전체 parsing과 eventSeq strictly increasing 검증
-10. checkpoint 이후 실제 WAL record 확정
-11. boundary 순간 durable WAL tail을 flushTargetEventSeq로 확정
-12. WAL record가 없으면 dirty drain과 DB write 없는 no-op plan 생성
-13. WAL record가 있으면 WAL affected TileKey 계산과 dirty drain
-14. bootstrap-pending이면 canonical z=0 전체 1,024개, initialized이면 walAffectedTileKeys ∪ drainedDirtyTileKeys를 target으로 선택
-15. target tile bytes deep copy와 tileVersion capture
-16. captured snapshot 기준 dirty boundary 불변식 검증
-17. bootstrap mode와 target snapshot을 포함한 immutable flush plan 생성
-18. finally에서 FlushBoundaryCoordinator 해제
-19. coordinator 밖에서 no-op 여부 판정 후 반환
-20. non-no-op plan이면 하나의 DB transaction 실행
-21. pixel_events 저장
-22. bootstrap-pending이면 전체 1,024 rows, initialized이면 일반 target tiles snapshot 저장
-23. wal_checkpoint를 flushTargetEventSeq로 갱신
-24. transaction commit
-25. 명확한 rollback이면 실제 drain dirty만 재등록
-26. ambiguous commit이면 동일 plan 재실행 없이 실제 drain dirty만 보수적 재등록
-27. synthetic 전체 target 재등록 금지
-28. 다음 flush에서 DB checkpoint와 tile bootstrap 상태 재조회
-29. checkpoint >= 이전 target + canonical 1,024 rows이면 commit 처리, 동일 WAL/plan 재실행 금지
-30. 이전 mode가 BOOTSTRAP_FULL이고 checkpoint < 이전 target이며 0 rows/checkpoint 0이면 현재 WAL로 최초 full plan 재생성
-31. 이전 mode가 INITIALIZED_INCREMENTAL이고 checkpoint < 이전 target이며 canonical 1,024 rows이면 현재 checkpoint 이후 WAL로 새 일반 합집합 plan 생성
-32. mode/state mismatch, 1~1,023 rows, 조회한 z=0 snapshot의 canonical tx/ty 불완전·범위 밖 tx/ty 포함 또는 `0 rows + checkpoint > 0`이면 새 plan, dirty drain, transaction과 checkpoint 갱신 없이 실패
-33. 어느 분기에서도 이전 immutable plan 즉시 재실행 금지
-34. finally에서 single-flight guard 해제
-```
-
-위 계약은 구현 난이도에 따라 선택적으로 생략할 수 있는 최적화 항목이 아니다. 11단계 구현은 이 checkpoint 의미와 실패 분류를 모두 보존해야 한다.
-
-### 11단계 필수 bootstrap 검증
+### 현재 bootstrap/recovery 검증
 - `0 rows + checkpoint 0 + WAL 없음`: dirty drain과 DB write 없는 no-op, DB tiles 0 rows 유지
 - `0 rows + checkpoint 0 + WAL 1건`: canonical z=0 전체 1,024 snapshot을 포함한 최초 transaction
 - 최초 flush commit 뒤 restart: canonical 1,024 rows load, target checkpoint 이하 WAL replay 생략, 변경 pixel/version 보존
 - 1 row, 1,023 rows, 조회한 z=0 snapshot의 canonical tx/ty 불완전·범위 밖 tx/ty 포함: dirty drain과 새 plan 전에 실패
 - `0 rows + checkpoint > 0`: startup recovery의 markReady 전과 flush plan 생성 전에 불일치로 실패
-- 최초 transaction 명확한 rollback: `0 rows + checkpoint 0`에서 현재 WAL로 full bootstrap 재계획
-- ambiguous commit: commit 완료, 이전 BOOTSTRAP_FULL plan의 bootstrap 미반영, 이전 INITIALIZED_INCREMENTAL plan의 일반 재시도, mode/state mismatch·partial/inconsistent 실패의 네 분기 reconciliation
+- 최초 transaction 명확한 rollback: drained dirty restore 뒤 다음 invocation이 현재 WAL에서 full bootstrap을 새로 capture
+- ambiguous commit: exact target/expected checkpoint와 `BOOTSTRAP_PENDING`/`INITIALIZED` state 조합만 commit/rollback으로 판정
+- pending 설치 저장 전 실패, 저장 뒤 install 예외, 다른 pending과 current 확인 실패에서 exact identity/fail-closed 검증
+- 실제 MySQL `REPEATABLE_READ` capture가 checkpoint 뒤 concurrent flush-shaped commit 중에도 checkpoint/key/snapshot 세 read의 동일 snapshot을 유지
 - 최초 full capture 중 write 차단, 전체 bytes/version deep copy와 immutable plan 유지
-
-### 11단계 전 필수 선행 조건
 - WAL append/fsync 실패 뒤 `FileWalAppender` poison과 추가 append 차단
 - active WAL이 비어 있지 않을 때 마지막 newline 검증
 - WAL 성공 뒤 memory apply 실패 시 ServiceReadiness fatal 전환
@@ -1425,103 +1375,41 @@ frontend viewer
 - FlushBoundaryCoordinator = write와 WAL scan/snapshot capture 사이의 짧은 boundary 보호
 - flush worker = WAL 기준 immutable plan을 capture하고 DB checkpoint를 안전하게 전진시키는 작업
 
-## 11) 현재 실제 package tree와 후속 목표
+## 11) 현재 flush/recovery 구현 구조
 
-### 현재 `src/main/java` 구조
+현재 runtime flush와 startup recovery의 핵심 package 경계는 다음과 같다.
 
 ```text
-dev.cgt.pixelplace
-├─ PixelPlaceApplication.java
-├─ board/web
-│  ├─ BoardController.java
-│  └─ BoardInfoResponse.java
-├─ checkpoint
-│  ├─ application/CheckpointReader.java
-│  ├─ domain/CheckpointSnapshot.java
-│  └─ infra
-│     ├─ JpaCheckpointReader.java
-│     ├─ StubCheckpointReader.java
-│     ├─ WalCheckpointEntity.java
-│     └─ WalCheckpointJpaRepository.java
-├─ common/constant
-│  ├─ BoardConstants.java
-│  └─ PaletteConstants.java
-├─ pixel
-│  ├─ application
-│  │  ├─ EventSeqManager.java
-│  │  ├─ PixelBroadcastService.java
-│  │  ├─ PixelCommandService.java
-│  │  ├─ PixelCooldown.java
-│  │  ├─ PixelCooldownActiveException.java
-│  │  ├─ PixelCooldownUnavailableException.java
-│  │  ├─ PixelEventMessage.java
-│  │  ├─ PixelWriteResult.java
-│  │  └─ PixelWriteService.java
-│  ├─ infra
-│  │  ├─ RedisPixelCooldown.java
-│  │  └─ WebSocketPixelBroadcastService.java
-│  ├─ web
-│  │  ├─ PixelController.java
-│  │  ├─ PixelWriteRequest.java
-│  │  └─ PixelWriteResponse.java
-│  └─ websocket
-│     ├─ PixelWebSocketConfig.java
-│     ├─ PixelWebSocketHandler.java
-│     └─ PixelWebSocketSessionRegistry.java
-├─ recovery
-│  ├─ application
-│  │  ├─ ServiceNotReadyException.java
-│  │  ├─ ServiceReadiness.java
-│  │  ├─ StartupRecoveryRunner.java
-│  │  └─ StartupRecoveryService.java
-│  └─ web
-│     ├─ ReadinessGuardInterceptor.java
-│     ├─ ReadinessWebConfig.java
-│     └─ ServiceNotReadyExceptionHandler.java
-├─ tile
-│  ├─ application
-│  │  ├─ DirtyTile.java
-│  │  ├─ DirtyTileTracker.java
-│  │  ├─ SynchronizedDirtyTileTracker.java
-│  │  ├─ TileLoadResult.java
-│  │  ├─ TileReadResult.java
-│  │  ├─ TileReadService.java
-│  │  ├─ TileSnapshotLoader.java
-│  │  └─ TileStateSnapshot.java
-│  ├─ domain
-│  │  ├─ InMemoryTileBoard.java
-│  │  ├─ TileKey.java
-│  │  ├─ TileMutationResult.java
-│  │  └─ TileState.java
-│  ├─ infra
-│  │  ├─ JpaTileSnapshotLoader.java
-│  │  ├─ StubTileSnapshotLoader.java
-│  │  ├─ TileEntity.java
-│  │  └─ TileJpaRepository.java
-│  └─ web/TileController.java
-└─ wal
-   ├─ application
-   │  ├─ WalAppender.java
-   │  ├─ WalRecordJsonCodec.java
-   │  ├─ WalRecordParser.java
-   │  ├─ WalReplayBatch.java
-   │  └─ WalReplaySource.java
-   ├─ domain/WalRecord.java
-   └─ infra
-      ├─ FileWalAppender.java
-      ├─ FileWalReplaySource.java
-      ├─ StubWalReplaySource.java
-      └─ WalProperties.java
+flush/application
+  DbBootstrapClassifier, FlushBoundaryCoordinator
+  FlushPlanCaptureService, FlushWorker, FlushSingleFlightGuard
+  PendingAmbiguousFlush(Store), FlushReconciliationService
+  FlushPersistenceService
+
+flush/infra
+  ProgrammaticFlushTransactionExecutor, JpaFlushDbStateProbe
+
+flush/scheduling
+  FlushScheduleProperties, FlushScheduler
+  FlushSchedulingConfiguration, FlushSchedulingErrorHandler
+
+pixel/infra
+  PixelEventEntity, PixelEventJpaRepository, JpaPixelEventWriter
+
+tile/infra
+  TileEntity, TileJpaRepository
+  JpaTileSnapshotLoader, JpaTileSnapshotWriter
+
+checkpoint/infra
+  JpaCheckpointReader, JpaCheckpointFence
+  WalCheckpointEntity, WalCheckpointJpaRepository
+
+recovery/application
+  StartupRecoveryDbView, StartupRecoveryDbViewCaptureService
+  StartupRecoveryService, ServiceReadiness
 ```
 
-### 후속 목표이며 현재 미구현인 구조
-
-- Overview controller/service/state
-- 명시적 `SecurityFilterChain`, 카카오 OAuth2/JWT 인증, `users` 모델
-- 11단계 flush worker/scheduler와 `pixel_events` persistence adapter
-- 공통 ErrorResponse/errorCode 처리
-- ETag/If-None-Match/Cache-Control/304 조건부 cache
-- WebSocket batch/order/session별 send 직렬화 보강
+`FlushWorker`는 scheduler 없이 직접 호출 가능한 public entrypoint이며 scheduler는 호출 adapter다. startup recovery와 runtime plan/persistence/reconciliation은 같은 `DbBootstrapClassifier`를 사용해 partial DB 의미가 경로마다 달라지지 않게 한다. 실제 package와 test가 이 목록의 source of truth이며, 12단계 overview와 이후 보안·성능 기능은 이 구조에 포함하지 않는다.
 
 ## 12) stub profile 범위와 recovery adapter 선택
 
@@ -1531,9 +1419,9 @@ dev.cgt.pixelplace
 
 | recovery 입력 port | 기본 profile | `stub` profile | 현재 production 소비자 |
 |---|---|---|---|
-| `CheckpointReader` | `JpaCheckpointReader` (`!stub`) | `StubCheckpointReader` (`stub`) | `StartupRecoveryService` |
-| `TileSnapshotLoader` | `JpaTileSnapshotLoader` (`!stub`) | `StubTileSnapshotLoader` (`stub`) | `StartupRecoveryService` |
-| `WalReplaySource` | `FileWalReplaySource` (`!stub`) | `StubWalReplaySource` (`stub`) | `StartupRecoveryService` |
+| `CheckpointReader` | `JpaCheckpointReader` (`!stub`) | `StubCheckpointReader` (`stub`) | `StartupRecoveryDbViewCaptureService`, `FlushPlanCaptureService` (`!stub`) |
+| `TileSnapshotLoader` | `JpaTileSnapshotLoader` (`!stub`) | `StubTileSnapshotLoader` (`stub`) | `StartupRecoveryDbViewCaptureService` |
+| `WalReplaySource` | `FileWalReplaySource` (`!stub`) | `StubWalReplaySource` (`stub`) | `StartupRecoveryService`, `FlushPlanCaptureService` (`!stub`) |
 
 각 profile에서는 위 port별 bean이 정확히 하나만 활성화된다. 세 stub은 production adapter 미구현을 대신하는 임시체가 아니며 checkpoint 0, z=0 snapshot 전체 미존재, 빈 WAL replay라는 startup recovery 입력만 대체한다.
 
@@ -1546,13 +1434,11 @@ dev.cgt.pixelplace
 - DataSource/JPA auto-configuration과 Spring Data repository
 - recovery 입력 외의 production bean
 
-따라서 `stub`은 DB/Redis/WAL이 없는 전체 application profile이 아니다. 외부 인프라가 없는 제한 context 테스트는 recovery adapter bean 선택만 검증하고 adapter의 DB/WAL 메서드를 호출하지 않는다.
+따라서 `stub`은 DB/Redis/WAL이 없는 전체 application profile이 아니다. 다만 `FlushScheduler`, `FlushSchedulingConfiguration`, `FlushWorker`, persistence/reconciliation runtime bean은 `!stub`으로 비활성화된다. 외부 인프라가 없는 제한 context 테스트는 recovery adapter bean 선택만 검증하고 adapter의 DB/WAL 메서드를 호출하지 않는다.
 
 ### runtime 소비자 안전장치
 
-Spring profile의 bean 교체는 특정 injection 지점이 아니라 해당 port의 모든 소비자에게 적용된다. 현재 세 port의 production 소비자는 `StartupRecoveryService`뿐이고 `FlushWorker`/scheduler는 아직 없지만, 11단계 구현 전 전체 소비자를 다시 검색해야 한다.
-
-10.6 정책대로 runtime flush는 `WalReplaySource.readAfter(...)`를 재사용한다. recovery용과 runtime flush용 WAL read port를 10.7 또는 11단계에서 임의로 분리하지 않는다.
+Spring profile의 bean 교체는 특정 injection 지점이 아니라 해당 port의 모든 소비자에게 적용된다. startup capture는 선택된 checkpoint/tile adapter를 사용하고, startup recovery와 runtime plan capture는 같은 `WalReplaySource.readAfter(...)` 계약을 공유한다. recovery/runtime WAL read port를 분리하지 않는다.
 
 다음 조합은 실제 WAL과 DB checkpoint 정합성을 깨뜨릴 수 있으므로 허용하지 않는다.
 

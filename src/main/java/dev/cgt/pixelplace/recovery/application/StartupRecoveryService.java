@@ -1,109 +1,201 @@
 package dev.cgt.pixelplace.recovery.application;
 
-import dev.cgt.pixelplace.checkpoint.application.CheckpointReader;
 import dev.cgt.pixelplace.checkpoint.domain.CheckpointSnapshot;
+import dev.cgt.pixelplace.common.constant.BoardConstants;
+import dev.cgt.pixelplace.flush.application.DbBootstrapClassifier;
+import dev.cgt.pixelplace.flush.application.DbBootstrapState;
 import dev.cgt.pixelplace.pixel.application.EventSeqManager;
 import dev.cgt.pixelplace.tile.application.TileLoadResult;
-import dev.cgt.pixelplace.tile.application.TileSnapshotLoader;
+import dev.cgt.pixelplace.tile.application.TileStateSnapshot;
+import dev.cgt.pixelplace.tile.domain.CanonicalZ0TileKeys;
 import dev.cgt.pixelplace.tile.domain.InMemoryTileBoard;
+import dev.cgt.pixelplace.tile.domain.TileKey;
 import dev.cgt.pixelplace.wal.application.WalReplayBatch;
 import dev.cgt.pixelplace.wal.application.WalReplaySource;
 import dev.cgt.pixelplace.wal.domain.WalRecord;
 import org.springframework.stereotype.Service;
 
-// startup recovery 전체 순서를 강제하는 핵심 오케스트레이터
-// 메모리 타일 보드를 authoritative state로 세우기 위해 checkpoint, DB snapshot, WAL replay를 정해진 순서로만 연결함
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+
+/*
+ * immutable DB view 검증 뒤에만 WAL과 authoritative memory를 연결하는 startup recovery 오케스트레이터
+ * DB transaction 종료, fail-fast 검증, memory load/replay, eventSeq seed, readiness 순서 고정
+ */
 @Service
 public class StartupRecoveryService {
 
-    /*
-        CheckpointReader
-        = DB가 어디까지 WAL을 flush했는지 읽는 포트
-
-        TileSnapshotLoader
-        = DB tiles snapshot을 읽는 포트
-
-        WalReplaySource
-        = WAL 파일에서 replay 대상 이벤트를 읽는 포트
-
-        InMemoryTileBoard
-        = 서버 런타임의 authoritative tile state
-
-        EventSeqManager
-        = 다음 eventSeq 발급 기준 관리
-
-        ServiceReadiness
-        = recovery 완료와 runtime fatal을 함께 표현하는 service 안전 상태
-    */
-
-    private final CheckpointReader checkpointReader;
-    private final TileSnapshotLoader tileSnapshotLoader;
+    private final StartupRecoveryDbViewCaptureService dbViewCaptureService;
+    private final DbBootstrapClassifier dbBootstrapClassifier;
+    private final CanonicalZ0TileKeys canonicalZ0TileKeys;
     private final WalReplaySource walReplaySource;
     private final InMemoryTileBoard inMemoryTileBoard;
     private final EventSeqManager eventSeqManager;
     private final ServiceReadiness serviceReadiness;
 
     public StartupRecoveryService(
-            CheckpointReader checkpointReader,
-            TileSnapshotLoader tileSnapshotLoader,
+            StartupRecoveryDbViewCaptureService dbViewCaptureService,
+            DbBootstrapClassifier dbBootstrapClassifier,
+            CanonicalZ0TileKeys canonicalZ0TileKeys,
             WalReplaySource walReplaySource,
             InMemoryTileBoard inMemoryTileBoard,
             EventSeqManager eventSeqManager,
             ServiceReadiness serviceReadiness
     ) {
-        this.checkpointReader = checkpointReader;
-        this.tileSnapshotLoader = tileSnapshotLoader;
+        this.dbViewCaptureService = dbViewCaptureService;
+        this.dbBootstrapClassifier = dbBootstrapClassifier;
+        this.canonicalZ0TileKeys = canonicalZ0TileKeys;
         this.walReplaySource = walReplaySource;
         this.inMemoryTileBoard = inMemoryTileBoard;
         this.eventSeqManager = eventSeqManager;
         this.serviceReadiness = serviceReadiness;
     }
 
-    // recovery 순서는 checkpoint 조회 -> DB tiles 전체 로드 또는 all-white pre-init
-    // -> lastFlushedEventSeq 이후 WAL replay -> 마지막 발급 eventSeq 초기화 -> service ready 로 고정됨
-    // 이 순서가 바뀌면 메모리 authoritative state와 eventSeq 기준점이 어긋날 수 있음
+    /* 모든 입력·WAL invariant와 memory 복구 성공 뒤에만 ready 전환 */
     public void recover() {
         serviceReadiness.markNotReady();
 
-        /* recovery 시작 기준점 조회 */
-        CheckpointSnapshot checkpointSnapshot = checkpointReader.readMainCheckpoint();
+        StartupRecoveryDbView dbView = dbViewCaptureService.capture();
+        CheckpointSnapshot checkpointSnapshot = dbView.checkpoint();
+        TileLoadResult tileLoadResult = dbView.tileLoadResult();
+        long checkpoint = checkpointSnapshot.lastFlushedEventSeq();
 
-        /* DB tiles 전체 로드 또는 all-white pre-init */
-        TileLoadResult tileLoadResult = tileSnapshotLoader.loadZ0Tiles();
-        if (tileLoadResult.allMissing()) {
+        DbBootstrapState bootstrapState = Objects.requireNonNull(
+                dbBootstrapClassifier.classify(checkpoint, tileLoadResult.databaseTileKeys()),
+                "bootstrapState must not be null."
+        );
+        validateDbView(checkpoint, bootstrapState, tileLoadResult);
+
+        WalReplayBatch replayBatch = Objects.requireNonNull(
+                walReplaySource.readAfter(checkpoint),
+                "walReplayBatch must not be null."
+        );
+        validateWalReplayBatch(checkpoint, replayBatch);
+
+        if (bootstrapState == DbBootstrapState.BOOTSTRAP_PENDING) {
             inMemoryTileBoard.initializeAllWhite();
         } else {
-            // partial tile 누락은 loadAll 내부에서 실패시켜 조용한 부분 복구를 막음
             inMemoryTileBoard.loadAll(tileLoadResult.snapshots());
         }
 
-        /*
-         * DB 반영 완료 마지막 eventSeq 이후 WAL replay
-         * authoritative memory 복구만 담당하며 DirtyTileTracker를 채우지 않음
-         * 후속 flush의 필수 affected tile 계산은 checkpoint 이후 WAL record 기준
-         */
-        WalReplayBatch replayBatch = walReplaySource.readAfter(checkpointSnapshot.lastFlushedEventSeq());
         for (WalRecord record : replayBatch.records()) {
-            // WalReplaySource 계약상 records는 이미 lastFlushedEventSeq 초과 이벤트만 담음
-            // WAL color는 0~255 int로 검증된 뒤, 메모리 타일의 1 byte 팔레트 저장 표현으로 변환함
             inMemoryTileBoard.applyReplayRecord(record.x(), record.y(), record.color());
         }
 
-        /* 마지막 발급 eventSeq 초기화 */
-        // lastFlushedEventSeq는 DB 반영 완료 지점이고, walLastEventSeq는 WAL 파일의 마지막 eventSeq
-        eventSeqManager.initializeLastIssued(Math.max(
-                checkpointSnapshot.lastFlushedEventSeq(),
-                replayBatch.walLastEventSeq()
-        ));
-        
-        /*  service ready 전환
-            1. InMemoryTileBoard에 z=0 전체 1024개 타일 존재
-            2. DB snapshot이 있으면 그 상태가 메모리에 올라와 있음
-            3. lastFlushedEventSeq 이후 WAL 이벤트가 메모리에 replay 완료됨
-            4. EventSeqManager가 마지막 발급 완료 eventSeq를 알고 있음
-            5. 다음 write는 allocate()로 기존 eventSeq보다 큰 값을 받음
-            6. serviceReadiness.ready == true
-        */
+        eventSeqManager.initializeLastIssued(replayBatch.walLastEventSeq());
         serviceReadiness.markReady();
+    }
+
+    private void validateDbView(
+            long checkpoint,
+            DbBootstrapState bootstrapState,
+            TileLoadResult tileLoadResult
+    ) {
+        if (bootstrapState == DbBootstrapState.INCONSISTENT) {
+            // partial/invalid DB shape를 white tile이나 checkpoint 0으로 보정하지 않는 fail-fast 경계
+            throw dbViewViolation(checkpoint, bootstrapState, tileLoadResult, "classifier-inconsistent");
+        }
+
+        if (bootstrapState == DbBootstrapState.BOOTSTRAP_PENDING) {
+            if (!tileLoadResult.snapshots().isEmpty()) {
+                // empty key와 snapshot 불일치는 loader 결과 손상 가능성이 있어 WAL read 전 실패
+                throw dbViewViolation(
+                        checkpoint,
+                        bootstrapState,
+                        tileLoadResult,
+                        "bootstrap-pending-with-snapshots"
+                );
+            }
+            return;
+        }
+
+        if (!canonicalZ0TileKeys.exactlyMatches(tileLoadResult.databaseTileKeys())) {
+            // classifier 결과와 전달 view의 재검증 불일치는 memory 변경 전에 차단
+            throw dbViewViolation(checkpoint, bootstrapState, tileLoadResult, "database-keys-not-canonical");
+        }
+
+        List<TileKey> snapshotKeys = new ArrayList<>(tileLoadResult.snapshots().size());
+        for (TileStateSnapshot snapshot : tileLoadResult.snapshots()) {
+            if (!canonicalZ0TileKeys.contains(snapshot.key())) {
+                throw dbViewViolation(checkpoint, bootstrapState, tileLoadResult, "snapshot-key-out-of-range");
+            }
+            if (snapshot.pixelCount() != BoardConstants.TILE_PIXEL_COUNT) {
+                throw dbViewViolation(checkpoint, bootstrapState, tileLoadResult, "snapshot-pixel-length");
+            }
+            if (snapshot.tileVersion() < 0) {
+                throw dbViewViolation(checkpoint, bootstrapState, tileLoadResult, "snapshot-version-negative");
+            }
+            snapshotKeys.add(snapshot.key());
+        }
+
+        if (!canonicalZ0TileKeys.exactlyMatches(snapshotKeys)) {
+            // count만 맞는 duplicate·누락·추가 row를 loadAll에 전달하기 전 차단
+            throw dbViewViolation(checkpoint, bootstrapState, tileLoadResult, "snapshot-keys-not-canonical");
+        }
+    }
+
+    private void validateWalReplayBatch(long checkpoint, WalReplayBatch replayBatch) {
+        long walLastEventSeq = replayBatch.walLastEventSeq();
+        List<WalRecord> records = replayBatch.records();
+
+        if (checkpoint < 0) {
+            throw walViolation(checkpoint, walLastEventSeq, records.size(), "checkpoint-negative");
+        }
+        if (walLastEventSeq < checkpoint) {
+            // checkpoint보다 뒤처진 WAL tail을 Math.max seed로 숨기면 WAL 유실 상태가 정상 기동됨
+            throw walViolation(checkpoint, walLastEventSeq, records.size(), "tail-before-checkpoint");
+        }
+        if (records.isEmpty()) {
+            if (walLastEventSeq != checkpoint) {
+                throw walViolation(checkpoint, walLastEventSeq, 0, "empty-records-tail-mismatch");
+            }
+            return;
+        }
+
+        long previousEventSeq = checkpoint;
+        for (WalRecord record : records) {
+            long eventSeq = record.eventSeq();
+            if (eventSeq <= checkpoint) {
+                throw walViolation(checkpoint, walLastEventSeq, records.size(), "record-at-or-before-checkpoint");
+            }
+            if (eventSeq <= previousEventSeq) {
+                throw walViolation(checkpoint, walLastEventSeq, records.size(), "records-not-strictly-increasing");
+            }
+            previousEventSeq = eventSeq;
+        }
+
+        if (previousEventSeq != walLastEventSeq) {
+            throw walViolation(checkpoint, walLastEventSeq, records.size(), "last-record-tail-mismatch");
+        }
+    }
+
+    private IllegalStateException dbViewViolation(
+            long checkpoint,
+            DbBootstrapState bootstrapState,
+            TileLoadResult tileLoadResult,
+            String violation
+    ) {
+        return new IllegalStateException(
+                "Startup recovery DB view is inconsistent. checkpoint=" + checkpoint
+                        + ", databaseKeyCount=" + tileLoadResult.databaseTileKeys().size()
+                        + ", snapshotCount=" + tileLoadResult.snapshots().size()
+                        + ", classifierState=" + bootstrapState
+                        + ", violation=" + violation
+        );
+    }
+
+    private IllegalStateException walViolation(
+            long checkpoint,
+            long walLastEventSeq,
+            int recordCount,
+            String violation
+    ) {
+        return new IllegalStateException(
+                "Startup recovery WAL batch is inconsistent. checkpoint=" + checkpoint
+                        + ", walLastEventSeq=" + walLastEventSeq
+                        + ", recordCount=" + recordCount
+                        + ", violation=" + violation
+        );
     }
 }

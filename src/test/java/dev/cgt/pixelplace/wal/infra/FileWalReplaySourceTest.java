@@ -76,7 +76,7 @@ class FileWalReplaySourceTest {
     }
 
     @Test
-    // lastFlushedEventSeq가 WAL 끝 이상이어도 seed 계산을 위해 walLastEventSeq는 유지함
+    // lastFlushedEventSeq와 WAL tail이 같으면 replay record는 없어도 exact WAL tail은 반환함
     void readAfterCanReturnNoRecordsButKeepWalLastEventSeq() throws IOException {
         Path wal = tempDir.resolve("active.wal");
         Files.writeString(wal, """

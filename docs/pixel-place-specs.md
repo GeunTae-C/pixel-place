@@ -354,22 +354,48 @@
 - DB flush 완료는 HTTP 성공 조건이 아님
 
 ### MySQL + JPA
-- `tiles`: 현재 schema/entity/recovery snapshot load가 존재하지만 snapshot write는 11단계 구현 범위
-- `pixel_events`: 현재 DDL 계약은 존재하지만 WAL record의 DB insert는 11단계 구현 범위
-- `wal_checkpoint`: 현재 recovery read 구조가 존재하지만 flush checkpoint update는 11단계 구현 범위
-- 11단계에서 `pixel_events` insert, `tiles` snapshot write, `wal_checkpoint` update를 하나의 DB transaction으로 구현
+- `tiles`: captured snapshot write와 startup snapshot load 구현 완료
+- `pixel_events`: assigned `event_seq` primary key의 append-only WAL record insert 구현 완료
+- `wal_checkpoint`: expected fencing과 conditional advance 구현 완료
+- `pixel_events`, captured `tiles`, checkpoint advance는 `REQUIRES_NEW` physical transaction 하나에서 처리
+- `pixel_events.created_at`은 `DATETIME(3)`이며 WAL/plan 원본 정밀도는 유지하고 entity mapping 경계에서만 밀리초로 truncate
+- 이벤트 순서와 checkpoint는 `eventSeq`만 사용하고 시간값은 tie-breaker로도 사용하지 않음
+- 순서 조회는 `ORDER BY event_seq`
 - `users`와 카카오 계정 매핑은 후속 인증 목표
+
+### Runtime flush scheduler와 profile
+- default profile은 `pixel-place.flush.fixed-delay=1s`의 fixed-delay trigger 하나만 사용하고 initial delay도 같은 값
+- scheduler는 `FlushWorker.flushOnce()` 호출 adapter이며 whole-cycle single-flight는 worker 내부 책임
+- scheduled method가 named `flushTaskScheduler`를 명시 선택
+- `flushTaskScheduler`는 `defaultCandidate=false`이고 Boot 기본 `taskScheduler`와 별도 bean으로 격리되며 application 전역 기본 scheduler로 등록되지 않음
+- application `RuntimeException` 뒤 다음 invocation 유지
+- raw JVM-level `Error`는 전용 handler가 ERROR level logging을 시도한 뒤 logging 성공 여부와 관계없이 같은 instance로 재전파하여 해당 repeating task 중단
+- raw `Error`의 기존 suppressed identity를 보존하고 distinct logging failure만 뒤에 한 번 추가할 수 있음
+- 전용 handler는 `TaskUtils` handler 상수를 직접 재사용하지 않으며 non-Error logging 성공·`RuntimeException` 실패 뒤 정상 반환, logging `Error`는 재전파
+- `stub` profile은 startup recovery 입력 adapter만 대체하고 scheduler/runtime flush bean은 비활성
+- 1000건 누적 또는 write-count trigger 없음
 
 ### 현재 구조에서 DB의 역할
 - 실시간 authoritative state는 DB가 아니라 **메모리 타일 상태**
 - DB는 **WAL 뒤를 따라가는 후행 저장소 + 복구 시작점**
 - 서버 재시작 시:
-  1. `wal_checkpoint.last_flushed_event_seq` 확인
-  2. DB `tiles` 전체 로드 또는 all-white pre-init
-  3. active WAL을 끝까지 읽어 `walLastEventSeq` 확인
-  4. `lastFlushedEventSeq` 이후 WAL record replay
-  5. `lastIssuedEventSeq = max(lastFlushedEventSeq, walLastEventSeq)` 초기화
-  6. 복구 완료 후 ready 전환
+  1. public capture service의 명시적 read-only `REPEATABLE_READ` transaction에서 checkpoint, 전체 key metadata와 z=0 bytes를 같은 snapshot으로 조회
+  2. immutable DB view 반환과 함께 transaction 종료
+  3. startup/runtime 공통 `DbBootstrapClassifier`로 empty/canonical 1,024/inconsistent 판정
+  4. checkpoint/tile shape와 WAL tail/replay batch invariant를 memory 변경 전에 검증
+  5. `lastFlushedEventSeq` 이후 WAL record replay
+  6. 검증된 `walLastEventSeq`로 `lastIssuedEventSeq` 초기화
+  7. 복구 완료 후 ready 전환
+- capture transaction은 classifier, WAL scan과 memory replay까지 포함하지 않음
+
+### Ambiguous transaction
+- definite rollback은 rollback 완료가 확인된 경우만 인정하고 실제 drained dirty를 restore
+- ambiguous outcome은 drained dirty를 즉시 restore하지 않고 expected/target/bootstrap state와 함께 memory-only pending에 보존
+- pending install 정상 반환과 예외 모두 `current()`의 exact same candidate identity로 확인
+- 확인 불가 시 dirty restore 없이 irreversible fatal-not-ready로 protected write, pending/reconciliation과 후속 plan/transaction 차단
+- 다음 invocation은 새 plan 전에 exact reconciliation 수행
+- commit은 `checkpoint == target`과 observed `INITIALIZED`, rollback은 `checkpoint == expected`와 이전 mode에 맞는 exact state일 때만 확인
+- 그 밖의 상태는 pending을 유지하고 fail-fast하며 같은 invocation에서 재계획하지 않음
 
 ### 픽셀 이벤트 로그 정책
 - 픽셀 이벤트 로그는 **append-only 방식**으로 저장한다.
