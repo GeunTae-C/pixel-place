@@ -132,12 +132,15 @@ public class PixelEventEntity implements Persistable<Long> {
 
     private static void validate(WalRecord record) {
         if (record.eventSeq() <= 0) {
+            // assigned primary key와 전역 승인 순서로 사용할 수 없는 값 거부
             throw new IllegalArgumentException("eventSeq must be positive.");
         }
         if (record.userId() <= 0) {
+            // unsigned user_id와 감사 주체 계약을 동시에 위반하는 record 거부
             throw new IllegalArgumentException("userId must be positive.");
         }
         if (record.z() != BoardConstants.Z0_LEVEL) {
+            // 현재 tiles snapshot과 replay가 지원하는 canonical level 밖 event 저장 금지
             throw new IllegalArgumentException("Only canonical z=0 WAL events can be persisted.");
         }
         if (record.x() < 0 || record.x() >= BoardConstants.BOARD_SIZE
@@ -151,6 +154,7 @@ public class PixelEventEntity implements Persistable<Long> {
             throw new IllegalArgumentException("WAL tile coordinates do not match pixel coordinates.");
         }
         if (record.color() < 0 || record.color() >= BoardConstants.PALETTE_SIZE) {
+            // memory replay로 재현할 수 없는 palette index의 append-only 보존 금지
             throw new IllegalArgumentException("WAL color is outside the palette.");
         }
         Objects.requireNonNull(record.createdAt(), "createdAt must not be null");

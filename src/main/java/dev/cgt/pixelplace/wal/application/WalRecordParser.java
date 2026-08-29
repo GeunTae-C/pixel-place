@@ -8,7 +8,6 @@ import tools.jackson.databind.ObjectMapper;
 
 /*
  * JSON Lines WAL의 단일 라인을 복구용 레코드로 변환하고 검증함
- * WAL 파일의 한 줄을 WalRecord로 파싱하고 복구 가능한 정상 이벤트인지 검증함
  * WAL은 메모리 authoritative state를 다시 만드는 원본이므로, 형식 오류나 좌표 불일치는 조용히 건너뛰지 않고 recovery 실패로 올림
  */
 @Component
@@ -48,6 +47,7 @@ public class WalRecordParser {
             throw new IllegalArgumentException("Invalid WAL eventSeq. lineNumber=" + lineNumber);
         }
         if (record.userId() <= 0) {
+            // 승인 주체 없는 record를 감사·persistence 가능한 write로 replay 금지
             throw new IllegalArgumentException("Invalid WAL userId. lineNumber=" + lineNumber);
         }
         if (record.z() != BoardConstants.Z0_LEVEL) {
@@ -56,9 +56,11 @@ public class WalRecordParser {
         }
         if (record.x() < 0 || record.x() >= BoardConstants.BOARD_SIZE
                 || record.y() < 0 || record.y() >= BoardConstants.BOARD_SIZE) {
+            // canonical memory board 밖 mutation을 recovery에 유입하지 않음
             throw new IllegalArgumentException("Invalid WAL coordinate. lineNumber=" + lineNumber);
         }
         if (record.color() < 0 || record.color() >= BoardConstants.PALETTE_SIZE) {
+            // 1 byte palette 저장 모델로 재현할 수 없는 색상 거부
             throw new IllegalArgumentException("Invalid WAL color. lineNumber=" + lineNumber);
         }
 
@@ -69,6 +71,7 @@ public class WalRecordParser {
             throw new IllegalArgumentException("WAL tile coordinate mismatch. lineNumber=" + lineNumber);
         }
         if (record.createdAt() == null) {
+            // 승인 시각 원본이 없는 record는 append-only DB mapping 계약 불충족
             throw new IllegalArgumentException("Missing WAL createdAt. lineNumber=" + lineNumber);
         }
     }

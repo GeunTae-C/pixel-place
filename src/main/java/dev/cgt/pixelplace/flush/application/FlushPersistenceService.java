@@ -74,6 +74,7 @@ public class FlushPersistenceService {
             throw new IllegalStateException("DB checkpoint and tile metadata are inconsistent.");
         }
         if (dbState != currentPlan.bootstrapState()) {
+            // capture한 mode와 다른 DB shape에 같은 plan을 적용하면 최초 full/incremental target 의미가 뒤바뀜
             throw new IllegalStateException(
                     "DB bootstrap state changed after plan capture. plan="
                             + currentPlan.bootstrapState() + ", actual=" + dbState

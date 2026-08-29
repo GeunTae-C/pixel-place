@@ -84,6 +84,7 @@ public class FlushWorker {
         }
 
         if (transactionResult == null || transactionResult.outcome() == null) {
+            // definite rollback 증거가 없는 executor contract 위반은 dirty 즉시 복원 대신 ambiguous 보존
             return failAmbiguous(
                     candidate,
                     new IllegalStateException("Flush transaction executor returned an invalid result.")
@@ -113,6 +114,7 @@ public class FlushWorker {
                 "reconciliation returned null decision"
         );
         if (decision == FlushReconciliationDecision.COMMIT_CONFIRMED) {
+            // target commit에 포함된 pending dirty는 복원하지 않고 exact pending만 폐기
             pendingAmbiguousFlushStore.clearIfSame(pending);
             return FlushRunResult.RECONCILED_COMMIT;
         }
@@ -278,6 +280,7 @@ public class FlushWorker {
     }
 
     private void addSuppressedOnce(Throwable primaryFailure, Throwable secondaryFailure) {
+        // raw Error identity와 기존 suppressed 순서를 보존하며 distinct 후속 실패만 한 번 추가
         if (secondaryFailure == null
                 || secondaryFailure == primaryFailure
                 || secondaryFailure == primaryFailure.getCause()) {

@@ -13,7 +13,10 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-/* fixed-delay invocation 하나를 FlushWorker whole-cycle 호출 하나로 연결하는 얇은 adapter */
+/*
+ * named fixed-delay invocation 하나를 FlushWorker whole-cycle 호출 하나로 연결하는 얇은 adapter
+ * flush policy·single-flight·transaction 책임은 갖지 않으며 write-count trigger도 제공하지 않음
+ */
 @Component
 @Profile("!stub")
 public class FlushScheduler {
@@ -26,7 +29,10 @@ public class FlushScheduler {
         this.flushWorker = flushWorker;
     }
 
-    /* named 전용 scheduler에서 worker를 정확히 한 번 호출하고 runtime failure 뒤 다음 주기 유지 */
+    /*
+     * named 전용 scheduler에서 worker를 정확히 한 번 호출하고 application RuntimeException 뒤 다음 주기 유지
+     * raw JVM Error는 잡지 않고 전용 ErrorHandler까지 같은 instance로 전달해 repeating task 중단
+     */
     @Scheduled(
             scheduler = "flushTaskScheduler",
             fixedDelayString = "${pixel-place.flush.fixed-delay}",

@@ -146,9 +146,11 @@ public class FlushPlanCaptureService {
     private List<WalRecord> validateWalBatch(long expectedLastFlushedEventSeq, WalReplayBatch batch) {
         long walLastEventSeq = batch.walLastEventSeq();
         if (walLastEventSeq < 0) {
+            // durable WAL tail은 승인 eventSeq 또는 empty 0만 허용
             throw new IllegalStateException("WAL tail must not be negative. value=" + walLastEventSeq);
         }
         if (walLastEventSeq < expectedLastFlushedEventSeq) {
+            // DB checkpoint가 WAL 원본보다 앞선 상태를 정상 no-op으로 숨기면 recovery record 유실 가능
             throw new IllegalStateException("WAL tail is behind the expected checkpoint.");
         }
 
@@ -166,9 +168,11 @@ public class FlushPlanCaptureService {
 
         if (records.isEmpty()) {
             if (walLastEventSeq != expectedLastFlushedEventSeq) {
+                // tail까지 실제 record가 없으면 checkpoint 전진 payload를 구성할 수 없음
                 throw new IllegalStateException("Empty WAL batch tail must equal the expected checkpoint.");
             }
         } else if (previousEventSeq != walLastEventSeq) {
+            // 마지막 replay record와 durable tail 불일치는 plan target과 event payload 분리 위험
             throw new IllegalStateException("Last WAL record eventSeq must equal the WAL tail.");
         }
         return List.copyOf(records);
@@ -237,6 +241,7 @@ public class FlushPlanCaptureService {
     ) {
         for (DirtyTile dirtyTile : drainedDirtyTiles) {
             if (dirtyTile.latestEventSeq() > flushTargetEventSeq) {
+                // captured WAL target 이후 live write가 같은 plan snapshot에 섞였음을 뜻하는 boundary 위반
                 throw new IllegalStateException("Dirty eventSeq exceeds the captured WAL target.");
             }
             FlushTileSnapshot snapshot = Objects.requireNonNull(
@@ -285,6 +290,7 @@ public class FlushPlanCaptureService {
 
     private void requireCanonicalKey(TileKey key, String source) {
         if (!CANONICAL_Z0_TILE_KEYS.contains(key)) {
+            // canonical memory board 밖 key는 snapshot capture와 checkpoint 완료 의미를 구성할 수 없음
             throw new IllegalStateException(source + " contains a non-canonical z=0 tile key. key=" + key);
         }
     }

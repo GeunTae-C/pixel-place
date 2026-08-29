@@ -9,7 +9,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.util.ErrorHandler;
 
-/* default runtime의 flush 전용 scheduler 활성화와 application-wide 기본 후보 격리 */
+/*
+ * default runtime의 flush 전용 scheduler 활성화와 application-wide 기본 후보 격리
+ * stub profile에서는 runtime flush schedule 전체 비활성
+ */
 @Configuration(proxyBeanMethods = false)
 @EnableScheduling
 @Profile("!stub")

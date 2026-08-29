@@ -9,8 +9,8 @@ import org.springframework.data.repository.query.Param;
 
 import java.util.Optional;
 
-// "main" checkpoint row를 읽기 위한 최소 JPA repository
-// checkpoint는 WAL replay 시작 범위를 결정하므로, recovery에서 조용히 기본값으로 대체하면 안됨
+// recovery의 main checkpoint 조회와 flush/reconciliation의 row lock·conditional advance를 제공하는 JPA repository
+// 누락·stale expected를 기본값이나 무조건 update로 숨기지 않는 DB fencing 경계
 public interface WalCheckpointJpaRepository extends JpaRepository<WalCheckpointEntity, String> {
 
     // ambiguous transaction 종료 전 이전 checkpoint를 관측하지 않도록 main row write lock 획득

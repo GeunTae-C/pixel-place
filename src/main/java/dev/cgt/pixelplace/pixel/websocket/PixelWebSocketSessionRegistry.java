@@ -24,6 +24,7 @@ public class PixelWebSocketSessionRegistry {
         sessions.remove(session.getId());
     }
 
+    /* broadcast 순회 중 registry 변경 영향을 받지 않는 현재 session immutable snapshot */
     public List<WebSocketSession> snapshot() {
         return List.copyOf(sessions.values());
     }

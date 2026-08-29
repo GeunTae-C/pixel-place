@@ -47,7 +47,7 @@ import java.util.List;
  *
  * 5. 이 구현체는 active WAL 하나만 읽음
  *    - MVP 기준에서는 WAL rotation / segment replay를 다루지 않음
- *    - 추후 WAL segment 구조가 도입되면 이 클래스 또는 별도 구현체에서 확장함
+ *    - WAL segment 구조 도입 시 이 클래스 또는 별도 replay source 확장 필요
  */
 @Component
 @Profile("!stub")

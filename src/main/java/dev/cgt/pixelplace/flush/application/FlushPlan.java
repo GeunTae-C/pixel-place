@@ -13,7 +13,7 @@ import java.util.Objects;
 import java.util.Set;
 
 /*
- * coordinator 해제 뒤 live WAL/memory를 다시 읽지 않고 11-B transaction에 전달할 immutable flush plan
+ * coordinator 해제 뒤 live WAL/memory를 다시 읽지 않고 DB transaction에 전달할 immutable flush plan
  * expected checkpoint는 fencing 기준, target은 capture boundary의 durable WAL tail로 서로 다른 값
  */
 public final class FlushPlan {
@@ -157,6 +157,7 @@ public final class FlushPlan {
         Set<TileKey> expectedSnapshotKeys = new HashSet<>(walAffectedKeys);
         expectedSnapshotKeys.addAll(dirtyKeys);
         if (!snapshotKeys.equals(expectedSnapshotKeys)) {
+            // 필수 WAL affected 누락과 capture 이후 임의 snapshot 확장을 모두 금지하는 exact target 계약
             throw new IllegalArgumentException(
                     "Initialized plan snapshots must exactly match WAL affected and drained dirty keys."
             );
@@ -175,12 +176,14 @@ public final class FlushPlan {
             }
             TileKey affectedKey = new TileKey(current.z(), current.tx(), current.ty());
             if (!CANONICAL_Z0_TILE_KEYS.contains(affectedKey)) {
+                // persistence/recovery가 지원하지 않는 key를 checkpoint 완료 범위에 포함할 수 없음
                 throw new IllegalArgumentException("WAL record contains a non-canonical tile key.");
             }
             affectedKeys.add(affectedKey);
             previousEventSeq = current.eventSeq();
         }
         if (previousEventSeq != flushTargetEventSeq) {
+            // 마지막 실제 WAL record와 target이 다르면 checkpoint가 plan payload와 다른 경계를 가리킴
             throw new IllegalArgumentException("Last WAL record eventSeq must match flush target.");
         }
         return affectedKeys;

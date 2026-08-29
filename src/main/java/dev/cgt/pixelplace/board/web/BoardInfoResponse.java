@@ -21,8 +21,6 @@ public record BoardInfoResponse(
         int overviewRefreshSeconds
 ) {
 
-    private static final int OVERVIEW_REFRESH_SECONDS = 10;
-
     public BoardInfoResponse {
         palette = List.copyOf(palette);
     }
@@ -40,7 +38,7 @@ public record BoardInfoResponse(
                 BoardConstants.Z0_TILE_COUNT_PER_AXIS,
                 BoardConstants.PALETTE_SIZE,
                 PaletteConstants.paletteHex(),
-                OVERVIEW_REFRESH_SECONDS
+                BoardConstants.OVERVIEW_REFRESH_SECONDS
         );
     }
 }

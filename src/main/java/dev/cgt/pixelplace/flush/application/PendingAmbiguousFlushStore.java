@@ -17,6 +17,7 @@ public class PendingAmbiguousFlushStore {
 
     private final AtomicReference<PendingAmbiguousFlush> pending = new AtomicReference<>();
 
+    /* install 사후확인과 다음 cycle reconciliation에 사용할 현재 exact instance 관측 */
     public Optional<PendingAmbiguousFlush> current() {
         return Optional.ofNullable(pending.get());
     }

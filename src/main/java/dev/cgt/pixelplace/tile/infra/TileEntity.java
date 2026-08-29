@@ -23,26 +23,20 @@ import java.util.Objects;
 @Table(name = "tiles")
 public class TileEntity {
 
-    // tiles 테이블 매핑 엔티티
-    // 이 클래스는 DB row와 Java 객체 사이의 단순 매핑만 담당하며, recovery orchestration 책임은 갖지 않음
-    // tiles row는 DB 후행 저장소의 타일 snapshot
-    // 실시간 authoritative state는 InMemoryTileBoard가 갖고, 이 엔티티는 복구 시작점으로 읽히는 단순 DB 매핑만 담당함
+    // memory TileKey와 동일한 z/tx/ty 기준을 사용하는 tiles composite key
     @EmbeddedId
     private TileId id;
 
-    // 타일의 픽셀 데이터를 1 byte/pixel 팔레트 인덱스 raw bytes로 저장하는 컬럼
-    // 팔레트 인덱스 raw bytes를 그대로 저장함 타일 1개는 256 * 256 bytes가 되어야 함
+    // 1 byte/pixel palette index snapshot, capture/recovery 경계에서 정확한 tile shape 검증
     @Lob
     @Column(name = "data", nullable = false, columnDefinition = "MEDIUMBLOB")
     private byte[] data;
 
-    // DB 후행 저장소에 기록된 타일 버전이며, 복구 시 메모리 타일 상태의 기준 버전으로 읽힘
-    // DB에 마지막으로 flush된 타일 기준 상태 버전임 write path의 실시간 버전 원본은 메모리 타일 상태
+    // 마지막 DB flush snapshot version이며 runtime memory version과 항상 같지는 않음
     @Column(name = "tile_version", nullable = false)
     private long tileVersion;
 
-    // DB가 관리하는 메타 컬럼으로, 애플리케이션이 recovery 흐름 제어용으로 갱신하지 않음
-    // DB flush 시점 확인용 메타 컬럼이며, recovery orchestration 책임은 이 엔티티에 두지 않음
+    // DB 관리 관측 시각이며 event ordering·checkpoint 판정에는 사용하지 않음
     @Column(name = "updated_at", nullable = false, insertable = false, updatable = false)
     private LocalDateTime updatedAt;
 
@@ -55,11 +49,13 @@ public class TileEntity {
         TileKey key = Objects.requireNonNull(source.tileKey(), "snapshot tileKey must not be null");
         byte[] pixels = Objects.requireNonNull(source.pixels(), "snapshot pixels must not be null");
         if (pixels.length != BoardConstants.TILE_PIXEL_COUNT) {
+            // 잘못된 BLOB shape를 checkpoint transaction에 포함하기 전 차단
             throw new IllegalArgumentException(
                     "snapshot pixels length must be " + BoardConstants.TILE_PIXEL_COUNT
             );
         }
         if (source.tileVersion() < 0) {
+            // unsigned DB version과 recovery 증가 기준을 깨는 snapshot 거부
             throw new IllegalArgumentException("snapshot tileVersion must not be negative");
         }
 
@@ -98,11 +94,13 @@ public class TileEntity {
         return updatedAt;
     }
 
+    /*
+     * tiles의 z/tx/ty composite primary key JPA 값 타입
+     * memory TileKey와 물리 row 식별 기준 일치 보장
+     */
     @Embeddable
     public static class TileId implements Serializable {
 
-        // (z, tx, ty) 복합키가 tiles 테이블의 타일 row 식별 기준
-        // z, tx, ty 복합키는 DB tiles의 물리 row와 메모리 TileKey가 같은 기준을 쓰도록 맞춤
         @Column(name = "z", nullable = false)
         private int z;
 

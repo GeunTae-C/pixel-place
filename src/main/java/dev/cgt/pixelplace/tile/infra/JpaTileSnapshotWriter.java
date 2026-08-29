@@ -22,6 +22,7 @@ public class JpaTileSnapshotWriter implements TileSnapshotWriter {
         this.tileJpaRepository = tileJpaRepository;
     }
 
+    /* caller transaction 안에서 immutable plan snapshot만 entity로 바꾸고 SQL 실패까지 즉시 노출 */
     @Override
     public void writeAll(List<FlushTileSnapshot> tileSnapshots) {
         requireSnapshots(tileSnapshots);

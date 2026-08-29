@@ -17,12 +17,14 @@ public class ReadinessWebConfig implements WebMvcConfigurer {
         this.readinessGuardInterceptor = readinessGuardInterceptor;
     }
 
+    /* 현재 구현된 HTTP read/write 경로만 guard하고 /ws·actuator·정적 resource로 확장하지 않음 */
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(readinessGuardInterceptor)
                 .addPathPatterns(
                         "/api/pixels",
                         "/api/board",
+                        "/api/overview",
                         "/api/tiles/**"
                 );
     }

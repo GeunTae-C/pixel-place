@@ -3,8 +3,8 @@ package dev.cgt.pixelplace;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
-// 애플리케이션의 최소 시작점이
-// 실제 부팅 복구는 별도 runner가 연결되며, 이 클래스는 그 흐름이 시작될 진입점만 제공함
+// Spring Boot component graph 기동 진입점
+// startup recovery 실행과 readiness 전환은 StartupRecoveryRunner 이하의 별도 경계가 담당
 @SpringBootApplication
 public class PixelPlaceApplication {
 

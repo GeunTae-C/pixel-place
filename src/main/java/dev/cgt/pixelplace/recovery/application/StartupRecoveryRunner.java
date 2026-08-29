@@ -4,8 +4,8 @@ import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
-// 애플리케이션 시작 시 recovery를 한 번 실행하는 부트 훅
-// recovery 실행 시점을 한 곳으로 고정해 이후 실제 구현이 들어와도 부팅 흐름이 흔들리지 않게 함
+// application context 기동 뒤 StartupRecoveryService를 정확히 한 번 호출하는 부트 훅
+// DB view 검증·WAL replay·readiness 전환 책임은 갖지 않고 실행 시점만 연결
 @Component
 public class StartupRecoveryRunner implements ApplicationRunner {
 
@@ -15,6 +15,7 @@ public class StartupRecoveryRunner implements ApplicationRunner {
         this.startupRecoveryService = startupRecoveryService;
     }
 
+    /* 보호 API가 열리기 전 startup recovery 전체 흐름 시작 */
     @Override
     public void run(ApplicationArguments args) {
         startupRecoveryService.recover();

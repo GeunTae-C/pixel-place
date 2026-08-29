@@ -53,14 +53,18 @@
 
 ### Overview 응답 방식
 - `GET /api/overview`
-- 응답은 보드 전체를 축약한 이미지
-- 권장 크기: `1024 × 1024` 또는 `2048 × 2048`
-- MVP에서는 **단일 overview 이미지 1장 제공**
+- 정상 응답은 보드 전체를 축약한 고정 `2048 × 2048` PNG 이미지 1장이다.
+- 게시된 이미지가 없으면 `503 Service Unavailable`과 JSON 오류 메시지를 반환한다.
+- 정상 PNG 응답에는 `Content-Type: image/png`, `Cache-Control: no-cache`를 적용한다.
 
 ### Overview 갱신 정책
 - overview는 실시간 정밀 동기화 대상이 아니라 **탐색용 이미지**다.
-- 최신 보드 상태와 **최대 10초 이내 차이**가 있을 수 있다.
-- 서버는 dirty 상태를 기준으로 **10초 주기**로 overview를 재생성한다.
+- authoritative in-memory z=0 보드의 각 `4 × 4` 블록에서 좌상단 픽셀을 표본으로 사용한다.
+- 렌더링은 타일별 point-in-time snapshot을 사용하며 보드 전체 동시 snapshot을 보장하지 않는다.
+- default profile의 정기 task는 context refresh부터 등록될 수 있지만 `ApplicationReadyEvent` 이전 invocation은 lifecycle gate에서 정상 skip한다. event 관측 시 gate를 열고 최초 생성을 기본 `taskScheduler`에 1회 제출하며, 이후 약 10초 fixed-delay invocation만 service에 위임한다.
+- Scheduler는 readiness를 직접 판단하지 않고, 실제 renderer 실행 여부는 `OverviewService`가 결정한다. 최초 제출 실패 뒤에는 열린 gate를 통해 다음 정기 invocation이 재시도한다. 10초는 최대 stale 시간 보장이 아니다.
+- dirty 상태나 DB를 생성 trigger/source로 사용하지 않는다.
+- 완성된 PNG byte 배열만 원자적으로 게시하고, 재생성 실패 시 마지막 정상 이미지를 유지한다.
 
 ---
 
@@ -102,8 +106,8 @@
 - 현재 명시적인 `SecurityFilterChain`과 `spring.security` 설정은 없다.
 - 따라서 HTTP 및 WebSocket handshake 접근은 Spring Security auto-configuration의 기본 filter chain 영향을 받는다.
 - controller 단위 `standaloneSetup` 테스트는 filter chain을 포함하지 않으므로 공개 접근의 근거가 아니다.
-- `BoardController` 제한 `@WebMvcTest`에서 unauthenticated JSON 요청은 `401`과 HTTP Basic challenge, HTML 요청은 `/login`으로 `302` redirect가 관측되었고, mock 인증 요청은 readiness `503`에 도달했다.
-- 위 진단은 Board MVC slice의 기본 Security filter와 readiness 우선순위만 확인한다. 전체 application context, Tile/Pixel endpoint, 실제 `/ws` handshake 결과는 검증하지 않았다.
+- `BoardController`와 `OverviewController` 제한 `@WebMvcTest`에서 unauthenticated JSON 요청은 `401`과 HTTP Basic challenge, HTML 요청은 `/login`으로 `302` redirect가 관측되었고, mock 인증 요청은 readiness `503`에 도달했다.
+- 위 진단은 Board/Overview MVC slice의 기본 Security filter와 readiness 우선순위만 확인한다. 전체 application context, Tile/Pixel endpoint, 실제 `/ws` handshake 결과는 검증하지 않았다.
 
 ### 최종 로그인 진입점과 인증 흐름
 - 사용자 로그인은 **카카오 OAuth2 Authorization Code 방식만 사용**한다.
@@ -171,12 +175,10 @@
 - `GET /api/overview`
 
 #### 현재 구현
-- controller/service가 아직 없어 현재 호출 가능한 API가 아니다.
-
-#### 최종 MVP 목표
-- 보드 전체를 축약한 overview 이미지 반환
-- 탐색용 read-only
-- 최신 상태와 수 초 차이가 있을 수 있음
+- readiness guard를 통과하고 게시된 이미지가 있으면 `200`, `image/png`, `Cache-Control: no-cache`와 완전한 `2048 × 2048` PNG를 반환한다.
+- readiness guard를 통과했지만 게시된 이미지가 없으면 `503` JSON 오류 메시지를 반환한다.
+- not-ready 상태에서는 다른 보호 API와 동일하게 readiness interceptor가 `503`을 반환하며, 이전 정상 PNG가 있어도 노출하지 않는다.
+- Overview 제한 MVC slice에서 현재 Security 기본 동작은 unauthenticated JSON `401`, HTML `/login` `302`이며 Overview `permitAll`은 13단계 책임이다. 전체 application 결과로 확대하지 않는다.
 
 ### 6.3 타일 로딩(핵심)
 - `GET /api/tiles/{z}/{tx}/{ty}`
@@ -416,7 +418,7 @@
 ### 최종 MVP endpoint 정책
 - `POST /api/pixels`: 인증된 사용자만 허용하고 사용자당 180초 쿨다운 적용
 - Board, Tile, Overview 조회: 최종 `permitAll`
-- 현재 Overview API는 미구현
+- 현재 Overview API는 구현됐지만 `permitAll` Security 정책은 13단계에서 적용한다.
 - WebSocket 인증과 handshake 정책: 후속 단계에서 별도 확정
 - 현재 Pixel write: 실제 인증 대신 임시 `X-User-Id` 식별값 사용
 
@@ -524,8 +526,8 @@
 - 총 타일 수: **1024**
 - 로딩 방식: **뷰포트 기반 타일 로딩**
 - MVP 타일 레벨: **`z=0` 원본만 구현**
-- 전체 보기 목표: **별도 overview 모드 제공**(현재 API 미구현)
-- overview 갱신 주기: **10초**
+- 전체 보기: **인메모리 보드 기반 2048×2048 PNG 제공**
+- overview 갱신 주기: **ApplicationReadyEvent 관측 뒤 최초 1회 요청 + event 이후 약 10초 fixed-delay**
 - 팔레트: **256색 고정 팔레트**
 - 픽셀 저장 표현: **1 byte 팔레트 인덱스**
 - 타일 응답 포맷: **raw bytes + gzip**
@@ -542,7 +544,7 @@
 ---
 
 ## 15) 고정 결론(한 줄)
-- **8192×8192 보드, 256×256 타일, 뷰포트 기반 z=0 원본 타일 로딩, 별도 overview 목표, 256색 팔레트 인덱스 저장, raw bytes 타일 API, POST 픽셀 쓰기 API, 순수 WebSocket diff, 사용자당 180초 쿨다운, append-only 이벤트 로그, 카카오 OAuth2 + stateless Access JWT only(후속)**
+- **8192×8192 보드, 256×256 타일, 뷰포트 기반 z=0 원본 타일 로딩, 인메모리 2048×2048 overview PNG, 256색 팔레트 인덱스 저장, raw bytes 타일 API, POST 픽셀 쓰기 API, 순수 WebSocket diff, 사용자당 180초 쿨다운, append-only 이벤트 로그, 카카오 OAuth2 + stateless Access JWT only(후속)**
 
 ## 16) DDL
 

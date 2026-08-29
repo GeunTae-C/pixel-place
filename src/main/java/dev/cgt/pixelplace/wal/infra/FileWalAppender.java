@@ -112,7 +112,7 @@ public class FileWalAppender implements WalAppender {
         Path parent = activeFile.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
-            // parent directory fsync는 WAL 파일 생성 내구성을 더 강하게 만들지만, 이번 1차 구현 범위에서는 다루지 않음
+            // 현재 MVP durable tail은 file force(true)까지이며 directory entry crash durability는 보장 범위 밖
         }
 
         if (Files.isDirectory(activeFile)) {

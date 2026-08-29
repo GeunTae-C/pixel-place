@@ -11,13 +11,13 @@
 - build.gradle에는 Spring Security starter, OAuth2 Client, OAuth2 Resource Server dependency가 있다.
 - production source에는 명시적 SecurityFilterChain, HttpSecurity, @EnableWebSecurity, authorizeHttpRequests 설정이 없고 application.yml에도 spring.security 설정이 없다.
 - 정적 구성상 Spring Boot security auto-configuration이 적용될 수 있으며, 기본 chain은 모든 요청 인증, form login, HTTP Basic을 구성한다. 이것은 후속 최종 API 정책이 아니라 현재 dependency와 auto-configuration의 결과다.
-- BoardController 제한 slice에서 실제 filter chain을 포함해 확인한 결과는 다음과 같다.
+- BoardController와 OverviewController 제한 slice에서 실제 filter chain을 포함해 확인한 결과는 다음과 같다.
   - unauthenticated JSON 요청: 401, Location 없음, WWW-Authenticate: Basic realm="Realm"
   - unauthenticated HTML 요청: 302, Location: /login, WWW-Authenticate 없음
   - @WithMockUser 요청: security filter를 통과한 뒤 readiness guard가 503을 반환하며 Location과 WWW-Authenticate는 모두 없음
-- 위 실행 결과는 BoardController 제한 slice의 filter/readiness 우선순위만 증명한다. 전체 application, Tile, Pixel, 실제 /ws handshake 응답으로 일반화하지 않는다.
+- 위 실행 결과는 BoardController와 OverviewController 제한 slice의 filter/readiness 우선순위만 증명한다. 전체 application, Tile, Pixel, 실제 /ws handshake 응답으로 일반화하지 않는다.
 - 전체 application의 unauthenticated 응답과 실제 /ws handshake 접근 결과는 아직 filter-chain 포함 실행으로 검증하지 않았다.
-- Spring Security filter는 MVC interceptor보다 앞선 servlet filter 계층에 있다. 인증 단계에서 응답이 끝나면 readiness interceptor나 X-User-Id binding까지 도달하지 않으며, Board 제한 slice에서 이 우선순위를 확인했다.
+- Spring Security filter는 MVC interceptor보다 앞선 servlet filter 계층에 있다. 인증 단계에서 응답이 끝나면 readiness interceptor나 X-User-Id binding까지 도달하지 않으며, Board와 Overview 제한 slice에서 이 우선순위를 확인했다.
 
 ### 최종 인증 목표
 - 로그인 진입점은 카카오 OAuth2 Authorization Code만 제공하고 자체 아이디/비밀번호 로그인을 추가하지 않는다.
@@ -62,12 +62,13 @@
 
 ## 2) 통합 API 계약 매트릭스
 
-현재 production code와 제한 security 진단을 같은 기준으로 대조한 결과다. Board의 security 관측값을 전체 application, Tile, Pixel 또는 실제 WebSocket handshake 결과로 확대하지 않는다.
+현재 production code와 제한 security 진단을 같은 기준으로 대조한 결과다. Board/Overview의 security 관측값을 전체 application, Tile, Pixel 또는 실제 WebSocket handshake 결과로 확대하지 않는다.
 
 | 기능/API | protocol | HTTP method | 실제 route pattern | 현재 지원 범위 | request path variable | request query | request header | request body 또는 client message | 성공 status 또는 handshake 결과 | 실패 status | response body 또는 server payload | response header | Content-Type | Content-Encoding | application-level 사용자 식별 | 현재 security filter 상태 | readiness 적용 여부 | 현재 production 구현 여부 | 문서상 최종 목표 | 현재 구현과 최종 목표의 차이 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Board | HTTP | GET | `/api/board` | 고정 z=0 보드 메타 | 없음 | 없음 | 없음 | 없음 | `200` | readiness `503`; 내부 `500` 계열; 제한 slice unauth JSON `401`, HTML `302` | 8개 `BoardInfoResponse` 필드 JSON | 커스텀 response header 없음 | `application/json` | 없음 | 없음 | 명시적 chain 없음; Board 제한 slice에서 Basic `401`/login `302` 확인 | MVC guard 적용 | 구현 | 최종 `permitAll` | 현재 기본 Security 관측과 최종 공개 계약 불일치; 전체 app 결과 미검증 |
 | Tile | HTTP | GET | `/api/tiles/{z}/{tx}/{ty}` | `z=0`, `tx/ty=0..31`; `/api/tiles/0/{tx}/{ty}`는 구체적 호출 | `z`, `tx`, `ty` | 없음 | 없음 | 없음 | `200` | 범위 `400`; readiness `503`; 내부 `500` 계열 | 성공: gzip palette index bytes; 400 및 readiness 503: `message` JSON; 내부 500 body: Spring 기본 처리; Security 오류 body: 실제 Tile endpoint 미검증 | 성공: `X-Tile-Version`; 오류 응답 header는 경로별 상이하며 Security 응답은 실제 Tile endpoint 미검증 | 성공: `application/octet-stream` | 성공: `gzip` | 없음 | 명시적 chain 없음; 실제 endpoint unauth 응답 미검증 | `/api/tiles/**` MVC guard 적용 | 구현 | 최종 `permitAll`; 조건부 cache | 현재 z=0만 지원; ETag/If-None-Match/Cache-Control/304 미구현 |
+| Overview | HTTP | GET | `/api/overview` | 인메모리 z=0 보드의 고정 2048×2048 PNG | 없음 | 없음 | 없음 | 없음 | `200` | no-image/readiness `503`; 내부 `500` 계열; 제한 slice unauth JSON `401`, HTML `302` | 성공: 완전한 PNG bytes; no-image/readiness: `message` JSON | 성공: `Cache-Control: no-cache` | 성공: `image/png` | 없음 | 없음 | 명시적 chain 없음; Overview 제한 slice에서 Basic `401`/login `302` 확인 | `/api/overview` MVC guard 적용 | 구현 | 최종 `permitAll` | 현재 기본 Security와 최종 공개 계약 불일치; 전체 app 결과 미검증 |
 | Pixel | HTTP | POST | `/api/pixels` | `x/y=0..8191`, `color=0..255`, `userId>0` | 없음 | 없음 | `X-User-Id`, JSON content type | `x`, `y`, `color` JSON | `200` | validation/binding `400`; cooldown `429`; readiness/cooldown check `503`; 최초 fatal/내부 오류 `500` 계열; Security 응답 미검증 | 성공 `accepted`, `eventSeq`, `x`, `y`, `color`, `tileVersion`; 오류 형식은 경로별 상이 | 커스텀 response header 없음 | `application/json` | 없음 | 임시 `X-User-Id`; 실제 인증 아님 | 명시적 chain 없음; Pixel filter/binding 우선순위 미검증 | MVC guard + command/core 재검사 | 구현 | 카카오 OAuth2 + Bearer Access JWT principal, authenticated | X-User-Id 교체와 공통 오류 형식 필요 |
 | WebSocket | WebSocket(JSON) | GET (HTTP Upgrade handshake) | `/ws` | server→client 단건 pixel diff | 해당 없음 | 해당 없음 | 표준 Upgrade handshake header; application 인증 header 계약 없음 | client message 계약 없음 | 실제 handshake 결과 미검증 | 실제 handshake 실패 status 미검증 | 현재 `{type,x,y,color,eventSeq}` 단건 JSON | 실제 handshake response header 미검증 | 해당 없음 | 해당 없음 | 없음 | 명시적 chain 없음; 제한 진단에 config/handler 미포함 | MVC readiness interceptor 미적용; 기존 session 강제 종료 없음 | 단건 broadcast 구현 | 최종 인증/handshake 확정; batch/order/send 직렬화 | 실제 handshake와 최종 인증 미확정; 후속 보강 미구현 |
 
@@ -116,7 +117,7 @@
 - `tileCountX`, `tileCountY`: 각 축의 z=0 타일 수인 `32`
 - `paletteSize`: 팔레트 색상 수
 - `palette`: 실제 palette index 순서의 색상 배열. 예시는 축약이며 실제 응답은 256개이고, `palette[15] == "#FFFFFF"`이며 빈 보드의 기본 색상 index는 `15`
-- `overviewRefreshSeconds`: overview 갱신 주기
+- `overviewRefreshSeconds`: `ApplicationReadyEvent`의 최초 요청과 별개인 nominal fixed-delay 갱신 간격. 최대 stale 시간 보장이 아님
 
 #### 확정 메모
 - 현재 값이 고정에 가깝더라도 **팔레트 전달 때문에 유지**한다.
@@ -202,19 +203,14 @@ X-Tile-Version: 12
 ### C. `GET /api/overview`
 
 #### 현재 구현
-- production source에 controller/service가 없어 현재 route, status, header, body가 구현되지 않았다.
-- 현재 security와 readiness 실행 결과도 존재하지 않는다.
-
-#### 최종 MVP 목표
 - route: `GET /api/overview`
-- application-level 사용자 식별 없음, 최종 Security 정책은 `permitAll`
-- 성공 status: `200 OK`
-- body: 전체 보기용 `2048 x 2048` PNG
-- 최신 보드 상태와 최대 10초 차이 허용
-- dirty 상태를 기준으로 주기적 재생성
-- 생성 실패 시 이전 정상 이미지 유지
+- application-level 사용자 식별 없음. 최종 Security `permitAll`은 13단계 책임이며 현재 제한 slice는 JSON `401`, HTML `/login` `302`를 관측함
+- readiness guard 통과 + 게시 이미지 존재: `200 OK`, 완전한 `2048 x 2048` PNG bytes
+- readiness guard 통과 + 게시 이미지 부재: `503 Service Unavailable`, `{ "message": "Overview image is not available." }`
+- not-ready: readiness interceptor `503`; 이전 정상 이미지가 있어도 controller에 도달하지 않음
+- `Cache-Control: no-cache`는 정상 PNG에만 명시적으로 적용
 
-#### 목표 응답 헤더 예시
+#### 정상 응답 헤더
 ```http
 Content-Type: image/png
 Cache-Control: no-cache
@@ -408,8 +404,15 @@ Content-Type: application/json
 ---
 
 ### `GET /api/overview`
-- 현재 controller/service가 없어 처리 흐름도 미구현이다.
-- 위에서 설명한 PNG 생성·이전 정상 이미지 유지 흐름은 최종 MVP 목표다.
+1. default profile의 `@Scheduled` 작업은 context refresh부터 등록될 수 있지만 `ApplicationReadyEvent` 이전 invocation은 lifecycle gate에서 정상 skip
+2. event 관측 시 gate를 한 번 열고 기본 `taskScheduler`에 최초 생성 작업을 1회 제출하며, 중복 event는 추가 제출 없이 반환
+3. event 이후 별도 `@Scheduled` 작업이 같은 기본 scheduler에서 약 10초 fixed-delay와 같은 initial delay로 후속 생성 요청
+4. Scheduler는 readiness를 직접 판단하지 않고, `OverviewService`가 readiness 확인과 Overview 전용 non-blocking single-flight guard 획득
+5. `OverviewRenderer`가 canonical 타일별 snapshot을 한 번씩 읽고 각 `4 × 4` 블록의 좌상단 palette index를 unsigned 변환
+6. production 256색 팔레트를 RGB로 변환해 `2048 × 2048` PNG를 메모리에서 완성
+7. 정상·비어 있지 않은 PNG byte 배열만 atomic reference에 게시
+8. 생성 실패 시 기존 정상 PNG 유지, guard 해제, 다음 fixed-delay invocation 허용
+9. controller는 readiness guard 뒤 현재 게시본을 읽어 `200 image/png` 또는 no-image `503` JSON 반환
 
 ---
 
@@ -544,18 +547,19 @@ Content-Type: application/json
 ### 현재 구현 API
 - `GET /api/board`
 - `GET /api/tiles/{z}/{tx}/{ty}` (`z=0`만 지원)
+- `GET /api/overview`
 - `POST /api/pixels`
 - `WebSocket /ws`
 
 ### 현재 미구현 목표 API
-- `GET /api/overview`
+- 없음
 
 ### 현재 응답 방향
 - 성공 HTTP API는 `200 + 데이터`다.
 - 에러 body는 controller/readiness/Spring 기본 처리별로 다르며 아직 공통 포맷이 아니다.
 
 ### 핵심 메타
-- overview의 **2048x2048 PNG**, read-only, 최대 10초 stale 정책은 후속 목표다.
+- overview는 **인메모리 보드 기반 2048x2048 PNG**이며 `ApplicationReadyEvent` 관측 뒤 최초 생성 요청과 event 이후 약 10초 fixed-delay를 사용한다. 10초는 최대 stale 시간 보장이 아니다.
 - 이벤트 순서값: **`eventSeq`로 통일**
 - `eventSeq`:
   - 서버가 `AtomicLong`으로 직접 발급하는 순서값
@@ -771,6 +775,7 @@ runtime fatal 전환 뒤 readiness guard가 보호하는 현재 HTTP 경로는 �
 ```text
 POST /api/pixels
 GET /api/board
+GET /api/overview
 GET /api/tiles/**
 ```
 
@@ -1059,7 +1064,7 @@ firstSnapshotTargetTileKeys =
 checkpoint 이후 실제 WAL record가 하나라도 있으면 memory z=0 전체 1,024개를 target으로 정한다. 전체 bytes와 `tileVersion`을 같은 coordinator boundary에서 deep copy하고 bootstrap mode와 함께 immutable plan에 고정한다. 최초 transaction commit으로 canonical 1,024 rows가 형성된 뒤부터 일반 합집합 target을 사용한다.
 
 ### DirtyTileTracker의 역할
-`DirtyTileTracker`는 live write 이후 dirty 상태 추적, flush 실패 후 재등록, overview regeneration 힌트, 운영 관측, 추가 snapshot 대상 병합에 사용한다.
+`DirtyTileTracker`는 live write 이후 dirty 상태 추적, flush 실패 후 재등록, 운영 관측, 추가 snapshot 대상 병합에 사용한다. 현재 Overview 생성 trigger에는 사용하지 않는다.
 
 다음 항목의 source of truth로 사용하지 않는다.
 
@@ -1407,9 +1412,18 @@ checkpoint/infra
 recovery/application
   StartupRecoveryDbView, StartupRecoveryDbViewCaptureService
   StartupRecoveryService, ServiceReadiness
+
+overview/application
+  OverviewRenderer, OverviewService
+
+overview/scheduling
+  OverviewScheduler
+
+overview/web
+  OverviewController
 ```
 
-`FlushWorker`는 scheduler 없이 직접 호출 가능한 public entrypoint이며 scheduler는 호출 adapter다. startup recovery와 runtime plan/persistence/reconciliation은 같은 `DbBootstrapClassifier`를 사용해 partial DB 의미가 경로마다 달라지지 않게 한다. 실제 package와 test가 이 목록의 source of truth이며, 12단계 overview와 이후 보안·성능 기능은 이 구조에 포함하지 않는다.
+`FlushWorker`는 scheduler 없이 직접 호출 가능한 public entrypoint이며 scheduler는 호출 adapter다. startup recovery와 runtime plan/persistence/reconciliation은 같은 `DbBootstrapClassifier`를 사용해 partial DB 의미가 경로마다 달라지지 않게 한다. Overview는 이 경로와 분리된 read-only in-memory renderer/service/scheduler/controller 구조다. 실제 package와 test가 이 목록의 source of truth이며 이후 보안·성능 기능은 이 구조에 포함하지 않는다.
 
 ## 12) stub profile 범위와 recovery adapter 선택
 
@@ -1450,3 +1464,37 @@ stub profile 활성
 ```
 
 `stub` profile의 정상 기능 테스트 범위는 startup recovery와 제한 context bean 선택 테스트다. 이 profile에서 실제 pixel write, `FileWalAppender` 기록, runtime flush/scheduler, DB persistence 정합성 검증을 수행하지 않는다. `FlushWorker` 자체 테스트는 profile 대신 constructor fake/mock을 직접 주입한다.
+
+## 13) 현재 Overview PNG runtime 계약
+
+### source와 표본 규칙
+
+- source of truth는 `InMemoryTileBoard`의 canonical z=0 타일 1,024개다. DB, WAL, checkpoint, eventSeq, tileVersion, dirty/pending 상태를 읽거나 변경하지 않는다.
+- renderer는 각 canonical 타일을 한 번 조회하고 해당 `TileState.pixels()` snapshot을 한 번 얻는다. 타일 사이의 write를 막는 전체 보드 lock이나 전체 보드 선복사를 사용하지 않는다.
+- 출력 좌표 `(ox, oy)`는 입력 `(ox * 4, oy * 4)`의 palette index를 사용한다. 각 `4 × 4` 블록의 평균이나 다수결이 아니라 좌상단 한 픽셀 표본이다.
+- Java signed byte는 `Byte.toUnsignedInt`로 `0..255` index로 변환하고 production `PaletteConstants`의 정확한 256개 `#RRGGBB` 순서를 사용한다.
+- 누락 타일, snapshot 길이 불일치, palette 길이/형식 오류, PNG writer의 false/checked exception/null·empty 결과는 실패다.
+
+### 게시와 실패 격리
+
+- `OverviewService`는 별도 `AtomicBoolean`으로 generation 전체를 non-blocking single-flight 처리한다. 이미 생성 중인 호출은 기다리지 않고 즉시 반환한다.
+- renderer가 완전한 비어 있지 않은 PNG를 반환한 뒤에만 하나의 `AtomicReference<byte[]>`를 교체한다. 조회자는 부분 생성 byte를 볼 수 없다.
+- `RuntimeException`은 throwable을 포함해 기록하고 기존 정상 PNG와 readiness를 그대로 유지한다. guard는 성공·실패 모두 해제돼 다음 invocation이 재시도할 수 있다.
+- raw `Error`는 삼키지 않으며 guard 해제 후 원래 오류가 전파된다.
+- 최초 생성 실패 시 게시본은 없는 상태를 유지하고, 재생성 실패 시 마지막 정상 게시본을 유지한다.
+
+### lifecycle, scheduler와 profile
+
+- `OverviewScheduler`는 `!stub`에서만 존재한다. `stub`에는 renderer/service/controller는 존재하지만 Overview 자동 trigger와 scheduling infrastructure는 존재하지 않는다.
+- 정기 작업은 context refresh 단계부터 등록될 수 있으므로 Overview 전용 lifecycle gate가 `ApplicationReadyEvent` 이전 invocation을 정상 skip한다. 이 gate는 Service readiness 상태가 아니며 Scheduler는 readiness를 직접 조회하지 않는다.
+- `ApplicationReadyEvent` listener는 gate를 한 번 연 뒤 최초 생성 작업을 동기 실행하지 않고 named Boot 기본 `taskScheduler`에 정확히 1회 제출한다. 중복 event는 최초 작업을 중복 제출하지 않는다.
+- event 이후 정기 작업만 `@Scheduled(fixedDelay=10000, initialDelay=10000)`의 기본 scheduler routing으로 `OverviewService.refresh()`에 위임한다. 이는 flush 전용 `flushTaskScheduler(defaultCandidate=false)`와 분리되며 Overview용 추가 scheduler pool을 만들지 않는다.
+- 최초 작업 제출 실패 또는 null future 반환 시 gate를 되돌리지 않고 기록한 뒤 다음 fixed-delay invocation이 재시도한다. application `RuntimeException`은 service가 격리하며 raw `Error`는 scheduler adapter에서 가로채지 않는다.
+- refresh 시작 시 readiness가 false이면 renderer를 호출하지 않는다. 이후 not-ready가 되면 기존 게시본은 보존하지만 MVC readiness guard가 API 노출을 차단한다.
+
+### HTTP와 metadata
+
+- `GET /api/overview` 정상 응답은 `200`, `Content-Type: image/png`, `Cache-Control: no-cache`, 완전한 `2048 × 2048` PNG다.
+- readiness를 통과했지만 게시본이 없으면 `503`과 `{ "message": "Overview image is not available." }`를 반환한다.
+- `BoardInfoResponse.overviewRefreshSeconds`는 runtime fixed-delay와 같은 `BoardConstants.OVERVIEW_REFRESH_SECONDS == 10`을 사용한다.
+- OAuth2/JWT, 명시적 `SecurityFilterChain`, final `permitAll`, dirty 기반 부분 렌더링, Overview DB 저장은 12단계 범위가 아니다.

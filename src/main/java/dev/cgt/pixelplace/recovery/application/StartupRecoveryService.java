@@ -118,12 +118,15 @@ public class StartupRecoveryService {
         List<TileKey> snapshotKeys = new ArrayList<>(tileLoadResult.snapshots().size());
         for (TileStateSnapshot snapshot : tileLoadResult.snapshots()) {
             if (!canonicalZ0TileKeys.contains(snapshot.key())) {
+                // 범위 밖 snapshot을 memory board에 넣으면 canonical ready 상태 구성 불가
                 throw dbViewViolation(checkpoint, bootstrapState, tileLoadResult, "snapshot-key-out-of-range");
             }
             if (snapshot.pixelCount() != BoardConstants.TILE_PIXEL_COUNT) {
+                // 잘못된 BLOB shape를 load 전에 차단하여 기존 memory 상태의 부분 변경 방지
                 throw dbViewViolation(checkpoint, bootstrapState, tileLoadResult, "snapshot-pixel-length");
             }
             if (snapshot.tileVersion() < 0) {
+                // 음수 version은 unsigned DB 계약과 이후 증가 기준을 동시에 위반
                 throw dbViewViolation(checkpoint, bootstrapState, tileLoadResult, "snapshot-version-negative");
             }
             snapshotKeys.add(snapshot.key());
@@ -140,6 +143,7 @@ public class StartupRecoveryService {
         List<WalRecord> records = replayBatch.records();
 
         if (checkpoint < 0) {
+            // DB unsigned checkpoint 위반을 WAL replay 기준으로 사용할 수 없음
             throw walViolation(checkpoint, walLastEventSeq, records.size(), "checkpoint-negative");
         }
         if (walLastEventSeq < checkpoint) {
@@ -148,6 +152,7 @@ public class StartupRecoveryService {
         }
         if (records.isEmpty()) {
             if (walLastEventSeq != checkpoint) {
+                // tail이 더 앞서는데 replay record가 없으면 memory가 승인 WAL 상태를 따라갈 수 없음
                 throw walViolation(checkpoint, walLastEventSeq, 0, "empty-records-tail-mismatch");
             }
             return;
@@ -157,15 +162,18 @@ public class StartupRecoveryService {
         for (WalRecord record : records) {
             long eventSeq = record.eventSeq();
             if (eventSeq <= checkpoint) {
+                // loader의 readAfter 계약 위반을 중복 replay로 정상화하지 않음
                 throw walViolation(checkpoint, walLastEventSeq, records.size(), "record-at-or-before-checkpoint");
             }
             if (eventSeq <= previousEventSeq) {
+                // 중복·역순 WAL은 memory replay와 다음 발급 seed 순서를 확정할 수 없음
                 throw walViolation(checkpoint, walLastEventSeq, records.size(), "records-not-strictly-increasing");
             }
             previousEventSeq = eventSeq;
         }
 
         if (previousEventSeq != walLastEventSeq) {
+            // 마지막 replay record와 tail 불일치는 seed 또는 memory 반영 누락 가능성
             throw walViolation(checkpoint, walLastEventSeq, records.size(), "last-record-tail-mismatch");
         }
     }

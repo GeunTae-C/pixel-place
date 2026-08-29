@@ -42,8 +42,7 @@ public class JpaTileSnapshotLoader implements TileSnapshotLoader {
         return new TileLoadResult(databaseTileKeys, snapshots);
     }
 
-    // JPA 엔티티를 application 계층 전달 타입으로 변환해,
-    // recovery 서비스가 DB/JPA 세부사항을 직접 모르도록 경계를 유지함
+    /* JPA entity를 방어 복사되는 application snapshot으로 바꾸는 persistence mapping 경계 */
     private TileStateSnapshot toSnapshot(TileEntity tileEntity) {
         return new TileStateSnapshot(
                 new TileKey(tileEntity.getZ(), tileEntity.getTx(), tileEntity.getTy()),

@@ -18,6 +18,7 @@ public class JpaCheckpointFence implements CheckpointFence {
         this.walCheckpointJpaRepository = walCheckpointJpaRepository;
     }
 
+    /* flush transaction과 reconciliation probe가 공유하는 main row write-lock 진입 */
     @Override
     public long lockMainCheckpoint() {
         WalCheckpointEntity checkpoint = walCheckpointJpaRepository.lockMainCheckpoint()
@@ -25,9 +26,11 @@ public class JpaCheckpointFence implements CheckpointFence {
         return checkpoint.getLastFlushedEventSeq();
     }
 
+    /* 선행 event/tile flush 뒤 expected가 그대로인 경우만 checkpoint target 공개 */
     @Override
     public void advanceMainCheckpoint(long expectedLastFlushedEventSeq, long flushTargetEventSeq) {
         if (expectedLastFlushedEventSeq < 0) {
+            // unsigned DB checkpoint 계약 밖 expected로 conditional update를 시도할 수 없음
             throw new IllegalArgumentException("expected checkpoint must not be negative");
         }
         if (flushTargetEventSeq <= expectedLastFlushedEventSeq) {

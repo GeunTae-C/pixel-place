@@ -5,7 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import java.time.Duration;
 import java.util.Objects;
 
-/* 자동 flush의 유일한 fixed-delay 설정과 생성 시점 불변식 보유 */
+/* 이전 invocation 종료 뒤 간격을 정하는 유일한 자동 flush trigger 설정과 생성 시점 불변식 보유 */
 @ConfigurationProperties(prefix = "pixel-place.flush")
 public record FlushScheduleProperties(Duration fixedDelay) {
 

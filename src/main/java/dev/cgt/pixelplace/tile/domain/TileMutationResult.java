@@ -1,9 +1,8 @@
 package dev.cgt.pixelplace.tile.domain;
 
 /*
- * 메모리 타일 변경 결과를 write/replay 이후 단계에 전달하는 값 객체
- * 어떤 타일이 바뀌었는지와 변경 후 tileVersion을 함께 반환해,
- * 이후 응답 생성, dirty tile tracking, cache invalidation, broadcast, flush worker가 같은 기준을 사용할 수 있게 함
+ * memory authoritative state 변경 직후의 TileKey와 tileVersion 전달 값
+ * PixelWriteService가 command 결과와 dirty mark에 같은 변경 기준을 넘기기 위한 경계
  */
 public record TileMutationResult(
         TileKey key,

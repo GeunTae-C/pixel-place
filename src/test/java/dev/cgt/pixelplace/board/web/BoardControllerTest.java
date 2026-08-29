@@ -33,7 +33,8 @@ class BoardControllerTest {
                 .andExpect(jsonPath("$.paletteSize").value(BoardConstants.PALETTE_SIZE))
                 .andExpect(jsonPath("$.palette.length()").value(BoardConstants.PALETTE_SIZE))
                 .andExpect(jsonPath("$.palette[15]").value("#FFFFFF"))
-                .andExpect(jsonPath("$.overviewRefreshSeconds").value(10));
+                .andExpect(jsonPath("$.overviewRefreshSeconds")
+                        .value(BoardConstants.OVERVIEW_REFRESH_SECONDS));
     }
 
     @Test

@@ -60,6 +60,7 @@ final class FlushSchedulingErrorHandler implements ErrorHandler {
         }
     }
 
+    /* production logger와 failure-injection test가 공유하는 최소 관측 경계 */
     @FunctionalInterface
     interface ErrorLogSink {
 

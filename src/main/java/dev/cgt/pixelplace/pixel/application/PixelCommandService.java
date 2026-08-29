@@ -10,7 +10,7 @@ import org.springframework.stereotype.Service;
 /*
  * pixel write command orchestration과 HTTP accepted 전 후처리 경계 담당
  * 현재 HTTP accepted는 core write와 dirty mark 성공까지이며 DB flush 완료를 요구하지 않음
- * cooldown start 실패와 broadcast 실패는 이미 완료된 write를 취소하지 않으며, WAL-first 순서는 PixelWriteService에서 보존된다
+ * cooldown start와 broadcast 실패는 완료 write를 취소하지 않으며 WAL-first 순서는 PixelWriteService 책임
  */
 @Service
 public class PixelCommandService {

@@ -47,6 +47,7 @@ public class JpaFlushDbStateProbe implements FlushDbStateProbe {
         this.transactionTemplate.setReadOnly(false);
     }
 
+    /* 이전 transaction 종료를 main row lock으로 기다린 뒤 checkpoint와 전체 tile mode를 함께 관측 */
     @Override
     public FlushDbState probe() {
         return Objects.requireNonNull(

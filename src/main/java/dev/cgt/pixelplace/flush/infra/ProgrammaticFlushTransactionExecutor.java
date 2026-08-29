@@ -34,6 +34,10 @@ public class ProgrammaticFlushTransactionExecutor implements FlushTransactionExe
         this.flushPersistenceService = flushPersistenceService;
     }
 
+    /*
+     * immutable plan 하나를 새 physical transaction으로 실행하고 확인 가능한 outcome만 분류
+     * commit 예외와 rollback 완료 미확인은 dirty 복원 가능한 definite rollback으로 추정 금지
+     */
     @Override
     public FlushTransactionResult execute(FlushPlan plan) {
         FlushPlan currentPlan = Objects.requireNonNull(plan, "plan must not be null");

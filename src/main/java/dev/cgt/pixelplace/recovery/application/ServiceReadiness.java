@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class ServiceReadiness {
 
+    // temporary recovery 차단과 irreversible runtime fatal을 구분하는 process-local 안전 상태
     private State state = State.NOT_READY;
 
     /* 현재 보호 대상 요청과 core write를 처리할 수 있는지 확인 */
@@ -55,9 +56,15 @@ public class ServiceReadiness {
         state = State.FATAL_NOT_READY;
     }
 
+    /* protected request와 pending reconciliation 허용 범위를 구분하는 내부 상태 */
     private enum State {
+        /* startup recovery 중이거나 재진입 가능한 임시 차단 */
         NOT_READY,
+
+        /* WAL durable tail과 memory authoritative state 일치 확인 완료 */
         READY,
+
+        /* pending exact identity 확인 불가 뒤 process restart 전 해제 금지 */
         FATAL_NOT_READY
     }
 }

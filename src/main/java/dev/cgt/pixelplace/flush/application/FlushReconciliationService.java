@@ -19,6 +19,10 @@ public class FlushReconciliationService {
         this.flushDbStateProbe = flushDbStateProbe;
     }
 
+    /*
+     * pending expected/target과 별도 transaction 관측값의 exact equality로 이전 outcome 판정
+     * 범위 판정·DB 수정·같은 invocation의 새 plan 실행 없이 commit 또는 rollback만 반환
+     */
     public FlushReconciliationDecision reconcile(PendingAmbiguousFlush pending) {
         PendingAmbiguousFlush current = Objects.requireNonNull(pending, "pending must not be null");
         FlushDbState observed = Objects.requireNonNull(

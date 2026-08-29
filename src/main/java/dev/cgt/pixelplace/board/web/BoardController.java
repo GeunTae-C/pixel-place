@@ -8,7 +8,7 @@ import org.springframework.web.bind.annotation.RestController;
 /*
  * board 초기 렌더링에 필요한 고정 메타데이터를 제공하는 read-only HTTP 진입점
  * 실시간 authoritative tile 상태, WAL, write path와 분리해 클라이언트 부팅 정보만 노출
- * 실제 tile raw bytes 조회는 이후 GET /api/tiles/0/{tx}/{ty}에서 별도로 구현
+ * 실제 tile raw bytes 조회는 GET /api/tiles/0/{tx}/{ty}의 별도 read 경계가 담당
  */
 @RestController
 @RequestMapping("/api/board")

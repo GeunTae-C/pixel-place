@@ -22,6 +22,7 @@ public class JpaPixelEventWriter implements PixelEventWriter {
         this.pixelEventJpaRepository = pixelEventJpaRepository;
     }
 
+    /* caller transaction 안에서 WAL 원본 정밀도를 entity mapping 경계로 넘기고 SQL 실패까지 즉시 노출 */
     @Override
     public void appendAll(List<WalRecord> walRecords) {
         requireRecords(walRecords);

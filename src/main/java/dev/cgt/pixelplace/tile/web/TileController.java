@@ -35,7 +35,7 @@ public class TileController {
 
     /*
      * 현재 MVP는 z=0 original tile만 지원
-     * z=1/z=2 downsample tile은 이후 단계로 미루고, 현재는 400으로 명확히 거절
+     * 미구현 z=1/z=2 downsample tile 요청은 현재 400으로 명확히 거절
      */
     @GetMapping("/{z}/{tx}/{ty}")
     public ResponseEntity<byte[]> getTile(@PathVariable int z, @PathVariable int tx, @PathVariable int ty) {
@@ -74,6 +74,7 @@ public class TileController {
         }
     }
 
+    /* tile request 범위 오류를 현재 controller의 최소 JSON body로 전달하는 응답 값 */
     public record ErrorResponse(String message) {
     }
 }
