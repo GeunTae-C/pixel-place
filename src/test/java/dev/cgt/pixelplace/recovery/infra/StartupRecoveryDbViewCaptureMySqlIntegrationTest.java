@@ -24,6 +24,7 @@ import dev.cgt.pixelplace.wal.infra.FileWalReplaySource;
 import dev.cgt.pixelplace.wal.infra.WalProperties;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
@@ -97,6 +98,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 @ActiveProfiles("mysql-integration")
+@Tag("mysql-integration")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Execution(ExecutionMode.SAME_THREAD)
 @ResourceLock(value = "pixel_place_test", mode = ResourceAccessMode.READ_WRITE)

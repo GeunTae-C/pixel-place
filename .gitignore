@@ -1,3 +1,4 @@
+# Gradle 및 빌드 산출물
 HELP.md
 .gradle
 build/
@@ -5,7 +6,7 @@ build/
 !**/src/main/**/build/
 !**/src/test/**/build/
 
-### STS ###
+# STS / Eclipse
 .apt_generated
 .classpath
 .factorypath
@@ -17,7 +18,7 @@ bin/
 !**/src/main/**/bin/
 !**/src/test/**/bin/
 
-### IntelliJ IDEA ###
+# IntelliJ IDEA
 .idea
 *.iws
 *.iml
@@ -26,34 +27,51 @@ out/
 !**/src/main/**/out/
 !**/src/test/**/out/
 
-### NetBeans ###
+# NetBeans
 /nbproject/private/
 /nbbuild/
 /dist/
 /nbdist/
 /.nb-gradle/
 
-### VS Code ###
+# VS Code
 .vscode/
 
-# Runtime data
+# 런타임 데이터
 /data/
 *.wal
 
+# 기존 확장자 제외 정책 유지
+# 필요한 설정·DDL·이미지를 공개할 때에는 해당 파일을 검토한 뒤 예외 추가
 *.sql
 *.yml
 *.zip
 *.png
 
+# 로컬 백업 및 Graphify 생성 산출물
 셀프백업/
-/codex-instruction.md
-명령문/
-/docs/review-protocol.md
-/AGENTS.md
-
-# Graphify 생성 산출물
 /graphify-out/
 
-# 로컬 Codex 설정 및 작업용 프롬프트
+# 개인 Codex 설정·훅·작업 프롬프트
 /.codex/
+/AGENTS.md
+/codex-instruction.md
 /prompt.txt
+명령문/
+/docs/review-protocol.md
+
+# 개인 하네스 안내·진행 기록·스모크 문서
+/HARNESS-*.md
+/harness-step-*.md
+/docs/harness-*.md
+
+# scripts는 기본 제외하고 공개할 검증 도구 및 의존 파일만 허용
+# 아래 예외는 Git 추적을 허용할 뿐 자동으로 staging/push하지 않음
+/scripts/*
+
+
+# 로컬 환경 변수 파일 제외
+# .env.example에는 실제 비밀값을 넣지 않음
+.env
+.env.*
+!.env.example

@@ -6,6 +6,8 @@ import dev.cgt.pixelplace.recovery.web.ReadinessGuardInterceptor;
 import dev.cgt.pixelplace.recovery.web.ReadinessWebConfig;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.security.oauth2.client.autoconfigure.OAuth2ClientAutoConfiguration;
+import org.springframework.boot.security.oauth2.client.autoconfigure.servlet.OAuth2ClientWebSecurityAutoConfiguration;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
@@ -26,10 +28,17 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /*
- * 13단계 allowlist 선행 구현 없이 현재 Boot Security filter와 readiness interceptor 우선순위 진단
- * application-level Overview 200 계약과 unauthenticated full filter 결과를 같은 의미로 오인하지 않음
+ * OAuth2 Client 자동 설정을 제외한 Boot 기본 Security filter와 readiness interceptor 우선순위 진단
+ * 로컬 카카오 등록 설정과 분리된 MVC slice이며 실제 application의 OAuth2 설정·기동 검증은 아님
+ * Basic 401, login 302, readiness 503, Overview 200 계약 유지; 13단계 allowlist 선행 구현 없음
  */
-@WebMvcTest(OverviewController.class)
+@WebMvcTest(
+        controllers = OverviewController.class,
+        excludeAutoConfiguration = {
+                OAuth2ClientAutoConfiguration.class,
+                OAuth2ClientWebSecurityAutoConfiguration.class
+        }
+)
 @Import({ReadinessGuardInterceptor.class, ReadinessWebConfig.class})
 class OverviewSecurityContextTest {
 
