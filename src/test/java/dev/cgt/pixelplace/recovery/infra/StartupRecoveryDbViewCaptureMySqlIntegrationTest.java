@@ -500,7 +500,11 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
     }
 
     private List<String> loadAndValidateRootSqlStatements() throws IOException {
-        String rootSql = Files.readString(Path.of("pixel_place.sql"), StandardCharsets.UTF_8);
+        return parseRootSqlStatements(Files.readString(Path.of("pixel_place.sql"), StandardCharsets.UTF_8));
+    }
+
+    // DB 없이도 production catalog 제외와 seed 비퇴행 계약 검증 가능
+    private List<String> parseRootSqlStatements(String rootSql) {
         String withoutComments = rootSql.lines()
                 .map(line -> line.replaceFirst("--.*$", ""))
                 .reduce("", (left, right) -> left + "\n" + right);
@@ -542,13 +546,19 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
             rejectSchemaQualifiedIdentifier(normalized);
             String unquoted = normalized.replace("`", "");
             if (unquoted.startsWith("CREATE TABLE IF NOT EXISTS TILES ")) {
-                createTableNames.add("tiles");
+                if (!createTableNames.add("tiles")) throw new IllegalStateException("Duplicate root table definition.");
             } else if (unquoted.startsWith("CREATE TABLE IF NOT EXISTS PIXEL_EVENTS ")) {
-                createTableNames.add("pixel_events");
+                if (!createTableNames.add("pixel_events")) throw new IllegalStateException("Duplicate root table definition.");
             } else if (unquoted.startsWith("CREATE TABLE IF NOT EXISTS WAL_CHECKPOINT ")) {
-                createTableNames.add("wal_checkpoint");
+                if (!createTableNames.add("wal_checkpoint")) throw new IllegalStateException("Duplicate root table definition.");
+            } else if (unquoted.startsWith("CREATE TABLE IF NOT EXISTS USERS ")) {
+                if (!createTableNames.add("users")) throw new IllegalStateException("Duplicate root table definition.");
             } else if (unquoted.startsWith("INSERT INTO WAL_CHECKPOINT ")) {
                 checkpointSeedCount++;
+                if (!unquoted.equals("INSERT INTO WAL_CHECKPOINT ( CHECKPOINT_NAME, LAST_FLUSHED_EVENT_SEQ ) VALUES ( 'MAIN', 0 ) ON DUPLICATE KEY UPDATE CHECKPOINT_NAME = CHECKPOINT_NAME")) {
+                    // 기존 checkpoint를 되돌리는 seed는 실행 전에 차단
+                    throw new IllegalStateException("Unexpected checkpoint seed contract.");
+                }
             } else {
                 throw new IllegalStateException("Unexpected executable statement in root SQL: " + normalized);
             }
@@ -558,8 +568,8 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
         if (!createDatabaseFound || !useDatabaseFound) {
             throw new IllegalStateException("Root SQL must retain the production CREATE DATABASE and USE statements.");
         }
-        if (!createTableNames.equals(Set.of("tiles", "pixel_events", "wal_checkpoint"))) {
-            throw new IllegalStateException("Root SQL must define exactly the three expected tables.");
+        if (!createTableNames.equals(Set.of("tiles", "pixel_events", "wal_checkpoint", "users"))) {
+            throw new IllegalStateException("Root SQL must define exactly the four expected tables.");
         }
         if (checkpointSeedCount != 1) {
             throw new IllegalStateException("Root SQL must contain exactly one wal_checkpoint seed statement.");
@@ -586,6 +596,8 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
             statement.executeUpdate("DROP TABLE IF EXISTS tiles");
             requireTestCatalog(connection);
             statement.executeUpdate("DROP TABLE IF EXISTS wal_checkpoint");
+            requireTestCatalog(connection);
+            statement.executeUpdate("DROP TABLE IF EXISTS users");
         }
     }
 
@@ -602,12 +614,12 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
     }
 
     private void assertRootSchemaContract() {
-        assertEquals(3, jdbcTemplate.queryForObject(
+        assertEquals(4, jdbcTemplate.queryForObject(
                 """
                         SELECT COUNT(*)
                         FROM information_schema.tables
                         WHERE table_schema = ?
-                          AND table_name IN ('tiles', 'pixel_events', 'wal_checkpoint')
+                          AND table_name IN ('tiles', 'pixel_events', 'wal_checkpoint', 'users')
                         """,
                 Integer.class,
                 CATALOG

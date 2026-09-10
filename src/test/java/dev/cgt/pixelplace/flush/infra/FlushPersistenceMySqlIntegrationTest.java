@@ -1382,7 +1382,11 @@ class FlushPersistenceMySqlIntegrationTest {
     }
 
     private List<String> loadAndValidateRootSqlStatements() throws IOException {
-        String rootSql = Files.readString(Path.of("pixel_place.sql"), StandardCharsets.UTF_8);
+        return parseRootSqlStatements(Files.readString(Path.of("pixel_place.sql"), StandardCharsets.UTF_8));
+    }
+
+    // DB 없이도 production catalog 제외와 seed 비퇴행 계약 검증 가능
+    private List<String> parseRootSqlStatements(String rootSql) {
         String withoutComments = rootSql.lines()
                 .map(line -> line.replaceFirst("--.*$", ""))
                 .reduce("", (left, right) -> left + "\n" + right);
@@ -1424,13 +1428,19 @@ class FlushPersistenceMySqlIntegrationTest {
             rejectSchemaQualifiedIdentifier(normalized);
             String unquoted = normalized.replace("`", "");
             if (unquoted.startsWith("CREATE TABLE IF NOT EXISTS TILES ")) {
-                createTableNames.add("tiles");
+                if (!createTableNames.add("tiles")) throw new IllegalStateException("Duplicate root table definition.");
             } else if (unquoted.startsWith("CREATE TABLE IF NOT EXISTS PIXEL_EVENTS ")) {
-                createTableNames.add("pixel_events");
+                if (!createTableNames.add("pixel_events")) throw new IllegalStateException("Duplicate root table definition.");
             } else if (unquoted.startsWith("CREATE TABLE IF NOT EXISTS WAL_CHECKPOINT ")) {
-                createTableNames.add("wal_checkpoint");
+                if (!createTableNames.add("wal_checkpoint")) throw new IllegalStateException("Duplicate root table definition.");
+            } else if (unquoted.startsWith("CREATE TABLE IF NOT EXISTS USERS ")) {
+                if (!createTableNames.add("users")) throw new IllegalStateException("Duplicate root table definition.");
             } else if (unquoted.startsWith("INSERT INTO WAL_CHECKPOINT ")) {
                 checkpointSeedCount++;
+                if (!unquoted.equals("INSERT INTO WAL_CHECKPOINT ( CHECKPOINT_NAME, LAST_FLUSHED_EVENT_SEQ ) VALUES ( 'MAIN', 0 ) ON DUPLICATE KEY UPDATE CHECKPOINT_NAME = CHECKPOINT_NAME")) {
+                    // 기존 checkpoint를 되돌리는 seed는 실행 전에 차단
+                    throw new IllegalStateException("Unexpected checkpoint seed contract.");
+                }
             } else {
                 throw new IllegalStateException("Unexpected executable statement in root SQL: " + normalized);
             }
@@ -1440,8 +1450,8 @@ class FlushPersistenceMySqlIntegrationTest {
         if (!createDatabaseFound || !useDatabaseFound) {
             throw new IllegalStateException("Root SQL must retain the production CREATE DATABASE and USE statements.");
         }
-        if (!createTableNames.equals(Set.of("tiles", "pixel_events", "wal_checkpoint"))) {
-            throw new IllegalStateException("Root SQL must define exactly the three expected tables.");
+        if (!createTableNames.equals(Set.of("tiles", "pixel_events", "wal_checkpoint", "users"))) {
+            throw new IllegalStateException("Root SQL must define exactly the four expected tables.");
         }
         if (checkpointSeedCount != 1) {
             throw new IllegalStateException("Root SQL must contain exactly one wal_checkpoint seed statement.");
@@ -1468,6 +1478,8 @@ class FlushPersistenceMySqlIntegrationTest {
             statement.executeUpdate("DROP TABLE IF EXISTS tiles");
             requireTestCatalog(connection);
             statement.executeUpdate("DROP TABLE IF EXISTS wal_checkpoint");
+            requireTestCatalog(connection);
+            statement.executeUpdate("DROP TABLE IF EXISTS users");
         }
     }
 
@@ -1502,12 +1514,12 @@ class FlushPersistenceMySqlIntegrationTest {
     }
 
     private void assertRootSchemaContract() {
-        assertEquals(3, jdbcTemplate.queryForObject(
+        assertEquals(4, jdbcTemplate.queryForObject(
                 """
                         SELECT COUNT(*)
                         FROM information_schema.tables
                         WHERE table_schema = ?
-                          AND table_name IN ('tiles', 'pixel_events', 'wal_checkpoint')
+                          AND table_name IN ('tiles', 'pixel_events', 'wal_checkpoint', 'users')
                         """,
                 Integer.class,
                 CATALOG
@@ -1518,7 +1530,7 @@ class FlushPersistenceMySqlIntegrationTest {
                         SELECT table_name, column_name, column_type, is_nullable, datetime_precision
                         FROM information_schema.columns
                         WHERE table_schema = ?
-                          AND table_name IN ('tiles', 'pixel_events', 'wal_checkpoint')
+                          AND table_name IN ('tiles', 'pixel_events', 'wal_checkpoint', 'users')
                         """,
                 CATALOG
         );
@@ -1541,7 +1553,7 @@ class FlushPersistenceMySqlIntegrationTest {
                         SELECT table_name, index_name, non_unique, seq_in_index, column_name
                         FROM information_schema.statistics
                         WHERE table_schema = ?
-                          AND table_name IN ('tiles', 'pixel_events', 'wal_checkpoint')
+                          AND table_name IN ('tiles', 'pixel_events', 'wal_checkpoint', 'users')
                         """,
                 CATALOG
         );
@@ -1578,7 +1590,11 @@ class FlushPersistenceMySqlIntegrationTest {
                 Map.entry("pixel_events.created_at", "datetime(3)|NO|3"),
                 Map.entry("wal_checkpoint.checkpoint_name", "varchar(64)|NO|-"),
                 Map.entry("wal_checkpoint.last_flushed_event_seq", "bigint unsigned|NO|-"),
-                Map.entry("wal_checkpoint.updated_at", "datetime(3)|NO|3")
+                Map.entry("wal_checkpoint.updated_at", "datetime(3)|NO|3"),
+                Map.entry("users.id", "bigint unsigned|NO|-"),
+                Map.entry("users.kakao_user_id", "bigint unsigned|NO|-"),
+                Map.entry("users.created_at", "datetime(3)|NO|3"),
+                Map.entry("users.updated_at", "datetime(3)|NO|3")
         );
     }
 
@@ -1590,7 +1606,9 @@ class FlushPersistenceMySqlIntegrationTest {
                 "tiles|idx_tiles_updated_at|1|1|updated_at",
                 "pixel_events|PRIMARY|0|1|event_seq",
                 "pixel_events|idx_pixel_events_user_id|1|1|user_id",
-                "wal_checkpoint|PRIMARY|0|1|checkpoint_name"
+                "wal_checkpoint|PRIMARY|0|1|checkpoint_name",
+                "users|PRIMARY|0|1|id",
+                "users|uk_users_kakao_user_id|0|1|kakao_user_id"
         );
     }
 

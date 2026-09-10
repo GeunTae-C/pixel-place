@@ -363,7 +363,7 @@
 - `pixel_events.created_at`은 `DATETIME(3)`이며 WAL/plan 원본 정밀도는 유지하고 entity mapping 경계에서만 밀리초로 truncate
 - 이벤트 순서와 checkpoint는 `eventSeq`만 사용하고 시간값은 tie-breaker로도 사용하지 않음
 - 순서 조회는 `ORDER BY event_seq`
-- `users`와 카카오 계정 매핑은 후속 인증 목표
+- 13-A에서 `users`와 카카오 식별자→내부 ID provisioning 기반 추가. 로그인 연결은 후속 단계
 
 ### Runtime flush scheduler와 profile
 - default profile은 `pixel-place.flush.fixed-delay=1s`의 fixed-delay trigger 하나만 사용하고 initial delay도 같은 값
@@ -557,7 +557,7 @@
   - 이 값은 active WAL 파일의 마지막 `eventSeq`인 `walLastEventSeq`와 다르다.
 
 ### 현재 SQL 계약
-- 현재 `pixel_place.sql`에는 위 3개 테이블만 있으며 `users` 테이블과 FK는 없다.
+- 현재 root/test DDL에는 위 3개 테이블과 `users`가 있다. 기존 event/WAL의 임시 ID 보존을 위해 users FK는 추가하지 않는다. runtime DB 반영 여부는 별도 검증 대상이다.
 - `pixel_events.event_seq`는 `WalRecord.eventSeq`를 저장하는 non-auto-increment primary key다.
 - `pixel_events.user_id`는 현재 임시 `X-User-Id` 값이고 일반 컬럼이다.
 - `pixel_events.created_at`은 DB flush 시각이 아니라 WAL record의 원래 생성 시각이다.
@@ -565,4 +565,15 @@
 
 ### 후속 인증 목표
 - `users` 테이블에서 `kakaoUserId`와 내부 `users.id`를 매핑한다.
-- Access JWT `sub`와 `pixel_events.user_id`에는 내부 `users.id`를 사용하고 FK를 검토한다.
+- 후속 C에서 Access JWT `sub`와 새 `pixel_events.user_id`에 내부 `users.id`를 사용한다. 기존 WAL/event 데이터의 임시 ID는 보존하며 users FK를 추가하지 않는다.
+
+## 17) 인증·사용자 기능의 설계 방향 — 13단계
+
+카카오 로그인으로 사용자를 확인하고, 서비스 내부 사용자 ID와 서비스 Access JWT로 픽셀 쓰기 요청을 인증한다. 카카오 token은 사용자 확인에 사용하며 서비스 API의 인증 수단과 구분한다.
+
+- 사용자 저장은 카카오 식별자와 내부 ID 매핑에 필요한 최소 정보로 제한한다.
+- 서버 로그인 세션과 서비스 Refresh Token을 두지 않는 stateless 방식을 사용한다. 만료 후에는 카카오 로그인 흐름을 다시 거친다.
+- 로그인 진행 중 필요한 요청 정보는 암호화된 임시 쿠키로 보관하고, 브라우저에 Access JWT를 넘기는 단계는 API 인증과 구분한다.
+- 공개 보드 조회와 인증이 필요한 픽셀 쓰기를 구분한다. 인증을 추가해도 기존 WAL·메모리·flush/recovery의 내구성 경계는 유지한다.
+
+위 내용은 13단계의 기능 방향이다. 현재 연결된 범위와 처리 흐름은 `pixel-place-details.md`의 인증·사용자 절, 완료·검증 상태는 `../작업기록/phase-13-progress.md`에서 확인한다.

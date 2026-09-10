@@ -597,15 +597,16 @@ Content-Type: application/json
 - `tiles`
 - `pixel_events`
 - `wal_checkpoint`
+- `users`
 
-`users`는 후속 인증 구현에서 도입할 목표 테이블이다. 현재 임시 `X-User-Id` 단계의 `pixel_place.sql`에는 없으며, 10.6단계에서 선행 추가하거나 `pixel_events.user_id`와 FK로 연결하지 않는다.
+`users`는 13-A에서 root/test DDL에 추가한 최소 사용자 저장소다. 기존 세 테이블 및 checkpoint seed를 보존하고 `pixel_events.user_id`와 FK로 연결하지 않는다. runtime DB 반영은 후속 D에서 별도로 확인한다.
 
 ---
 
 ### `users`
 #### 역할
-- 후속 카카오 로그인 사용자 식별용 최소 저장소
-- 현재 `pixel_place.sql`의 구현 완료 테이블이 아님
+- 카카오 식별자와 내부 사용자 ID의 최소 저장소. 로그인 wiring은 후속 단계
+- 현재 `pixel_place.sql`에 정의. `UserEntity`/`UserJpaRepository`와 매핑하며 timestamp는 DB 기본값이 소유
 
 #### 컬럼
 - `id`
@@ -690,7 +691,7 @@ Content-Type: application/json
 
 ### 최종 DDL
 
-현재 설명은 `pixel_place.sql`의 실제 테이블 정의와 맞춘다. 후속 인증 목표인 `users` 테이블과 FK는 이 DDL에 포함하지 않는다.
+현재 설명은 `pixel_place.sql`의 실제 테이블 정의와 맞춘다. 13-A의 `users` 테이블을 포함하며 기존 event/WAL 식별자를 보존하기 위해 users FK는 추가하지 않는다.
 
     CREATE TABLE IF NOT EXISTS tiles (
       z TINYINT UNSIGNED NOT NULL,
@@ -728,6 +729,16 @@ Content-Type: application/json
     VALUES ('main', 0)
     ON DUPLICATE KEY UPDATE checkpoint_name = checkpoint_name;
 
+
+    CREATE TABLE IF NOT EXISTS users (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        kakao_user_id BIGINT UNSIGNED NOT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+            ON UPDATE CURRENT_TIMESTAMP(3),
+        PRIMARY KEY (id),
+        UNIQUE KEY uk_users_kakao_user_id (kakao_user_id)
+    ) ENGINE=InnoDB;
 
 ## 9) WAL 처리 흐름
 
@@ -1498,3 +1509,59 @@ stub profile 활성
 - readiness를 통과했지만 게시본이 없으면 `503`과 `{ "message": "Overview image is not available." }`를 반환한다.
 - `BoardInfoResponse.overviewRefreshSeconds`는 runtime fixed-delay와 같은 `BoardConstants.OVERVIEW_REFRESH_SECONDS == 10`을 사용한다.
 - OAuth2/JWT, 명시적 `SecurityFilterChain`, final `permitAll`, dirty 기반 부분 렌더링, Overview DB 저장은 12단계 범위가 아니다.
+
+## 14) 인증·사용자 처리 흐름 — 13단계
+
+현재는 인증 설정·사용자 저장 기반, JWT·요청 쿠키와 Spring 로그인·handoff 교환 구성요소가 구현돼 있다. 설정과 사용자 저장 역할은 production에 등록돼 있고, 로그인·교환은 테스트에서 명시적으로 조립한다. production 로그인·교환 endpoint와 JWT 인증 chain은 아직 활성화하지 않아 기존 Basic/form과 `X-User-Id` 쓰기 경로가 유지된다. 구간별 완료·검증 결과는 `../작업기록/phase-13-progress.md`에서 관리한다.
+
+### 시작 시 설정 준비
+
+1. `auth/config`에서 외부로 주입된 두 암호키, 토큰·쿠키 수명과 Origin/callback 설정을 검증한다. 잘못된 설정은 비밀 원문을 포함하지 않는 오류로 시작을 중단한다.
+2. 검증된 설정, Origin 정책과 공용 UTC `Clock`을 소비자에게 공급한다. 토큰과 쿠키는 같은 설정·시계를 사용하며 별도 기본키나 시계로 우회하지 않는다.
+3. 요청의 Host/Forwarded 값으로 callback을 추측하지 않고 설정된 URI를 사용한다. 로컬은 같은 localhost의 frontend 3000/API 8080 구성이며, Origin과 쿠키 속성은 이 배치를 전제로 검증한다.
+
+### 카카오 식별자에서 내부 사용자 ID 얻기
+
+1. `UserProvisioningService`는 양의 카카오 사용자 ID로 기존 사용자를 조회하고, 있으면 내부 ID를 반환한다.
+2. 없으면 신규 사용자를 저장한다. 동시에 같은 사용자를 생성해 UNIQUE 충돌이 발생하면 실패한 저장 transaction이 종료된 뒤 별도 조회로 이미 생성된 사용자를 찾는다.
+3. 재조회에서도 사용자를 찾지 못하면 원래 무결성 오류를 전파한다. 호출자가 연 transaction에 조회·실패한 저장·재조회를 한꺼번에 묶지 않는다.
+
+`users`의 저장 구조는 이 문서 §8과 `pixel_place.sql`을 따른다. 사용자 조회·저장은 JWT 발급의 책임과 분리하며 기존 WAL/event 데이터의 사용자 식별자를 이 흐름에서 바꾸지 않는다.
+
+### 서비스 토큰 발급과 검증
+
+1. `ServiceJwtTokens`는 내부 사용자 ID를 받아 Access 또는 handoff 용도의 토큰을 발급한다. 발급 시각·만료는 공용 설정과 Clock에서 계산한다.
+2. Access는 보호 API 인증, handoff는 로그인 결과 전달을 위한 교환에만 사용한다. 각 소비자는 자신의 전용 decoder를 사용하며 두 종류를 서로 대신 받아들이지 않는다.
+3. 수신 토큰은 서명과 용도·사용자 ID·시간을 검증하고 원본 claim 타입도 확인한다. 잘못된 값·만료·변환 오류는 토큰 원문을 포함하지 않는 인증 실패로 처리한다.
+
+정확한 claim·수명·허용 시간차와 경계 사례는 실행 명령문 및 `auth/jwt` 코드·테스트에 둔다. 여기서는 발급과 검증의 책임·순서를 설명한다.
+
+### 로그인 요청을 임시 쿠키로 보관하기
+
+1. 저장할 OAuth 요청의 callback·state·PKCE 정보를 검사한다. 요청 필드를 JSON으로 만들고 매번 새 nonce를 사용해 AES-GCM으로 암호화한다.
+2. 쿠키 값과 완성된 응답 헤더의 크기를 각각 검사한 뒤에만 게시한다. 검사에 실패하면 새 live cookie를 일부만 게시하지 않는다.
+3. 요청 쿠키를 읽을 때는 형식·크기 확인 후 GCM 인증을 먼저 수행한다. 인증된 내용만 JSON으로 복원하고 서버 만료·요청 필드·PKCE 일치를 확인한다.
+4. 쿠키가 없거나 중복·변조·만료된 경우 repository는 요청 없음으로 처리한다. 삭제는 생성 때와 같은 쿠키 속성에 만료를 지정하며, 이미 commit된 응답에 저장·삭제가 성공한 것처럼 처리하지 않는다.
+
+이 흐름의 역할은 `AuthorizationRequestCookieCodec`과 `CookieAuthorizationRequestRepository`가 나눈다. 쿠키에 저장된 state의 유효성과 실제 callback으로 받은 state의 일치 검사는 별개이며, 후자는 Spring 로그인 연결에서 처리한다. 브라우저의 새 로그인은 기존 요청 쿠키를 덮어쓸 수 있고, 쿠키 Path나 port를 별도 보안 경계로 사용하지 않는다.
+
+### Spring 로그인과 결과 전달
+
+1. `KakaoAuthorizationRequestResolver`는 명시적 시작 GET만 Spring 기본 resolver에 전달하고, 매 요청의 새 verifier와 S256 challenge를 생성한다. 간접 registration 요청으로 새 로그인을 시작하지 않는다.
+2. callback에서는 Spring 필터가 요청 쿠키를 복원하고 state를 비교한 뒤, 같은 verifier를 token HTTP 요청에 전달한다. `KakaoOAuth2UserService`는 registration을 먼저 확인하고 실제 userinfo 처리를 Spring에 위임한다. 원본 ID를 Spring 사용자 객체 생성 전에 검증한 뒤 기존 provisioning으로 내부 ID를 얻는다.
+3. 성공 handler는 내부 ID·handoff·완성 쿠키·고정 callback 준비를 끝낸 후에만 live handoff를 게시한다. callback에서는 Access를 발급하지 않는다. 준비 실패와 미commit 인증 실패는 두 쿠키와 SecurityContext를 정리하고 고정 실패 callback으로 이동한다. provisioning 실패는 Spring 자체 오류 로그에도 DB/provider 원문 cause가 전달되지 않도록 고정 인증 실패로 바꾼다.
+4. 시작 필터에도 failure handler와 no-save request cache를 공식 확장 지점으로 연결한다. OAuth redirect는 no-referrer를 사용하고 callback 입력을 frontend URL에 복사하지 않는다. commit 이후 전송 오류는 응답을 다시 변경하지 않고 전파한다.
+
+명시적 테스트 chain은 stateless session 정책·null SecurityContext 저장소·no-save request cache와 실제 no-op authorized-client 저장소를 사용한다. provider token을 session·서비스 저장소로 넘기지 않으며 principal에는 내부 ID와 카카오 ID를 구분해 남긴다. production chain과 method/path guard 연결은 C의 책임이다.
+
+### handoff를 Access로 교환하기
+
+1. HTTP 역할은 trusted Origin을 먼저 확인한다. Origin이 없거나 복수·금지 값이면 쿠키 해석과 token 처리 전에 거부한다.
+2. 교환 service는 handoff 전용 decoder를 사용하고 내부 ID로 새 Access를 발급한다. 인증 실패와 발급 이후 준비 실패를 분리하여 각각 401과 일반화된 500으로 응답한다.
+3. 발급된 실제 exp와 공용 Clock의 응답 계산 시각으로 남은 완전한 초를 구한다. 허용 범위를 벗어난 시간을 고정 TTL로 대체하지 않는다. JSON 준비 뒤 handoff 쿠키를 삭제하고 캐시 금지 응답을 게시한다.
+
+브라우저 후속 연결에서는 교환에 기존 Authorization을 붙이지 않고 필요한 경우 credentials를 포함한다. 받은 Access는 sessionStorage에 보관하여 보호 API의 Bearer로 사용하며 공개 read에는 자동 첨부하지 않는다. 클라이언트 logout은 보관 token 삭제다. 유효 handoff 복제본의 수명 내 재교환을 막는 서버 상태는 없으므로 일회용 코드라고 설명하지 않는다.
+
+### 후속 연결 경계
+
+다음 C에서는 테스트로 확인한 구성요소를 production registration·chain·교환 route에 연결하고 Pixel 사용자 ID 공급원을 함께 전환한다. 현재 테스트 조립의 성공은 production 인증 활성화, 실제 카카오 PKCE binding 또는 runtime DB 반영의 증거가 아니다. 실제 CORS·Resource Server 선행 거부와 HTTP/WS guard, 실제 callback route·카카오 검증은 후속 범위다.

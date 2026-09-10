@@ -51,6 +51,8 @@ out/
 # 로컬 백업 및 Graphify 생성 산출물
 셀프백업/
 /graphify-out/
+/local-secrets/
+작업기록/
 
 # 개인 Codex 설정·훅·작업 프롬프트
 /.codex/
