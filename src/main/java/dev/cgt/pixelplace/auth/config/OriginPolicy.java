@@ -44,7 +44,7 @@ public final class OriginPolicy {
                 .stream().anyMatch(prefix -> path.equals(prefix) || path.startsWith(prefix + "/"));
     }
 
-    /** 금지 요소가 있는 요청은 정규화 전에 거부. HTTP/WS 연결은 후속 C 책임 */
+    /** HTTP·교환·WS 공용 비교. 금지 요소가 있는 요청은 정규화 전에 거부 */
     public boolean allows(String origin) {
         try { return frontend.equals(HttpOrigin.parse(origin)); }
         catch (IllegalArgumentException ignored) { return false; }

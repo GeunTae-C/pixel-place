@@ -9,7 +9,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -17,7 +17,7 @@ import java.util.Map;
 
 /*
  * POST /api/pixels HTTP 진입점
- * 아직 JWT 인증 단계가 아니므로 X-User-Id를 임시 사용자 식별자로 받아 application write path에 넘김
+ * Access decoder가 검증한 내부 users.id만 application write path에 전달
  * WAL 기록, eventSeq 발급, 메모리 타일 반영 순서는 application service 불변식이므로 controller는 직접 처리하지 않음
  */
 @RestController
@@ -31,14 +31,15 @@ public class PixelController {
     }
 
     /*
-     * 픽셀 write 요청을 HTTP body와 임시 userId header에서 읽어 command service에 위임
+     * 인증된 subject를 한 번 변환한 뒤 기존 body 검증과 command service 호출 경계 유지
      * 잘못된 요청은 service로 넘기기 전 필수 필드 누락을 먼저 차단해 WAL append로 진행되지 않게 함
      */
     @PostMapping
     public ResponseEntity<PixelWriteResponse> writePixel(
-            @RequestHeader("X-User-Id") long userId,
+            Authentication authentication,
             @RequestBody PixelWriteRequest request
     ) {
+        long userId = Long.parseLong(authentication.getName());
         PixelWriteResult result = pixelCommandService.writePixel(
                 userId,
                 request.requiredX(),

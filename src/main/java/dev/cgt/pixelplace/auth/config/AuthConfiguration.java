@@ -9,7 +9,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import java.time.Clock;
 import java.time.Duration;
 
-/** 인증 기반만 production 등록. OAuth registration·decoder·chain은 C의 연결 책임 */
+/** 인증 설정·공용 Origin·Clock의 startup 검증. 로그인·decoder·chain 조립은 별도 설정 책임 */
 @Configuration(proxyBeanMethods = false)
 public class AuthConfiguration {
     private static final String PREFIX = "pixel-place.auth.";

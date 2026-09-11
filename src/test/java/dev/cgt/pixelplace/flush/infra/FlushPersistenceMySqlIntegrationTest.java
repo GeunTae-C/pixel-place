@@ -160,6 +160,9 @@ class FlushPersistenceMySqlIntegrationTest {
     private DataSource dataSource;
 
     @Autowired
+    private dev.cgt.pixelplace.user.infra.UserJpaRepository users;
+
+    @Autowired
     private JdbcTemplate jdbcTemplate;
 
     @Autowired
@@ -257,6 +260,48 @@ class FlushPersistenceMySqlIntegrationTest {
         assertEquals(BoardConstants.TILE_PIXEL_COUNT, tileData(KEY_A).length);
         assertEquals(4L, tileVersion(KEY_A));
         assertEquals(1L, checkpoint());
+    }
+
+    @Test
+    // 실제 users AUTO_INCREMENT ID가 principal·두 JWT·controller·file WAL·immutable plan·MySQL event까지 보존되는 연결
+    void provisionedInternalIdentitySurvivesLoginTokensControllerWalPlanAndActualMySql() throws Exception {
+        prepareBootstrap();
+        var provisioning=new dev.cgt.pixelplace.user.application.UserProvisioningService(users);
+        var delegate=new org.springframework.security.oauth2.client.userinfo.DefaultOAuth2UserService();
+        var rest=new org.springframework.web.client.RestTemplate();
+        var provider=org.springframework.test.web.client.MockRestServiceServer.bindTo(rest).build();
+        delegate.setRestOperations(rest);
+        var userInfo=new dev.cgt.pixelplace.auth.oauth2.KakaoOAuth2UserService(delegate,provisioning);
+        provider.expect(org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo("https://kapi.kakao.com/v2/user/me"))
+                .andRespond(org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess("{\"id\":987654321987}",org.springframework.http.MediaType.APPLICATION_JSON));
+        var request=new org.springframework.security.oauth2.client.userinfo.OAuth2UserRequest(
+                dev.cgt.pixelplace.auth.oauth2.LoginTestSupport.registration(),
+                new org.springframework.security.oauth2.core.OAuth2AccessToken(org.springframework.security.oauth2.core.OAuth2AccessToken.TokenType.BEARER,
+                        "test-only-provider",java.time.Instant.now(),java.time.Instant.now().plusSeconds(60)));
+        var principal=(dev.cgt.pixelplace.auth.oauth2.KakaoPrincipal)userInfo.loadUser(request);
+        long internalId=principal.internalUserId();
+        assertTrue(internalId>0 && internalId!=principal.kakaoUserId());
+        assertEquals(internalId,users.findByKakaoUserId(principal.kakaoUserId()).orElseThrow().getId());
+        var tokens=new dev.cgt.pixelplace.auth.jwt.ServiceJwtTokens(dev.cgt.pixelplace.auth.oauth2.LoginTestSupport.PROPERTIES,
+                dev.cgt.pixelplace.auth.oauth2.LoginTestSupport.CLOCK);
+        var handoff=tokens.issueHandoff(internalId);
+        assertEquals(Long.toString(internalId),tokens.handoffDecoder().decode(handoff.getTokenValue()).getSubject());
+        var exchange=new dev.cgt.pixelplace.auth.web.HandoffExchangeService(tokens,dev.cgt.pixelplace.auth.oauth2.LoginTestSupport.CLOCK);
+        var access=tokens.accessDecoder().decode(exchange.exchange(handoff.getTokenValue()).accessToken());
+        assertEquals(Long.toString(internalId),access.getSubject());
+        var runtime=createFreshRuntime(tempDirectory.resolve("c-identity.wal"));
+        try {
+            runtime.recover();
+            var controller=new dev.cgt.pixelplace.pixel.web.PixelController(runtime.pixelCommandService);
+            var result=controller.writePixel(new org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken(access),
+                    new dev.cgt.pixelplace.pixel.web.PixelWriteRequest(1,2,3));
+            assertEquals(200,result.getStatusCode().value());
+            var wal=runtime.fileWalReplaySource.readAfter(0).records();assertEquals(1,wal.size());assertEquals(internalId,wal.getFirst().userId());
+            var plan=runtime.flushPlanCaptureService.capturePlan();assertEquals(internalId,plan.walRecords().getFirst().userId());
+            assertEquals(FlushTransactionOutcome.COMMITTED,transactionExecutor.execute(plan).outcome());
+            assertEquals(internalId,jdbcTemplate.queryForObject("SELECT user_id FROM pixel_events WHERE event_seq = ?",Long.class,wal.getFirst().eventSeq()));
+            assertEquals(wal.getFirst().eventSeq(),checkpoint());provider.verify();
+        } finally { retireQuietly(runtime); }
     }
 
     @Test

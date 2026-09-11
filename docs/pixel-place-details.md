@@ -1512,13 +1512,14 @@ stub profile 활성
 
 ## 14) 인증·사용자 처리 흐름 — 13단계
 
-현재는 인증 설정·사용자 저장 기반, JWT·요청 쿠키와 Spring 로그인·handoff 교환 구성요소가 구현돼 있다. 설정과 사용자 저장 역할은 production에 등록돼 있고, 로그인·교환은 테스트에서 명시적으로 조립한다. production 로그인·교환 endpoint와 JWT 인증 chain은 아직 활성화하지 않아 기존 Basic/form과 `X-User-Id` 쓰기 경로가 유지된다. 구간별 완료·검증 결과는 `../작업기록/phase-13-progress.md`에서 관리한다.
+인증 설정·사용자 저장·JWT·암호화 요청 쿠키·Spring 로그인·handoff 교환이 실제 registration 및 명시적 Security chain에 연결돼 있다. Pixel은 검증된 JWT의 내부 사용자 ID를 사용하고 HTTP CORS와 WS handshake는 공용 Origin 정책을 적용한다. 이 절의 인증 동작이 앞선 절의 임시 `X-User-Id`·Basic/form 및 인증 연결 예정 설명을 대체하며 이전 단계 본문은 이력으로 보존한다. 구간별 상태·검증 증거는 `../작업기록/phase-13-progress.md`에서 관리한다.
 
 ### 시작 시 설정 준비
 
 1. `auth/config`에서 외부로 주입된 두 암호키, 토큰·쿠키 수명과 Origin/callback 설정을 검증한다. 잘못된 설정은 비밀 원문을 포함하지 않는 오류로 시작을 중단한다.
 2. 검증된 설정, Origin 정책과 공용 UTC `Clock`을 소비자에게 공급한다. 토큰과 쿠키는 같은 설정·시계를 사용하며 별도 기본키나 시계로 우회하지 않는다.
 3. 요청의 Host/Forwarded 값으로 callback을 추측하지 않고 설정된 URI를 사용한다. 로컬은 같은 localhost의 frontend 3000/API 8080 구성이며, Origin과 쿠키 속성은 이 배치를 전제로 검증한다.
+4. Boot의 Kakao registration/provider 설정에서 callback을 같은 검증값으로 연결한다. client secret POST 방식의 authorization code 교환과 header userinfo를 사용하며 별도 scope나 OpenID를 요구하지 않는다. 검증 설정과 실제 registration의 callback이 다르면 시작을 거부한다.
 
 ### 카카오 식별자에서 내부 사용자 ID 얻기
 
@@ -1552,7 +1553,7 @@ stub profile 활성
 3. 성공 handler는 내부 ID·handoff·완성 쿠키·고정 callback 준비를 끝낸 후에만 live handoff를 게시한다. callback에서는 Access를 발급하지 않는다. 준비 실패와 미commit 인증 실패는 두 쿠키와 SecurityContext를 정리하고 고정 실패 callback으로 이동한다. provisioning 실패는 Spring 자체 오류 로그에도 DB/provider 원문 cause가 전달되지 않도록 고정 인증 실패로 바꾼다.
 4. 시작 필터에도 failure handler와 no-save request cache를 공식 확장 지점으로 연결한다. OAuth redirect는 no-referrer를 사용하고 callback 입력을 frontend URL에 복사하지 않는다. commit 이후 전송 오류는 응답을 다시 변경하지 않고 전파한다.
 
-명시적 테스트 chain은 stateless session 정책·null SecurityContext 저장소·no-save request cache와 실제 no-op authorized-client 저장소를 사용한다. provider token을 session·서비스 저장소로 넘기지 않으며 principal에는 내부 ID와 카카오 ID를 구분해 남긴다. production chain과 method/path guard 연결은 C의 책임이다.
+production chain은 stateless session 정책·null SecurityContext 저장소·no-save request cache와 no-op authorized-client 저장소를 사용한다. provider token을 session·서비스 저장소로 넘기지 않으며 principal에는 내부 ID와 카카오 ID를 구분해 남긴다. 시작·callback의 정확한 GET만 OAuth filter로 넘기고 같은 경로의 다른 method는 405, 다른 registration·추가 segment는 404로 거부한다. 이 guard는 CORS 뒤, OAuth 처리 전에 실행해 거부 요청의 요청 쿠키·code 교환 진입을 막는다.
 
 ### handoff를 Access로 교환하기
 
@@ -1562,6 +1563,20 @@ stub profile 활성
 
 브라우저 후속 연결에서는 교환에 기존 Authorization을 붙이지 않고 필요한 경우 credentials를 포함한다. 받은 Access는 sessionStorage에 보관하여 보호 API의 Bearer로 사용하며 공개 read에는 자동 첨부하지 않는다. 클라이언트 logout은 보관 token 삭제다. 유효 handoff 복제본의 수명 내 재교환을 막는 서버 상태는 없으므로 일회용 코드라고 설명하지 않는다.
 
-### 후속 연결 경계
+### HTTP 인증과 Pixel 전달 순서
 
-다음 C에서는 테스트로 확인한 구성요소를 production registration·chain·교환 route에 연결하고 Pixel 사용자 ID 공급원을 함께 전환한다. 현재 테스트 조립의 성공은 production 인증 활성화, 실제 카카오 PKCE binding 또는 runtime DB 반영의 증거가 아니다. 실제 CORS·Resource Server 선행 거부와 HTTP/WS guard, 실제 callback route·카카오 검증은 후속 범위다.
+1. CORS processor가 Origin 원문의 개수·문법·frontend 일치를 먼저 확인한다. Spring의 same-origin 예외나 trailing slash 보정 전에 거부하므로 API 자신의 Origin도 설정된 frontend와 다르면 통과하지 않는다. 정상 preflight는 여기서 종료한다.
+2. OAuth 경로 guard와 OAuth filter 이후 Resource Server가 Access 전용 decoder로 header Bearer를 검증한다. 공개 read라도 명시한 잘못된 Bearer는 401이다. 교환 endpoint도 잘못된 Access Authorization이 있으면 handoff 처리보다 먼저 401이 된다.
+3. Board·Tile·Overview GET과 WS GET, OAuth GET 및 교환 POST를 공개하고 나머지는 인증을 요구한다. Basic/form/generated login은 사용하지 않는다. 보호 API의 인증·권한 오류는 Accept에 관계없이 일반화된 JSON 401/403과 Bearer 의미를 유지한다. HTML login 진입은 고정 시작 경로로 이동하며 ERROR dispatch는 원래 5xx를 보존하고 FORWARD는 일반 접근 정책을 다시 적용한다.
+4. 인증을 통과한 Pixel 요청은 기존 MVC readiness 검사 후 controller로 들어간다. controller는 Authentication의 검증된 subject를 양의 내부 ID로 변환하여 기존 command에 전달한다. 공격 `X-User-Id`나 body/query/cookie의 ID·token은 이 값을 공급하거나 덮어쓰지 못한다.
+5. command의 cooldown 확인 → core의 입력 검증·WAL append/fsync·메모리 적용 → dirty mark 및 기존 후처리는 그대로다. 내부 ID는 Redis cooldown key, WAL record, immutable flush plan과 DB event로 전달되고 DB flush 완료는 HTTP 성공 조건이 아니다.
+
+API는 header Bearer만 인증 수단으로 사용한다. CSRF 비활성화는 세션/cookie API 인증 부재와 교환의 strict Origin, OAuth의 state·PKCE를 전제로 한다. 허용 CORS 응답은 요청 Origin과 credentials를 반환하고 Tile 버전 헤더만 노출한다.
+
+### 공개 WebSocket과 단일 버전 전환
+
+`/ws`는 JWT query/header/subprotocol 인증 없이 기존 handler의 공개 broadcast handshake를 유지한다. 전역 Bearer 필터도 이 공개 GET의 token을 인증 입력으로 소비하지 않는다. 실제 등록의 첫 Origin interceptor가 HTTP와 같은 정책으로 원문을 검사하고, 기본 interceptor의 허용 목록도 그 정책에서 파생한 명시적 표현만 사용한다. Origin 부재는 Origin 검사만 통과시키며 upgrade의 나머지 유효성 검사는 유지한다. payload·eventSeq·broadcast 의미와 기존 연결의 lifecycle은 바뀌지 않는다.
+
+배포 시 구 `X-User-Id` 버전과 새 JWT 버전을 같은 Redis/WAL/DB identity 공간에서 동시에 서비스하지 않고 단일 버전으로 교체한다. 임시 ID와 내부 ID의 cooldown key 충돌은 기존 TTL 만료 대기 또는 승인된 해당 namespace 정리로 처리한다. Redis 전체 flush, WAL 삭제, 과거 event 재작성이나 users FK 추가는 하지 않는다.
+
+실제 provider HTTP를 대체한 production 연결 검증과 테스트 MySQL 검증은 runtime DB 반영·실제 카카오 PKCE binding·선택 callback 경로의 브라우저 검증을 대신하지 않는다. 이 실환경 확인과 배포 전제는 D에 남아 있으며 이번 연결 작업이 배포나 데이터 정리를 수행하지 않는다.

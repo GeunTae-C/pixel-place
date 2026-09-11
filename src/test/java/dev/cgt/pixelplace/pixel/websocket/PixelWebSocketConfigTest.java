@@ -1,5 +1,7 @@
 package dev.cgt.pixelplace.pixel.websocket;
 
+import dev.cgt.pixelplace.auth.config.OriginPolicy;
+import org.mockito.ArgumentMatchers;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistration;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
@@ -20,11 +22,14 @@ class PixelWebSocketConfigTest {
         WebSocketHandlerRegistry registry = mock(WebSocketHandlerRegistry.class);
         WebSocketHandlerRegistration registration = mock(WebSocketHandlerRegistration.class);
         when(registry.addHandler(handler, "/ws")).thenReturn(registration);
-        PixelWebSocketConfig config = new PixelWebSocketConfig(handler);
+        when(registration.addInterceptors(ArgumentMatchers.any())).thenReturn(registration);
+        var origins=new OriginPolicy("http://localhost:3000","http://localhost:8080","http://localhost:3000/","http://localhost:8080/login/oauth2/code/kakao",false);
+        PixelWebSocketConfig config = new PixelWebSocketConfig(handler,origins);
 
         config.registerWebSocketHandlers(registry);
 
         verify(registry).addHandler(handler, "/ws");
-        verify(registration).setAllowedOriginPatterns("*");
+        verify(registration).addInterceptors(ArgumentMatchers.any(FrontendOriginHandshakeInterceptor.class));
+        verify(registration).setAllowedOrigins("http://localhost:3000");
     }
 }

@@ -89,7 +89,7 @@ class ReadinessGuardInterceptorTest {
     // recovery 중 write path 진입 시 WAL과 replay 순서 충돌 방지를 위한 service 호출 금지
     void postPixelReturnsServiceUnavailableWithoutServiceCallWhenNotReady() throws Exception {
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"x":1,"y":2,"color":3}
@@ -138,7 +138,7 @@ class ReadinessGuardInterceptorTest {
                 ));
 
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"x":1,"y":2,"color":3}
@@ -157,7 +157,7 @@ class ReadinessGuardInterceptorTest {
                 .thenThrow(new ServiceNotReadyException());
 
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"x":1,"y":2,"color":3}
@@ -181,7 +181,7 @@ class ReadinessGuardInterceptorTest {
 
         ServletException exception = assertThrows(ServletException.class, () ->
                 mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"x":1,"y":2,"color":3}
@@ -196,4 +196,11 @@ class ReadinessGuardInterceptorTest {
     void serviceReadinessDefaultsToFalse() {
         assertFalse(new ServiceReadiness().isReady());
     }
+    // standalone MVC 입력용 검증된 principal fixture. 실제 서명·필터 거부는 production chain 테스트 책임
+    private static org.springframework.security.core.Authentication principal() {
+        var jwt=org.springframework.security.oauth2.jwt.Jwt.withTokenValue("test-only-principal")
+                .header("alg","HS256").subject("7").build();
+        return new org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken(jwt);
+    }
+
 }

@@ -571,9 +571,14 @@
 
 카카오 로그인으로 사용자를 확인하고, 서비스 내부 사용자 ID와 서비스 Access JWT로 픽셀 쓰기 요청을 인증한다. 카카오 token은 사용자 확인에 사용하며 서비스 API의 인증 수단과 구분한다.
 
+13단계 인증 연결 이후에는 이 절의 동작이 앞선 절의 임시 `X-User-Id`·Basic/form 및 후속 인증 예정 설명을 대체한다. 이전 단계의 구현 설명은 이력으로 보존한다.
+
 - 사용자 저장은 카카오 식별자와 내부 ID 매핑에 필요한 최소 정보로 제한한다.
 - 서버 로그인 세션과 서비스 Refresh Token을 두지 않는 stateless 방식을 사용한다. 만료 후에는 카카오 로그인 흐름을 다시 거친다.
 - 로그인 진행 중 필요한 요청 정보는 암호화된 임시 쿠키로 보관하고, 브라우저에 Access JWT를 넘기는 단계는 API 인증과 구분한다.
 - 공개 보드 조회와 인증이 필요한 픽셀 쓰기를 구분한다. 인증을 추가해도 기존 WAL·메모리·flush/recovery의 내구성 경계는 유지한다.
+- 로그인은 카카오 시작 경로로 이동하고, 성공 후 임시 handoff 쿠키를 trusted Origin의 교환 요청으로 Access로 바꾼다. 브라우저는 Access를 sessionStorage에 보관하며 픽셀 쓰기에 Bearer로 보낸다. 서버 logout이나 Refresh Token 없이 보관 token 삭제와 재로그인을 사용한다.
+- Board·Tile·Overview 조회와 WebSocket broadcast는 공개다. HTTP 공개 조회에 잘못된 Bearer를 명시하면 인증 실패로 응답하며, 보호 API의 인증 오류는 HTML을 요청해도 JSON으로 반환한다. HTTP CORS와 WS Origin은 설정된 frontend를 같은 기준으로 허용한다.
+- 새 픽셀 쓰기는 검증된 JWT의 내부 `users.id`를 사용한다. 기존 임시 사용자 ID의 WAL·event는 보존하고 사용자 FK를 추가하지 않는다. 구·신 인증 버전은 같은 identity 공간에서 동시에 서비스하지 않는다.
 
 위 내용은 13단계의 기능 방향이다. 현재 연결된 범위와 처리 흐름은 `pixel-place-details.md`의 인증·사용자 절, 완료·검증 상태는 `../작업기록/phase-13-progress.md`에서 확인한다.

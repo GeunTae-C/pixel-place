@@ -14,8 +14,13 @@ public final class HandoffExchangeService {
     private final Clock clock;
 
     public HandoffExchangeService(ServiceJwtTokens tokens, Clock clock) {
+        this(tokens.handoffDecoder(), tokens, clock);
+    }
+
+    /** production의 목적별 decoder 주입 경계. API Access decoder와 혼합 금지 */
+    public HandoffExchangeService(JwtDecoder handoffDecoder, ServiceJwtTokens tokens, Clock clock) {
         this.tokens = tokens; this.clock = clock;
-        this.handoffDecoder = tokens.handoffDecoder();
+        this.handoffDecoder = handoffDecoder;
     }
 
     /** Origin 확인 이후에만 호출. 실제 exp에서 응답 계산 시각까지 남은 완전한 초 반환 */

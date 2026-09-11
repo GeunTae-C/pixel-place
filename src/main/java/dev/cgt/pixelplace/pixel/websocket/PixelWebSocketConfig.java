@@ -1,5 +1,6 @@
 package dev.cgt.pixelplace.pixel.websocket;
 
+import dev.cgt.pixelplace.auth.config.OriginPolicy;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
@@ -7,27 +8,29 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
 
 /*
  * pixel-place raw WebSocket endpoint 설정
- * 현재 handler/config 자체에 application-level 인증 로직 없음
- * 실제 /ws handshake 접근 제한은 현재 Spring Security filter chain에 따름
- * 최종 WebSocket 인증 정책은 13단계 확정 대상
+ * 공개 broadcast 유지, 공용 frontend Origin 정책만 실제 handshake에 적용
+ * JWT 인증·readiness gate·기존 연결 강제 종료 책임 없음
  */
 @Configuration
 @EnableWebSocket
 public class PixelWebSocketConfig implements WebSocketConfigurer {
 
     private final PixelWebSocketHandler pixelWebSocketHandler;
+    private final OriginPolicy origins;
 
-    public PixelWebSocketConfig(PixelWebSocketHandler pixelWebSocketHandler) {
+    public PixelWebSocketConfig(PixelWebSocketHandler pixelWebSocketHandler, OriginPolicy origins) {
         this.pixelWebSocketHandler = pixelWebSocketHandler;
+        this.origins = origins;
     }
 
     /*
      * /ws raw WebSocket endpoint 등록
-     * origin 정책은 개발/MVP 범위 임시 허용, 이후 security/JWT 단계에서 축소 대상
+     * 기본 same-origin 처리보다 앞선 공용 검사와 명시적 허용 표현 연결
      */
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(pixelWebSocketHandler, "/ws")
-                .setAllowedOriginPatterns("*");
+                .addInterceptors(new FrontendOriginHandshakeInterceptor(origins))
+                .setAllowedOrigins(origins.allowedOrigins().toArray(String[]::new));
     }
 }

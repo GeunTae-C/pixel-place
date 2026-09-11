@@ -9,7 +9,7 @@ import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 
-/** 서비스 토큰의 목적별 발급·검증 경계. B1에서는 명시적 조립만 허용, production bean 등록 책임 없음 */
+/** 서비스 토큰의 목적별 발급·검증 경계. production bean 조립과 decoder 선택은 설정 계층 책임 */
 public final class ServiceJwtTokens {
     private final AuthProperties properties;
     private final Clock clock;

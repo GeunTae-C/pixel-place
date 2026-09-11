@@ -5,11 +5,14 @@ import dev.cgt.pixelplace.auth.oauth2.HandoffCookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpHeaders;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RestController;
 import tools.jackson.databind.json.JsonMapper;
 import java.io.IOException;
 import java.util.Map;
 
-/** 교환 HTTP 입출력 담당. B2에서는 annotation·scan 등록 없이 명시적 fixture만 사용 */
+/** production handoff 교환 HTTP 경계. CORS·Resource Server 이후에도 Origin 선검사 유지 */
+@RestController
 public final class HandoffTokenController {
     private final OriginPolicy origins;
     private final HandoffCookie cookie;
@@ -20,7 +23,8 @@ public final class HandoffTokenController {
         this.origins = origins; this.cookie = cookie; this.exchange = exchange; this.json = json;
     }
 
-    /** trusted Origin → cookie → handoff 인증 → Access/JSON 준비 → 삭제·게시 순서. route 활성화는 C 책임 */
+    /** trusted Origin → cookie → handoff 인증 → Access/JSON 준비 → 삭제·게시 순서 */
+    @PostMapping(HandoffCookie.PATH)
     public void exchange(HttpServletRequest request, HttpServletResponse response) throws IOException {
         var values = request.getHeaders(HttpHeaders.ORIGIN);
         String origin = values != null && values.hasMoreElements() ? values.nextElement() : null;

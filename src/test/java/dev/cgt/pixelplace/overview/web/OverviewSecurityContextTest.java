@@ -1,101 +1,49 @@
 package dev.cgt.pixelplace.overview.web;
 
+import dev.cgt.pixelplace.auth.config.ProductionAuthTestSupport;
 import dev.cgt.pixelplace.overview.application.OverviewService;
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
-import dev.cgt.pixelplace.recovery.web.ReadinessGuardInterceptor;
-import dev.cgt.pixelplace.recovery.web.ReadinessWebConfig;
+import dev.cgt.pixelplace.recovery.web.*;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.security.oauth2.client.autoconfigure.OAuth2ClientAutoConfiguration;
-import org.springframework.boot.security.oauth2.client.autoconfigure.servlet.OAuth2ClientWebSecurityAutoConfiguration;
-import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Import;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.security.test.context.support.WithMockUser;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.web.servlet.MockMvc;
-
+import org.springframework.http.*;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import java.util.Optional;
-
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
+import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.redirectedUrl;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-/*
- * OAuth2 Client 자동 설정을 제외한 Boot 기본 Security filter와 readiness interceptor 우선순위 진단
- * 로컬 카카오 등록 설정과 분리된 MVC slice이며 실제 application의 OAuth2 설정·기동 검증은 아님
- * Basic 401, login 302, readiness 503, Overview 200 계약 유지; 13단계 allowlist 선행 구현 없음
- */
-@WebMvcTest(
-        controllers = OverviewController.class,
-        excludeAutoConfiguration = {
-                OAuth2ClientAutoConfiguration.class,
-                OAuth2ClientWebSecurityAutoConfiguration.class
-        }
-)
-@Import({ReadinessGuardInterceptor.class, ReadinessWebConfig.class})
+/** production Security 설정에서 공개 Overview·명시적 Bearer·readiness 순서 검증. PNG 공급만 대체 */
 class OverviewSecurityContextTest {
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @MockitoBean
-    private OverviewService overviewService;
-
-    @MockitoBean
-    private ServiceReadiness serviceReadiness;
-
-    @Test
-    void unauthenticatedJsonRequestIsRejectedByCurrentBasicFilterBeforeReadiness() throws Exception {
-        mockMvc.perform(get("/api/overview").accept(MediaType.APPLICATION_JSON))
-                .andExpect(status().isUnauthorized())
-                .andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE, "Basic realm=\"Realm\""))
-                .andExpect(header().doesNotExist(HttpHeaders.LOCATION));
-
-        verifyNoInteractions(overviewService);
+    @TestConfiguration(proxyBeanMethods=false)
+    @Import({OverviewController.class,ReadinessGuardInterceptor.class,ReadinessWebConfig.class})
+    static class Fixture { }
+    private org.springframework.boot.test.context.runner.WebApplicationContextRunner runner() {
+        return ProductionAuthTestSupport.runner().withUserConfiguration(Fixture.class)
+                .withBean(OverviewService.class,()->mock(OverviewService.class)).withBean(ServiceReadiness.class,()->mock(ServiceReadiness.class));
     }
-
-    @Test
-    void unauthenticatedHtmlRequestIsRedirectedByCurrentLoginFilter() throws Exception {
-        mockMvc.perform(get("/api/overview").accept(MediaType.TEXT_HTML))
-                .andExpect(status().isFound())
-                .andExpect(redirectedUrl("/login"))
-                .andExpect(header().doesNotExist(HttpHeaders.WWW_AUTHENTICATE));
-
-        verifyNoInteractions(overviewService);
+    @Test void unauthenticatedJsonOverviewReachesReadinessWithoutBasicChallenge() {
+        runner().run(c->{var mvc=MockMvcBuilders.webAppContextSetup(c).apply(springSecurity()).build();
+            mvc.perform(get("/api/overview").accept(MediaType.APPLICATION_JSON)).andExpect(status().isServiceUnavailable())
+                    .andExpect(jsonPath("$.message").value("Service is not ready.")).andExpect(header().doesNotExist(HttpHeaders.WWW_AUTHENTICATE))
+                    .andExpect(header().doesNotExist(HttpHeaders.LOCATION));verifyNoInteractions(c.getBean(OverviewService.class));});
     }
-
-    @Test
-    @WithMockUser
-    void authenticatedRequestReachesGlobalReadinessGuard() throws Exception {
-        when(serviceReadiness.isReady()).thenReturn(false);
-
-        mockMvc.perform(get("/api/overview"))
-                .andExpect(status().isServiceUnavailable())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.message").value("Service is not ready."))
-                .andExpect(header().doesNotExist(HttpHeaders.WWW_AUTHENTICATE))
-                .andExpect(header().doesNotExist(HttpHeaders.LOCATION));
-
-        verifyNoInteractions(overviewService);
+    @Test void unauthenticatedHtmlOverviewUsesPublicReadinessPolicyWithoutLoginRedirect() {
+        runner().run(c->{var mvc=MockMvcBuilders.webAppContextSetup(c).apply(springSecurity()).build();
+            mvc.perform(get("/api/overview").accept(MediaType.TEXT_HTML)).andExpect(status().isServiceUnavailable())
+                    .andExpect(header().doesNotExist(HttpHeaders.LOCATION));verifyNoInteractions(c.getBean(OverviewService.class));});
     }
-
-    @Test
-    @WithMockUser
-    void authenticatedReadyRequestReachesOverviewController() throws Exception {
-        byte[] png = {1, 2, 3};
-        when(serviceReadiness.isReady()).thenReturn(true);
-        when(overviewService.currentPng()).thenReturn(Optional.of(png));
-
-        mockMvc.perform(get("/api/overview"))
-                .andExpect(status().isOk())
-                .andExpect(content().contentType(MediaType.IMAGE_PNG))
-                .andExpect(content().bytes(png));
+    @Test void explicitlyInvalidBearerIsRejectedBeforeReadinessOrOverview() {
+        runner().run(c->{var mvc=MockMvcBuilders.webAppContextSetup(c).apply(springSecurity()).build();
+            mvc.perform(get("/api/overview").header(HttpHeaders.AUTHORIZATION,"Bearer invalid")).andExpect(status().isUnauthorized())
+                    .andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE,"Bearer"));
+            verifyNoInteractions(c.getBean(OverviewService.class),c.getBean(ServiceReadiness.class));});
+    }
+    @Test void publicReadyRequestReachesActualOverviewController() {
+        runner().run(c->{var mvc=MockMvcBuilders.webAppContextSetup(c).apply(springSecurity()).build();byte[] png={1,2,3};
+            when(c.getBean(ServiceReadiness.class).isReady()).thenReturn(true);when(c.getBean(OverviewService.class).currentPng()).thenReturn(Optional.of(png));
+            mvc.perform(get("/api/overview")).andExpect(status().isOk()).andExpect(content().contentType(MediaType.IMAGE_PNG)).andExpect(content().bytes(png));});
     }
 }

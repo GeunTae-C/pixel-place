@@ -24,7 +24,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 // pixel write HTTP 경계 검증
-// controller는 임시 X-User-Id 파싱과 응답 변환만 담당, write 처리는 service 경계에 위임
+// controller는 검증된 내부 ID 전달과 응답 변환 담당, write 처리는 service 경계에 위임
 class PixelControllerTest {
 
     private final PixelCommandService pixelCommandService = mock(PixelCommandService.class);
@@ -46,7 +46,7 @@ class PixelControllerTest {
                 ));
 
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -67,27 +67,21 @@ class PixelControllerTest {
     }
 
     @Test
-    // 임시 사용자 식별 header 없이는 write path 진입 금지
-    void writePixelWithoutUserIdHeaderReturnsBadRequest() throws Exception {
-        mockMvc.perform(post("/api/pixels")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "x": 768,
-                                  "y": 1280,
-                                  "color": 17
-                                }
-                                """))
-                .andExpect(status().isBadRequest());
-
-        verifyNoInteractions(pixelCommandService);
+    // 사용자 header 없이도 검증된 principal의 내부 ID 전달
+    void writePixelWithoutUserIdHeaderUsesValidatedPrincipal() throws Exception {
+        when(pixelCommandService.writePixel(7L,768,1280,17))
+                .thenReturn(new PixelWriteResult(1L,new TileKey(0,3,5),1L,768,1280,17));
+        mockMvc.perform(post("/api/pixels").principal(principal()).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"x\":768,\"y\":1280,\"color\":17}"))
+                .andExpect(status().isOk());
+        verify(pixelCommandService).writePixel(7L,768,1280,17);
     }
 
     @Test
     // 필수 x 좌표 누락 시 service 호출 금지
     void writePixelWithoutXReturnsBadRequest() throws Exception {
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -105,7 +99,7 @@ class PixelControllerTest {
     // 필수 y 좌표 누락 시 service 호출 금지
     void writePixelWithoutYReturnsBadRequest() throws Exception {
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -123,7 +117,7 @@ class PixelControllerTest {
     // 필수 color 누락 시 service 호출 금지
     void writePixelWithoutColorReturnsBadRequest() throws Exception {
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -144,7 +138,7 @@ class PixelControllerTest {
                 .thenThrow(new IllegalArgumentException("x coordinate is out of board range. x=-1"));
 
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -166,7 +160,7 @@ class PixelControllerTest {
                 .thenThrow(new PixelCooldownActiveException(123_000L));
 
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -192,7 +186,7 @@ class PixelControllerTest {
                 ));
 
         mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -215,7 +209,7 @@ class PixelControllerTest {
 
         ServletException exception = assertThrows(ServletException.class, () ->
                 mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -237,7 +231,7 @@ class PixelControllerTest {
 
         ServletException exception = assertThrows(ServletException.class, () ->
                 mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "7")
+                        .principal(principal())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -252,20 +246,21 @@ class PixelControllerTest {
     }
 
     @Test
-    // 잘못된 사용자 header는 write 승인 경로로 넘기지 않음
-    void writePixelWithNonNumericUserIdHeaderReturnsBadRequest() throws Exception {
-        mockMvc.perform(post("/api/pixels")
-                        .header("X-User-Id", "abc")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "x": 768,
-                                  "y": 1280,
-                                  "color": 17
-                                }
-                                """))
-                .andExpect(status().isBadRequest());
-
-        verifyNoInteractions(pixelCommandService);
+    // 공격 header의 숫자 형식과 값은 검증된 principal을 덮어쓸 수 없음
+    void writePixelIgnoresUntrustedNonNumericUserIdHeader() throws Exception {
+        when(pixelCommandService.writePixel(7L,768,1280,17))
+                .thenReturn(new PixelWriteResult(1L,new TileKey(0,3,5),1L,768,1280,17));
+        mockMvc.perform(post("/api/pixels").principal(principal()).header("X-User-Id","abc")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"x\":768,\"y\":1280,\"color\":17}"))
+                .andExpect(status().isOk());
+        verify(pixelCommandService).writePixel(7L,768,1280,17);
     }
+
+    // standalone MVC 입력용 검증된 principal fixture. 실제 서명·필터 거부는 production chain 테스트 책임
+    private static org.springframework.security.core.Authentication principal() {
+        var jwt=org.springframework.security.oauth2.jwt.Jwt.withTokenValue("test-only-principal")
+                .header("alg","HS256").subject("7").build();
+        return new org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken(jwt);
+    }
+
 }

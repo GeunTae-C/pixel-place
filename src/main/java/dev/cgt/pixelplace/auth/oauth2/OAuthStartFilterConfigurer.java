@@ -10,7 +10,7 @@ public final class OAuthStartFilterConfigurer implements ObjectPostProcessor<OAu
     private final AuthenticationFailureHandler failureHandler;
     public OAuthStartFilterConfigurer(AuthenticationFailureHandler failureHandler) { this.failureHandler = failureHandler; }
 
-    /** 명시적 OAuth 조립에서만 호출. B2 자체 production chain 활성화 책임 없음 */
+    /** 명시적 OAuth chain이 생성한 시작 필터에 공용 실패 계약 연결 */
     @Override
     public <O extends OAuth2AuthorizationRequestRedirectFilter> O postProcess(O filter) {
         filter.setAuthenticationFailureHandler(failureHandler);
