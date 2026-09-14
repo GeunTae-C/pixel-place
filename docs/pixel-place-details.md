@@ -460,7 +460,7 @@ Content-Type: application/json
 ### eventSeq gap 정책
 - WAL record의 `eventSeq`는 strictly increasing 해야 하지만 contiguous할 필요는 없다.
 - `100, 102, 105`처럼 gap이 있어도 `101`, `103`, `104`가 없다는 이유만으로 recovery나 flush를 실패시키지 않는다.
-- 같은 `eventSeq`의 중복과 역순은 WAL corruption으로 처리하며, active WAL 전체에서 checkpoint 이전 record도 순서 검증 대상에 포함한다.
+- 같은 `eventSeq`의 중복과 역순은 WAL corruption으로 처리하며, 남은 WAL 파일군 전체에서 checkpoint 이전 record도 순서 검증 대상에 포함한다.
 - eventSeq 발급 뒤 WAL append가 실패할 수 있으므로 gap 자체를 승인 이벤트 누락으로 단정하지 않는다.
 
 ---
@@ -774,9 +774,10 @@ Content-Type: application/json
 - 최초 fatal을 일으킨 요청은 해당 내부 오류로 실패한다. 이후 요청은 command/core readiness 검사에서 not-ready로 거부하며, 최초 fatal 요청의 오류를 `503`으로 바꾸지 않는다.
 
 ### WAL fail-stop 정책
-- WAL append 또는 fsync 실패 시 partial WAL이나 durability 결과가 불확실할 수 있으므로 `FileWalAppender`를 poisoned 상태로 전환한다.
-- 같은 실패에서 `ServiceReadiness`도 not-ready로 전환하여 후속 write와 새로운 flush plan capture를 차단한다.
-- poison 이후 추가 append를 차단하고 같은 프로세스에서 channel reopen, truncate, reset 또는 후속 write를 허용하지 않는다.
+- WAL 파일군 검증·읽기·기록·회전 실패는 공유 `SegmentedWalStorage`를 poisoned 상태로 전환한다. 열린 writer와 게시 전 candidate도 정리를 시도한다.
+- write 경로의 RuntimeException은 기존 core가 `ServiceReadiness`를 not-ready로 전환하여 후속 write와 새 plan capture를 차단한다. storage 자체가 readiness를 관리하지 않으며 raw Error도 같은 HTTP 결과라고 보장하지 않는다.
+- poison 이후 append·scan을 파일 접근 전에 차단한다. 같은 프로세스에서 channel reopen, truncate, reset 또는 다른 번호로 우회하지 않는다. 정상 close도 재open 불가능한 종료 상태이며 Spring 종료 소유자는 storage 하나다.
+- 일반 파일 I/O 원인은 보존하되 parser의 RuntimeException은 원문 cause/suppressed를 연결하지 않은 비민감 위치 진단으로 바꾼다. 실패 정리 중 Error가 발생하면 Error를 우선하며 최초 Error가 있다면 그 instance를 유지한다.
 - WAL I/O 실패가 발생한 마지막 요청은 성공으로 응답하지 않지만, 완전한 newline-terminated record가 남았을 가능성이 있으므로 절대 미반영으로 단정하지 않는 unknown outcome이다.
 - 운영자 확인 뒤 서버를 재시작하고 startup recovery로 WAL을 다시 판정한다. partial-line truncate recovery는 현재 구현하지 않는다.
 
@@ -794,7 +795,7 @@ GET /api/tiles/**
 
 ### WAL 마지막 newline 계약
 - 정상 WAL record는 JSON 뒤에 `\n`이 붙은 한 줄이다.
-- active WAL 파일이 비어 있지 않다면 마지막 byte는 반드시 newline이어야 한다.
+- active와 closed를 포함하여 비어 있지 않은 모든 WAL 파일의 마지막 byte는 반드시 newline이어야 한다.
 - 마지막 newline이 없으면 내용이 완전한 JSON처럼 보여도 recovery와 runtime WAL scan을 실패시킨다.
 
 ### WAL 성공 후 memory apply 실패
@@ -840,7 +841,7 @@ JWT principal 기반 사용자 식별은 13단계의 후속 목표다. 현재 �
 3. immutable `StartupRecoveryDbView` 반환과 함께 capture transaction 종료
 4. 공통 `DbBootstrapClassifier`로 `0 rows + checkpoint 0`, canonical 1,024 rows, inconsistent 상태 판정
 5. classifier 결과와 실제 snapshot key/byte length/version shape를 WAL read 전에 재검증
-6. active WAL 전체 scan 뒤 `walLastEventSeq >= checkpoint`와 replay batch empty/non-empty tail invariant 검증
+6. 남은 WAL 파일군 전체 scan 뒤 `walLastEventSeq >= checkpoint`와 replay batch empty/non-empty tail invariant 검증
 7. bootstrap-pending이면 memory를 all-white로 초기화하고, initialized이면 canonical 1,024 snapshots를 load
 8. checkpoint 이후 WAL record를 순서대로 memory에 replay
 9. 검증된 `walLastEventSeq`를 `EventSeqManager`의 마지막 발급값으로 초기화
@@ -858,7 +859,7 @@ recovery replay는 `DirtyTileTracker`를 채우지 않는다. 따라서 checkpoi
   - boot recovery에서는 이 값 이하의 WAL 이벤트를 replay하지 않는다.
 
 - `walLastEventSeq`
-  - active WAL 파일을 끝까지 읽어서 확인한 마지막 `eventSeq`다.
+  - 남은 WAL 파일군을 끝까지 읽어서 확인한 마지막 `eventSeq`다.
   - replay 대상 여부와 관계없이 계산한다.
   - startup recovery가 `walLastEventSeq >= lastFlushedEventSeq`와 replay batch tail invariant를 먼저 검증한다.
   - 검증 성공 뒤 `lastIssuedEventSeq`는 `walLastEventSeq`로 초기화하고, 다음 allocate 값은 그보다 1 큰 값이다.
@@ -867,19 +868,17 @@ recovery replay는 `DirtyTileTracker`를 채우지 않는다. 따라서 checkpoi
   - `lastFlushedEventSeq`는 DB가 어디까지 따라왔는지를 나타낸다.
   - `walLastEventSeq`는 WAL이 어디까지 기록됐는지를 나타낸다.
 
-### WAL 정리 규칙
+### WAL 파일군과 회전
 
-#### 현재 MVP
-- active WAL 파일 1개를 사용한다.
-- 현재 startup recovery와 runtime flush는 모두 active WAL 전체를 scan한다.
-- WAL rotation/segment는 아직 구현하지 않는다.
-- archive WAL cleanup은 아직 구현하지 않는다.
-- active WAL 자동 truncate도 구현하지 않는다.
+기존 설정 경로의 파일은 번호 0으로 그대로 채택하고 내용을 복사하거나 이름을 바꾸지 않는다. 후속 파일은 같은 기준 이름의 번호 suffix를 사용하며, 남은 연속 번호 중 최대 번호가 active다. namespace 안의 비정규 이름·번호 구멍·symlink·비일반 파일은 실패로 처리하고 namespace 밖 항목은 소비하지 않는다. 경로와 크기는 생성 시 검증·고정하며 생성만으로 파일을 열지 않는다.
 
-#### 후속 목표
-- WAL rotation 또는 segment 도입
-- archive WAL 파일의 마지막 `eventSeq`가 `wal_checkpoint.last_flushed_event_seq` 이하인 경우에만 안전하게 삭제
-- active WAL 전체 scan 비용 제거
+`FileWalAppender`와 default profile의 `FileWalReplaySource`는 같은 storage를 사용한다. 첫 writer 사용 직전에 파일군 전체를 다시 검증하고, 이후 append는 채택한 active 경로의 속성과 channel 크기를 확인한다. 다음 record가 크기 한도를 넘기는 경우 old channel close → 정확한 다음 파일 생성 → 빈 파일 force → active 게시 → record 전체 write와 force 순서로 회전한다. 빈 active에는 큰 record 한 건도 분할 없이 기록하므로 크기는 record 단위의 soft threshold다.
+
+scan은 모든 파일의 newline·UTF-8·record·전역 eventSeq 순서를 검증한 뒤 checkpoint 초과 record와 마지막 실제 tail을 반환한다. 빈 legacy 단독은 최초 상태로 허용하고, 이전 record가 있는 파일 뒤의 빈 최신 active는 그 이전 실제 tail을 유지한다. 빈 closed나 단독 빈 numbered 파일은 복구 가능한 정상 상태로 채택하지 않는다. 중단 뒤에는 새 storage가 disk를 다시 검사하며 partial line을 자동 truncate하지 않는다.
+
+열거·scan·append·회전·close는 storage의 같은 lock을 사용한다. command는 coordinator → core monitor → storage 순서로 진입하고, plan은 coordinator 안에서 scan부터 memory snapshot까지 유지한다. storage는 DB나 바깥 lock을 호출하지 않는다. stream과 임시 channel은 lock 안에서 닫고 결과만 반환한다. stub은 기존 startup 입력만 대체하며 context 생성·종료가 실제 WAL I/O를 일으키지 않는다.
+
+현재 closed segment의 삭제와 flush worker의 retention 호출은 연결하지 않았다. 확정 commit 경계에 따른 정리는 14-B의 범위이며 active·마지막 실제 record와 미반영 record 보존이 선행 조건이다. 전체 파일군 scan 비용은 남아 있고 read-offset 최적화·자동 truncate·parent-directory fsync는 후속 범위다. 파일군은 단일 프로세스가 독점하는 로컬 filesystem을 전제로 하며 디스크 사용량의 절대 상한이나 전원 장애 시 directory entry 내구성을 제공하지 않는다.
 
 ## 10) DB flush worker 처리 순서
 
@@ -914,7 +913,7 @@ fixed-delay는 이전 invocation 종료 뒤 다음 간격을 보장하지만 who
 
 flush 정확성의 source of truth는 WAL이다. `DirtyTileTracker`는 추가 snapshot 대상과 실패 재시도 정보를 제공하는 보조 상태이며 flush 실행 여부, target, checkpoint 또는 필수 snapshot 대상의 유일한 근거가 아니다.
 
-active WAL 전체의 `eventSeq`는 strictly increasing 해야 하지만 gap은 허용한다. checkpoint와 `pixel_events` 저장 범위는 정수 연속성이 아니라 checkpoint 이후 실제 WAL record를 기준으로 한다.
+남은 WAL 파일군 전체의 `eventSeq`는 strictly increasing 해야 하지만 gap은 허용한다. checkpoint와 `pixel_events` 저장 범위는 정수 연속성이 아니라 checkpoint 이후 실제 WAL record를 기준으로 한다.
 
 `flushTargetEventSeq`는 coordinator boundary 순간의 durable WAL tail로만 확정하며, 현재 memory에서 과거 eventSeq snapshot을 만들 수 없으므로 WAL tail보다 낮은 임의 중간 target을 선택하지 않는다.
 
@@ -932,7 +931,7 @@ active WAL 전체의 `eventSeq`는 strictly increasing 해야 하지만 gap은 �
 3. pending이 있으면 WAL scan, dirty drain과 새 plan capture 없이 먼저 exact reconciliation한다.
 4. pending이 없으면 `FlushPlanCaptureService`가 일반 `requireReady()`를 검사하고 checkpoint와 BLOB 없는 전체 tile key metadata를 조회한다.
 5. 공통 `DbBootstrapClassifier`가 `BOOTSTRAP_PENDING`, `INITIALIZED`, `INCONSISTENT`를 판정하고 inconsistent 상태는 WAL/dirty 접근 전에 실패시킨다.
-6. `FlushBoundaryCoordinator` 안에서 readiness를 다시 검사한 뒤 active WAL 전체 scan, newline/순서/tail 검증, dirty drain, target snapshot deep copy와 immutable plan 생성을 완료한다.
+6. `FlushBoundaryCoordinator` 안에서 readiness를 다시 검사한 뒤 남은 WAL 파일군 전체 scan, newline/순서/tail 검증, dirty drain, target snapshot deep copy와 immutable plan 생성을 완료한다.
 7. checkpoint 이후 WAL record가 없으면 dirty를 drain하지 않은 no-op plan을 반환한다.
 8. bootstrap-pending non-no-op plan은 canonical z=0 전체 1,024 snapshots, initialized plan은 WAL affected와 drained dirty key 합집합 snapshots를 포함한다.
 9. coordinator 밖에서 `pixel_events`, captured `tiles`, conditional checkpoint advance를 `REQUIRES_NEW` physical transaction 하나로 실행한다.
@@ -1010,7 +1009,7 @@ flush worker는 WAL에서 affected `TileKey`를 다시 계산해야 하며, reco
 
 ```text
 FlushBoundaryCoordinator로 새 write를 차단한 boundary 순간의
-active WAL durable tail
+WAL 파일군 durable tail
 ```
 
 checkpoint가 `100`이고 boundary 순간 durable WAL tail이 `150`인 경우의 목표는 다음과 같다.
@@ -1145,13 +1144,13 @@ canonical key 완전성(z=0, tx=0..31, ty=0..31)
 ### readiness 1차/2차 검사
 coordinator 밖에서 checkpoint 조회 전에 readiness를 1차 확인하고, checkpoint 조회 뒤 coordinator를 획득한 직후 WAL scan 전에 2차 확인한다.
 
-두 검사 중 하나라도 not-ready면 active WAL scan, dirty drain, snapshot capture, DB transaction, checkpoint 갱신을 시작하지 않고 새로운 flush plan 생성을 금지한다.
+두 검사 중 하나라도 not-ready면 WAL 파일군 scan, dirty drain, snapshot capture, DB transaction, checkpoint 갱신을 시작하지 않고 새로운 flush plan 생성을 금지한다.
 
 ### coordinator 내부 plan capture 범위
 coordinator 내부에서는 다음 작업만 수행한다.
 
 ```text
-active WAL 파일 상태 검증
+WAL 파일군 상태 검증
 WAL 크기와 마지막 newline 검증
 WAL 전체 record parsing과 strictly increasing 순서 검증
 checkpoint 이후 실제 WAL record 확정
@@ -1196,7 +1195,7 @@ not-ready 전환 이후에는 새로운 flush plan의 시작과 capture를 금�
 서비스가 ready이고 flush가 허용되는 상태라면 durable WAL tail까지의 모든 성공 WAL record가 memory에 반영되어 있어야 한다. WAL fsync 뒤 memory apply 실패는 이 불변식을 깨므로 fatal이며, not-ready 상태에서 WAL tail과 memory의 불일치를 감춘 새 plan을 만들지 않는다.
 
 ### WAL 전체 스캔의 MVP 한계
-현재 startup recovery와 runtime flush는 active WAL 파일 1개를 처음부터 끝까지 scan한다. rotation/segment/archive cleanup, WAL read offset과 자동 truncate는 후속 범위다.
+현재 startup recovery와 runtime flush는 같은 storage로 남은 WAL 파일군 전체를 처음부터 끝까지 scan한다. 크기 회전은 연결됐으며 closed segment 정리, WAL read offset과 자동 truncate는 아직 연결하지 않았다.
 
 ### WAL record가 없는 경우
 checkpoint 이후 실제 WAL record가 없으면 dirty tracker 상태와 무관하게 checkpoint를 전진시키지 않는다. bootstrap-pending이어도 dirty drain과 DB write 없이 no-op plan만 만들고 coordinator 밖에서 반환하며 DB `tiles`는 0 rows로 유지한다.
@@ -1204,8 +1203,8 @@ checkpoint 이후 실제 WAL record가 없으면 dirty tracker 상태와 무관�
 ### tile snapshot deep copy
 snapshot target 전체의 tile bytes는 coordinator 안에서 새 배열로 deep copy하고 같은 boundary에서 `tileVersion`을 capture한다. coordinator 해제 뒤 memory tile이 바뀌어도 captured plan bytes가 함께 변하지 않아야 한다.
 
-### runtime active WAL scan의 안정된 boundary
-active WAL 파일 상태와 크기 확인, 마지막 newline 검증, 전체 record parsing과 strictly increasing 순서 검증, durable tail 확정, WAL affected `TileKey` 계산, dirty drain, snapshot capture와 immutable plan 생성을 하나의 `FlushBoundaryCoordinator` 구간에서 수행한다. 중간에 coordinator를 해제하거나 write append를 허용하지 않는다.
+### runtime WAL 파일군 scan의 안정된 boundary
+WAL 파일군 상태와 크기 확인, 마지막 newline 검증, 전체 record parsing과 strictly increasing 순서 검증, durable tail 확정, WAL affected `TileKey` 계산, dirty drain, snapshot capture와 immutable plan 생성을 하나의 `FlushBoundaryCoordinator` 구간에서 수행한다. 중간에 coordinator를 해제하거나 write append를 허용하지 않는다.
 
 `FileWalReplaySource`가 coordinator를 직접 획득하지 않으며 flush orchestration이 이 runtime scan precondition을 보장한다.
 
@@ -1337,7 +1336,7 @@ WebSocket broadcast나 overview 성공 여부를 checkpoint 조건에 포함하�
 현재 flush/recovery MVP는 다음을 구현하지 않는다.
 
 ```text
-WAL rotation/segment
+WAL closed segment retention 연결
 WAL archive/index/offset/truncate
 group commit
 partial WAL line 자동 복구
@@ -1352,7 +1351,7 @@ flush 전용 scheduler의 application 전역 기본 scheduler 등록
 production metrics/alert 체계와 custom scheduler thread-pool tuning
 ```
 
-single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application instance의 동시 flush를 막는 분산 lock이 아니다. active WAL 전체 scan은 coordinator 안에서 수행하므로 WAL이 커지면 write blocking 시간이 길어질 수 있다. parent-directory fsync도 적용하지 않는다.
+single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application instance의 동시 flush를 막는 분산 lock이 아니다. 남은 WAL 파일군 전체 scan은 coordinator 안에서 수행하므로 WAL이 커지면 write blocking 시간이 길어질 수 있다. parent-directory fsync도 적용하지 않는다.
 
 후속 최적화 판단을 위해 checkpoint lag, WAL backlog, 한 plan의 event/tile 수와 byte 크기, coordinator 보유 시간, WAL scan 시간과 DB transaction 시간을 측정 후보로 둔다. canonical 1,024-tile bootstrap은 운영 예정 heap에서 peak heap과 전체 transaction elapsed time을 실측한다. 현재 단계에서 production metric/alert나 근거 없는 통과 임계값을 추가하지 않는다.
 
@@ -1367,8 +1366,8 @@ single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application i
 - pending 설치 저장 전 실패, 저장 뒤 install 예외, 다른 pending과 current 확인 실패에서 exact identity/fail-closed 검증
 - 실제 MySQL `REPEATABLE_READ` capture가 checkpoint 뒤 concurrent flush-shaped commit 중에도 checkpoint/key/snapshot 세 read의 동일 snapshot을 유지
 - 최초 full capture 중 write 차단, 전체 bytes/version deep copy와 immutable plan 유지
-- WAL append/fsync 실패 뒤 `FileWalAppender` poison과 추가 append 차단
-- active WAL이 비어 있지 않을 때 마지막 newline 검증
+- WAL 파일 작업 실패 뒤 공유 storage poison과 추가 append·scan 차단
+- active·closed의 비어 있지 않은 모든 WAL 파일 마지막 newline 검증
 - WAL 성공 뒤 memory apply 실패 시 ServiceReadiness fatal 전환
 - `PixelCommandService` 진입 직후 command-level readiness 사전 검사
 - `PixelWriteService`의 기존 `synchronized` 진입 직후 core readiness 재검사

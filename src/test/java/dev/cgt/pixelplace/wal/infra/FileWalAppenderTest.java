@@ -262,7 +262,7 @@ class FileWalAppenderTest {
     }
 
     @Test
-    // 동일 channel의 write/force가 append monitor 안에서 직렬화되는지 검증
+    // 동일 channel의 write/force가 storage monitor 안에서 직렬화되는지 검증
     void concurrentAppendsAreSerialized() throws Exception {
         FileChannel channel = writableChannel();
         CountDownLatch firstWriteEntered = new CountDownLatch(1);
@@ -291,7 +291,7 @@ class FileWalAppenderTest {
                 appender.appendAndFsync(record(2L));
             });
             assertTrue(secondCallStarted.await(5, TimeUnit.SECONDS));
-            awaitBlockedOnAppenderMonitor(secondThread.get());
+            awaitBlockedOnStorageMonitor(secondThread.get());
             assertEquals(1, writeCount.get());
 
             releaseFirstWrite.countDown();
@@ -332,7 +332,7 @@ class FileWalAppenderTest {
                 appender.appendAndFsync(record(2L));
             });
             assertTrue(secondCallStarted.await(5, TimeUnit.SECONDS));
-            awaitBlockedOnAppenderMonitor(secondThread.get());
+            awaitBlockedOnStorageMonitor(secondThread.get());
             verify(channel, times(1)).write(any(ByteBuffer.class));
 
             releaseFirstWrite.countDown();
@@ -428,7 +428,7 @@ class FileWalAppenderTest {
     private FileWalAppender appender(Path activeFile) {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
-        return new FileWalAppender(properties, new WalRecordJsonCodec(objectMapper));
+        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper)));
     }
 
     private FileWalAppender controlledAppender(
@@ -439,19 +439,32 @@ class FileWalAppenderTest {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
 
-        return new FileWalAppender(properties, new WalRecordJsonCodec(objectMapper)) {
+        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper)) {
             @Override
             FileChannel openFileChannel(Path ignored, StandardOpenOption... options) {
                 openCount.incrementAndGet();
                 return controlledChannel;
             }
-        };
+
+            @Override
+            java.nio.file.attribute.BasicFileAttributes readAttributes(Path path) throws IOException {
+                // 기존 channel 단위 fixture의 논리 size를 경로 속성에도 적용. 실제 파일 검사는 신규 FS 테스트 담당
+                var attributes = mock(java.nio.file.attribute.BasicFileAttributes.class);
+                long size = controlledChannel.size();
+                when(attributes.isRegularFile()).thenReturn(true);
+                when(attributes.size()).thenReturn(size);
+                return attributes;
+            }
+        });
     }
 
     private FileChannel writableChannel() throws IOException {
         FileChannel channel = mock(FileChannel.class);
         when(channel.isOpen()).thenReturn(true);
-        when(channel.size()).thenReturn(0L);
+        when(channel.size()).thenAnswer(ignored -> org.mockito.Mockito.mockingDetails(channel).getInvocations().stream()
+                .filter(invocation -> invocation.getMethod().getName().equals("write"))
+                .map(invocation -> (ByteBuffer) invocation.getArgument(0))
+                .mapToLong(ByteBuffer::position).sum());
         when(channel.position(anyLong())).thenReturn(channel);
         when(channel.write(any(ByteBuffer.class))).thenAnswer(
                 invocation -> consume(invocation.getArgument(0))
@@ -465,20 +478,20 @@ class FileWalAppenderTest {
         return remaining;
     }
 
-    private void awaitBlockedOnAppenderMonitor(Thread thread) {
+    private void awaitBlockedOnStorageMonitor(Thread thread) {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (thread.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
             Thread.onSpinWait();
         }
         if (thread.getState() != Thread.State.BLOCKED) {
-            throw new AssertionError("Second append did not block on FileWalAppender monitor.");
+            throw new AssertionError("Second append did not block on SegmentedWalStorage monitor.");
         }
     }
 
     private FileWalReplaySource replaySource(Path activeFile) {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
-        return new FileWalReplaySource(properties, parser);
+        return new FileWalReplaySource(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper)));
     }
 
     private WalRecord record(long eventSeq) {

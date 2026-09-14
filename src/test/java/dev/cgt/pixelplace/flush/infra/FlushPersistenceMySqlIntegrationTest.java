@@ -49,6 +49,7 @@ import dev.cgt.pixelplace.wal.application.WalReplayBatch;
 import dev.cgt.pixelplace.wal.domain.WalRecord;
 import dev.cgt.pixelplace.wal.infra.FileWalAppender;
 import dev.cgt.pixelplace.wal.infra.FileWalReplaySource;
+import dev.cgt.pixelplace.wal.infra.SegmentedWalStorage;
 import dev.cgt.pixelplace.wal.infra.WalProperties;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -898,17 +899,15 @@ class FlushPersistenceMySqlIntegrationTest {
         WalProperties walProperties = new WalProperties();
         walProperties.setActiveFile(walPath);
         ObjectMapper objectMapper = new ObjectMapper();
-        FileWalAppender fileWalAppender = new FileWalAppender(
-                walProperties,
-                new WalRecordJsonCodec(objectMapper)
-        );
+        SegmentedWalStorage storage = new SegmentedWalStorage(walProperties,
+                new WalRecordParser(objectMapper), new WalRecordJsonCodec(objectMapper));
+        FileWalAppender fileWalAppender = new FileWalAppender(storage);
         FileWalReplaySource fileWalReplaySource = failureObservationEnabled
                 ? new TrackingFileWalReplaySource(
-                        walProperties,
-                        new WalRecordParser(objectMapper),
+                        storage,
                         replayBatchTransform
                 )
-                : new FileWalReplaySource(walProperties, new WalRecordParser(objectMapper));
+                : new FileWalReplaySource(storage);
         StartupRecoveryService startupRecoveryService = new StartupRecoveryService(
                 recoveryDbViewCaptureService,
                 dbBootstrapClassifier,
@@ -1796,11 +1795,10 @@ class FlushPersistenceMySqlIntegrationTest {
         private int readCount;
 
         private TrackingFileWalReplaySource(
-                WalProperties walProperties,
-                WalRecordParser walRecordParser,
+                SegmentedWalStorage storage,
                 UnaryOperator<WalReplayBatch> batchTransform
         ) {
-            super(walProperties, walRecordParser);
+            super(storage);
             this.batchTransform = Objects.requireNonNull(batchTransform, "batchTransform must not be null");
         }
 

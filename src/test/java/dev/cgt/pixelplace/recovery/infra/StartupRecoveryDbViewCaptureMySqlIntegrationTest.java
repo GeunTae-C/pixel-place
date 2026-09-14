@@ -21,6 +21,7 @@ import dev.cgt.pixelplace.wal.application.WalReplayBatch;
 import dev.cgt.pixelplace.wal.domain.WalRecord;
 import dev.cgt.pixelplace.wal.infra.FileWalAppender;
 import dev.cgt.pixelplace.wal.infra.FileWalReplaySource;
+import dev.cgt.pixelplace.wal.infra.SegmentedWalStorage;
 import dev.cgt.pixelplace.wal.infra.WalProperties;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -202,14 +203,10 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
         WalProperties walProperties = new WalProperties();
         walProperties.setActiveFile(walPath);
         ObjectMapper objectMapper = new ObjectMapper();
-        FileWalAppender fileWalAppender = new FileWalAppender(
-                walProperties,
-                new WalRecordJsonCodec(objectMapper)
-        );
-        FileWalReplaySource fileWalReplaySource = new FileWalReplaySource(
-                walProperties,
-                new WalRecordParser(objectMapper)
-        );
+        SegmentedWalStorage storage = new SegmentedWalStorage(walProperties,
+                new WalRecordParser(objectMapper), new WalRecordJsonCodec(objectMapper));
+        FileWalAppender fileWalAppender = new FileWalAppender(storage);
+        FileWalReplaySource fileWalReplaySource = new FileWalReplaySource(storage);
         WalRecord eventTwo = new WalRecord(
                 TARGET_CHECKPOINT,
                 7L,

@@ -350,6 +350,8 @@
 - 승인된 픽셀 write의 **1차 내구성 저장소**
 - 포맷은 **JSON Lines**
 - 요청마다 `append + fsync`
+- 기존 WAL을 보존하면서 크기 기준으로 record 경계에서 파일을 나누고, 복구와 flush는 남은 파일 전체를 같은 규칙으로 읽음
+- 한 프로세스가 독점 관리하는 로컬 filesystem을 전제로 하며, closed 파일 삭제는 아직 연결하지 않음. 크기 기준은 디스크 총량 상한이 아니며 directory entry의 엄격한 전원 장애 내구성은 후속 범위
 - WAL append + fsync 성공은 write의 **1차 내구성 경계**
 - core write 완료는 WAL append + fsync와 memory apply가 모두 성공한 상태
 - 현재 HTTP `200` 성공 응답은 core write와 command 계약상 dirty mark까지 성공한 상태
@@ -554,7 +556,7 @@
 - `wal_checkpoint`: 마지막 DB flush 완료 지점 저장
   - `last_flushed_event_seq`는 `pixel_events`와 `tiles`에 모두 반영 완료된 마지막 `eventSeq`다.
   - 이 값 이하의 WAL 이벤트는 boot recovery 시 replay하지 않는다.
-  - 이 값은 active WAL 파일의 마지막 `eventSeq`인 `walLastEventSeq`와 다르다.
+  - 이 값은 남은 WAL 파일군의 마지막 실제 `eventSeq`인 `walLastEventSeq`와 다르다.
 
 ### 현재 SQL 계약
 - 현재 root/test DDL에는 위 3개 테이블과 `users`가 있다. 기존 event/WAL의 임시 ID 보존을 위해 users FK는 추가하지 않는다. runtime DB 반영 여부는 별도 검증 대상이다.

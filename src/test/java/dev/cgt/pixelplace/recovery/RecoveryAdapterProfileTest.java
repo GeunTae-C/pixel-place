@@ -25,6 +25,8 @@ import dev.cgt.pixelplace.wal.application.WalReplaySource;
 import dev.cgt.pixelplace.wal.infra.FileWalReplaySource;
 import dev.cgt.pixelplace.wal.infra.StubWalReplaySource;
 import dev.cgt.pixelplace.wal.infra.WalProperties;
+import dev.cgt.pixelplace.wal.infra.SegmentedWalStorage;
+import dev.cgt.pixelplace.wal.application.WalRecordJsonCodec;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
@@ -93,6 +95,7 @@ class RecoveryAdapterProfileTest {
         context.registerBean(TileJpaRepository.class, () -> mock(TileJpaRepository.class));
         context.registerBean(WalProperties.class, WalProperties::new);
         context.registerBean(WalRecordParser.class, () -> mock(WalRecordParser.class));
+        context.registerBean(WalRecordJsonCodec.class, () -> mock(WalRecordJsonCodec.class));
         context.registerBean(DirtyTileTracker.class, () -> mock(DirtyTileTracker.class));
         context.registerBean(InMemoryTileBoard.class, () -> mock(InMemoryTileBoard.class));
         context.registerBean(EventSeqManager.class, EventSeqManager::new);
@@ -104,6 +107,7 @@ class RecoveryAdapterProfileTest {
                 JpaTileSnapshotLoader.class,
                 StubTileSnapshotLoader.class,
                 FileWalReplaySource.class,
+                SegmentedWalStorage.class,
                 StubWalReplaySource.class,
                 CanonicalZ0TileKeys.class,
                 DbBootstrapClassifier.class,
