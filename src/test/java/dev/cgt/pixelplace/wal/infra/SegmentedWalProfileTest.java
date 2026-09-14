@@ -1,6 +1,8 @@
 package dev.cgt.pixelplace.wal.infra;
 
 import dev.cgt.pixelplace.wal.application.*;
+import dev.cgt.pixelplace.flush.application.*;
+import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import jakarta.annotation.PreDestroy;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -29,8 +31,12 @@ class SegmentedWalProfileTest {
             context.getEnvironment().setActiveProfiles(profile);
             context.registerBean(SegmentedWalStorage.class,()->storage);
             context.register(FileWalAppender.class,FileWalReplaySource.class,StubWalReplaySource.class);
+            context.register(FlushWalRetention.class, FlushBoundaryCoordinator.class, ServiceReadiness.class, PendingAmbiguousFlushStore.class);
             context.refresh();
             assertEquals(1,context.getBeansOfType(WalReplaySource.class).size());
+            assertSame(storage, context.getBean(WalSegmentRetention.class));
+            if (profile.equals("stub")) assertTrue(context.getBeansOfType(FlushWalRetention.class).isEmpty());
+            else assertSame(storage, ReflectionTestUtils.getField(context.getBean(FlushWalRetention.class), "retention"));
             assertSame(storage,ReflectionTestUtils.getField(context.getBean(FileWalAppender.class),"storage"));
             if(profile.equals("stub")) assertInstanceOf(StubWalReplaySource.class,context.getBean(WalReplaySource.class));
             else assertSame(storage,ReflectionTestUtils.getField(context.getBean(FileWalReplaySource.class),"storage"));
@@ -39,6 +45,7 @@ class SegmentedWalProfileTest {
             assertFalse(Files.exists(base.getParent()));
         }
         verify(storage,times(1)).close();verify(storage,never()).openDirectory(any());verify(storage,never()).readAttributes(any());
+        verify(storage,never()).deleteFile(any());
         verify(storage,never()).openReader(any());verify(storage,never()).createDirectories(any());
         verify(storage,never()).openFileChannel(any(),any(java.nio.file.StandardOpenOption[].class));
         assertFalse(Files.exists(base.getParent()));

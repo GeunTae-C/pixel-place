@@ -208,9 +208,11 @@ class SegmentedWalFailureTest {
         clearInvocations(storage);
         assertThrows(IllegalStateException.class,()->storage.appendAndFsync(record(21)));
         assertThrows(IllegalStateException.class,()->storage.readAfter(0));
+        assertThrows(IllegalStateException.class,()->storage.deleteCommittedPrefix(1));
         verifyNoIo(storage);
     }
     private void verifyNoIo(SegmentedWalStorage storage) throws Exception {
+        verify(storage,never()).deleteFile(any());
         verify(storage,never()).openDirectory(any()); verify(storage,never()).readAttributes(any());
         verify(storage,never()).openReader(any()); verify(storage,never()).createDirectories(any());
         verify(storage,never()).openFileChannel(any(),any(StandardOpenOption[].class));

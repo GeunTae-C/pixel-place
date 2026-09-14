@@ -715,7 +715,8 @@ class FlushWorkerTest {
                 executor,
                 store,
                 mock(FlushReconciliationService.class),
-                mock(DirtyTileTracker.class)
+                mock(DirtyTileTracker.class),
+                mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
         );
         workerReference.set(worker);
 
@@ -739,7 +740,8 @@ class FlushWorkerTest {
                 fixture.transactionExecutor,
                 fixture.store,
                 fixture.reconciliationService,
-                fixture.dirtyTileTracker
+                fixture.dirtyTileTracker,
+                mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
         ) {
             @Override
             PendingAmbiguousFlush createPendingCandidateFrom(FlushPlan plan) {
@@ -770,7 +772,8 @@ class FlushWorkerTest {
                 fixture.transactionExecutor,
                 fixture.store,
                 fixture.reconciliationService,
-                fixture.dirtyTileTracker
+                fixture.dirtyTileTracker,
+                mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
         ) {
             @Override
             PendingAmbiguousFlush createPendingCandidateFrom(FlushPlan plan) {
@@ -1050,7 +1053,8 @@ class FlushWorkerTest {
                 executor,
                 store,
                 reconciliation,
-                tracker
+                tracker,
+                mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
         );
     }
 
@@ -1162,7 +1166,8 @@ class FlushWorkerTest {
                     transactionExecutor,
                     store,
                     reconciliationService,
-                    dirtyTileTracker
+                    dirtyTileTracker,
+                    mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
             );
         }
     }

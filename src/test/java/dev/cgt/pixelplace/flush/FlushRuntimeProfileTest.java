@@ -13,6 +13,8 @@ import dev.cgt.pixelplace.flush.application.FlushReconciliationService;
 import dev.cgt.pixelplace.flush.application.FlushSingleFlightGuard;
 import dev.cgt.pixelplace.flush.application.FlushTransactionExecutor;
 import dev.cgt.pixelplace.flush.application.FlushWorker;
+import dev.cgt.pixelplace.flush.application.FlushWalRetention;
+import dev.cgt.pixelplace.wal.application.WalSegmentRetention;
 import dev.cgt.pixelplace.flush.application.PendingAmbiguousFlushStore;
 import dev.cgt.pixelplace.flush.infra.JpaFlushDbStateProbe;
 import dev.cgt.pixelplace.flush.infra.ProgrammaticFlushTransactionExecutor;
@@ -46,6 +48,7 @@ class FlushRuntimeProfileTest {
     void defaultProfileActivatesOneProductionBeanForEveryRuntimeFlushPort() {
         try (AnnotationConfigApplicationContext context = openContext()) {
             assertSingleBean(context, FlushWorker.class, FlushWorker.class);
+            assertSingleBean(context, FlushWalRetention.class, FlushWalRetention.class);
             assertSingleBean(context, FlushPersistenceService.class, FlushPersistenceService.class);
             assertSingleBean(
                     context,
@@ -71,6 +74,7 @@ class FlushRuntimeProfileTest {
     void stubProfileHasNoRuntimeFlushWorkerTransactionWriterFenceOrProbe() {
         try (AnnotationConfigApplicationContext context = openContext("stub")) {
             assertTrue(context.getBeansOfType(FlushWorker.class).isEmpty());
+            assertTrue(context.getBeansOfType(FlushWalRetention.class).isEmpty());
             assertTrue(context.getBeansOfType(FlushPersistenceService.class).isEmpty());
             assertTrue(context.getBeansOfType(FlushTransactionExecutor.class).isEmpty());
             assertTrue(context.getBeansOfType(PendingAmbiguousFlushStore.class).isEmpty());
@@ -104,6 +108,7 @@ class FlushRuntimeProfileTest {
         );
         context.registerBean(CheckpointReader.class, () -> mock(CheckpointReader.class));
         context.registerBean(WalReplaySource.class, () -> mock(WalReplaySource.class));
+        context.registerBean(WalSegmentRetention.class, () -> mock(WalSegmentRetention.class));
         context.registerBean(DirtyTileTracker.class, () -> mock(DirtyTileTracker.class));
         context.registerBean(InMemoryTileBoard.class, () -> mock(InMemoryTileBoard.class));
         context.registerBean(ServiceReadiness.class, ServiceReadiness::new);
@@ -123,7 +128,8 @@ class FlushRuntimeProfileTest {
                 PendingAmbiguousFlushStore.class,
                 JpaFlushDbStateProbe.class,
                 FlushReconciliationService.class,
-                FlushWorker.class
+                FlushWorker.class,
+                FlushWalRetention.class
         );
         context.refresh();
         return context;

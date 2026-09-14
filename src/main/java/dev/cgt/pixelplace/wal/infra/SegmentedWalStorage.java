@@ -3,6 +3,8 @@ package dev.cgt.pixelplace.wal.infra;
 import dev.cgt.pixelplace.wal.application.WalRecordJsonCodec;
 import dev.cgt.pixelplace.wal.application.WalRecordParser;
 import dev.cgt.pixelplace.wal.application.WalReplayBatch;
+import dev.cgt.pixelplace.wal.application.WalRetentionResult;
+import dev.cgt.pixelplace.wal.application.WalSegmentRetention;
 import dev.cgt.pixelplace.wal.domain.WalRecord;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -34,7 +36,7 @@ import java.util.Objects;
  * 생성 시 I/O 없이 경로·크기를 고정하고 실제 작업의 실패는 같은 instance의 재시도 차단
  */
 @Component
-public class SegmentedWalStorage implements AutoCloseable {
+public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
     private static final Logger log = LoggerFactory.getLogger(SegmentedWalStorage.class);
     private final Path basePath;
     private final long maxSegmentBytes;
@@ -81,6 +83,49 @@ public class SegmentedWalStorage implements AutoCloseable {
             throw fail(exception);
         } catch (Error error) {
             throw fail(error);
+        }
+    }
+
+    /** 전체 scan·reader close 후 확정된 closed prefix만 삭제. 삭제 지연은 storage 고장과 구분 */
+    @Override
+    public synchronized WalRetentionResult deleteCommittedPrefix(long confirmedCheckpoint) {
+        requireUsable();
+        if (confirmedCheckpoint <= 0) {
+            // 잘못된 호출은 파일 접근·고장 전환 이전에 거부
+            throw new IllegalArgumentException("Confirmed WAL checkpoint must be positive");
+        }
+        try {
+            validateActive();
+            // 반환 record는 불필요하지만 checkpoint 이하를 포함한 전체 내용 검증은 동일
+            ScanResult inspected = scan(Long.MAX_VALUE);
+            if (inspected.batch().walLastEventSeq() < confirmedCheckpoint) {
+                throw new IllegalStateException("Confirmed checkpoint exceeds actual WAL tail");
+            }
+            long activeNumber = inspected.segments().getLast().file().number();
+            long tailNumber = inspected.segments().stream()
+                    .filter(segment -> segment.lastEventSeq() > 0)
+                    .reduce((previous, next) -> next).orElseThrow().file().number();
+            int deleted = 0;
+            for (SegmentFacts segment : inspected.segments()) {
+                long number = segment.file().number();
+                if (number == activeNumber || number == tailNumber
+                        || segment.lastEventSeq() > confirmedCheckpoint) {
+                    // 첫 부적격 파일을 건너뛰면 연속 suffix와 미반영 record 보존을 깨뜨림
+                    break;
+                }
+                try {
+                    deleteFile(segment.file().path());
+                } catch (IOException delayed) {
+                    return WalRetentionResult.delayed(deleted, number, WalRetentionResult.DelayKind.IO);
+                } catch (SecurityException delayed) {
+                    return WalRetentionResult.delayed(deleted, number, WalRetentionResult.DelayKind.SECURITY);
+                }
+                deleted++;
+            }
+            return WalRetentionResult.completed(deleted);
+        } catch (IOException | RuntimeException | Error failure) {
+            // 검사 실패·예상 밖 delete 실패만 고장 처리. 이미 삭제된 prefix는 복원하지 않음
+            throw fail(failure);
         }
     }
 
@@ -391,6 +436,10 @@ public class SegmentedWalStorage implements AutoCloseable {
 
     void createDirectories(Path directory) throws IOException {
         Files.createDirectories(directory);
+    }
+
+    void deleteFile(Path path) throws IOException {
+        Files.delete(path);
     }
 
     record SegmentFile(long number, Path path, long size) { }

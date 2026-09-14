@@ -962,7 +962,8 @@ class FlushPersistenceMySqlIntegrationTest {
                 transactionExecutor,
                 pendingAmbiguousFlushStore,
                 flushReconciliationService,
-                dirtyTileTracker
+                dirtyTileTracker,
+                new dev.cgt.pixelplace.flush.application.FlushWalRetention(flushBoundaryCoordinator, serviceReadiness, pendingAmbiguousFlushStore, storage)
         );
 
         return new FreshRuntimeGraph(

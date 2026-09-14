@@ -161,7 +161,8 @@ class OverviewIsolationTest {
                 executor,
                 pendingStore,
                 reconciliation,
-                dirtyTileTracker
+                dirtyTileTracker,
+                mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
         );
 
         assertEquals(FlushRunResult.NO_OP, worker.flushOnce());

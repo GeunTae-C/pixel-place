@@ -26,6 +26,7 @@ public class FlushWorker {
     private final PendingAmbiguousFlushStore pendingAmbiguousFlushStore;
     private final FlushReconciliationService flushReconciliationService;
     private final DirtyTileTracker dirtyTileTracker;
+    private final FlushWalRetention flushWalRetention;
 
     public FlushWorker(
             FlushSingleFlightGuard flushSingleFlightGuard,
@@ -34,7 +35,8 @@ public class FlushWorker {
             FlushTransactionExecutor flushTransactionExecutor,
             PendingAmbiguousFlushStore pendingAmbiguousFlushStore,
             FlushReconciliationService flushReconciliationService,
-            DirtyTileTracker dirtyTileTracker
+            DirtyTileTracker dirtyTileTracker,
+            FlushWalRetention flushWalRetention
     ) {
         this.flushSingleFlightGuard = flushSingleFlightGuard;
         this.serviceReadiness = serviceReadiness;
@@ -43,6 +45,7 @@ public class FlushWorker {
         this.pendingAmbiguousFlushStore = pendingAmbiguousFlushStore;
         this.flushReconciliationService = flushReconciliationService;
         this.dirtyTileTracker = dirtyTileTracker;
+        this.flushWalRetention = flushWalRetention;
     }
 
     /* pending 확인부터 outcome 처리까지 기다림 없는 단일 cycle로 보호하는 scheduler 독립 API */
@@ -70,6 +73,7 @@ public class FlushWorker {
 
         FlushPlan plan = flushPlanCaptureService.capturePlan();
         if (plan.noOp()) {
+            flushWalRetention.retryIfEligible();
             return FlushRunResult.NO_OP;
         }
 
@@ -92,7 +96,11 @@ public class FlushWorker {
         }
 
         return switch (transactionResult.outcome()) {
-            case COMMITTED -> FlushRunResult.COMMITTED;
+            case COMMITTED -> {
+                // executor catch 밖에서 정리하여 확정 commit을 ambiguous/rollback으로 재분류하지 않음
+                flushWalRetention.onCommitConfirmed(plan.flushTargetEventSeq());
+                yield FlushRunResult.COMMITTED;
+            }
             case DEFINITE_ROLLBACK -> failDefiniteRollback(
                     plan,
                     transactionResult.failureCause().orElseGet(
@@ -116,6 +124,7 @@ public class FlushWorker {
         if (decision == FlushReconciliationDecision.COMMIT_CONFIRMED) {
             // target commit에 포함된 pending dirty는 복원하지 않고 exact pending만 폐기
             pendingAmbiguousFlushStore.clearIfSame(pending);
+            flushWalRetention.onCommitConfirmed(pending.flushTargetEventSeq());
             return FlushRunResult.RECONCILED_COMMIT;
         }
 

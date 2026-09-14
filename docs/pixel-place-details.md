@@ -776,7 +776,7 @@ Content-Type: application/json
 ### WAL fail-stop 정책
 - WAL 파일군 검증·읽기·기록·회전 실패는 공유 `SegmentedWalStorage`를 poisoned 상태로 전환한다. 열린 writer와 게시 전 candidate도 정리를 시도한다.
 - write 경로의 RuntimeException은 기존 core가 `ServiceReadiness`를 not-ready로 전환하여 후속 write와 새 plan capture를 차단한다. storage 자체가 readiness를 관리하지 않으며 raw Error도 같은 HTTP 결과라고 보장하지 않는다.
-- poison 이후 append·scan을 파일 접근 전에 차단한다. 같은 프로세스에서 channel reopen, truncate, reset 또는 다른 번호로 우회하지 않는다. 정상 close도 재open 불가능한 종료 상태이며 Spring 종료 소유자는 storage 하나다.
+- poison 이후 append·scan·retention을 파일 접근 전에 차단한다. 같은 프로세스에서 channel reopen, truncate, reset 또는 다른 번호로 우회하지 않는다. 정상 close도 재open 불가능한 종료 상태이며 Spring 종료 소유자는 storage 하나다.
 - 일반 파일 I/O 원인은 보존하되 parser의 RuntimeException은 원문 cause/suppressed를 연결하지 않은 비민감 위치 진단으로 바꾼다. 실패 정리 중 Error가 발생하면 Error를 우선하며 최초 Error가 있다면 그 instance를 유지한다.
 - WAL I/O 실패가 발생한 마지막 요청은 성공으로 응답하지 않지만, 완전한 newline-terminated record가 남았을 가능성이 있으므로 절대 미반영으로 단정하지 않는 unknown outcome이다.
 - 운영자 확인 뒤 서버를 재시작하고 startup recovery로 WAL을 다시 판정한다. partial-line truncate recovery는 현재 구현하지 않는다.
@@ -876,9 +876,11 @@ recovery replay는 `DirtyTileTracker`를 채우지 않는다. 따라서 checkpoi
 
 scan은 모든 파일의 newline·UTF-8·record·전역 eventSeq 순서를 검증한 뒤 checkpoint 초과 record와 마지막 실제 tail을 반환한다. 빈 legacy 단독은 최초 상태로 허용하고, 이전 record가 있는 파일 뒤의 빈 최신 active는 그 이전 실제 tail을 유지한다. 빈 closed나 단독 빈 numbered 파일은 복구 가능한 정상 상태로 채택하지 않는다. 중단 뒤에는 새 storage가 disk를 다시 검사하며 partial line을 자동 truncate하지 않는다.
 
-열거·scan·append·회전·close는 storage의 같은 lock을 사용한다. command는 coordinator → core monitor → storage 순서로 진입하고, plan은 coordinator 안에서 scan부터 memory snapshot까지 유지한다. storage는 DB나 바깥 lock을 호출하지 않는다. stream과 임시 channel은 lock 안에서 닫고 결과만 반환한다. stub은 기존 startup 입력만 대체하며 context 생성·종료가 실제 WAL I/O를 일으키지 않는다.
+열거·scan·append·회전·retention·close는 storage의 같은 lock을 사용한다. command는 coordinator → core monitor → storage 순서로 진입하고, plan은 coordinator 안에서 scan부터 memory snapshot까지 유지한다. 확정 후 retention도 같은 coordinator를 획득해 readiness와 pending을 확인한 뒤 storage로 진입한다. storage는 DB나 바깥 lock을 호출하지 않는다. stream과 임시 channel은 lock 안에서 닫고 결과만 반환한다. stub은 기존 startup 입력만 대체하며 context 생성·종료가 실제 WAL I/O를 일으키지 않는다.
 
-현재 closed segment의 삭제와 flush worker의 retention 호출은 연결하지 않았다. 확정 commit 경계에 따른 정리는 14-B의 범위이며 active·마지막 실제 record와 미반영 record 보존이 선행 조건이다. 전체 파일군 scan 비용은 남아 있고 read-offset 최적화·자동 truncate·parent-directory fsync는 후속 범위다. 파일군은 단일 프로세스가 독점하는 로컬 filesystem을 전제로 하며 디스크 사용량의 절대 상한이나 전원 장애 시 directory entry 내구성을 제공하지 않는다.
+storage는 `WalSegmentRetention`도 직접 구현하므로 appender·reader·정리 port가 한 instance를 공유한다. 정리는 매번 파일군 전체를 같은 scan으로 검증하고 reader를 닫은 뒤, active와 마지막 실제 record가 있는 파일을 제외한 DB 반영 완료 closed prefix만 번호 순서로 삭제한다. 첫 부적격 파일에서 멈추며 파일 일부를 truncate하거나 뒤 파일로 건너뛰지 않는다. 전체 tail보다 확정 checkpoint가 앞서면 삭제 전에 실패한다.
+
+개별 delete의 I/O·권한 오류는 그 지점에서 중단하는 삭제 지연이다. 이미 성공이 확인된 prefix만 결과에 반영하며 실패 syscall이 실제 삭제됐는지는 단정하지 않는다. 다음 호출은 남은 파일군을 다시 열거하므로 정상 suffix를 받아들이고, active 소실·번호 구멍·내용 손상은 계속 거부한다. 예상 밖 파일 실패는 storage를 고장 처리한다. 전체 scan·삭제 동안 write 대기가 늘어나는 비용은 남아 있고 read-offset 최적화·자동 truncate·parent-directory fsync는 후속 범위다. 파일군은 단일 프로세스가 독점하는 로컬 filesystem을 전제로 하며 디스크 사용량의 절대 상한이나 전원 장애 시 directory entry 내구성을 제공하지 않는다.
 
 ## 10) DB flush worker 처리 순서
 
@@ -918,9 +920,9 @@ flush 정확성의 source of truth는 WAL이다. `DirtyTileTracker`는 추가 sn
 `flushTargetEventSeq`는 coordinator boundary 순간의 durable WAL tail로만 확정하며, 현재 memory에서 과거 eventSeq snapshot을 만들 수 없으므로 WAL tail보다 낮은 임의 중간 target을 선택하지 않는다.
 
 ### single-flight guard와 boundary coordinator 책임
-- single-flight guard는 readiness 확인, checkpoint 조회, plan capture, DB transaction, 실패 재등록을 포함한 `flushOnce()` 전체의 중첩 실행을 막는다.
+- single-flight guard는 readiness 확인, checkpoint 조회, plan capture, DB transaction, 실패 재등록과 확정 후 retention을 포함한 `flushOnce()` 전체의 중첩 실행을 막는다.
 - 이미 다른 flush가 실행 중이면 boundary 작업을 시작하기 전에 반환한다.
-- `FlushBoundaryCoordinator`는 write의 `eventSeq` 발급, WAL append + fsync, memory apply, dirty mark와 flush의 WAL scan 및 immutable plan capture 사이의 짧은 boundary만 보호한다.
+- `FlushBoundaryCoordinator`는 write의 `eventSeq` 발급, WAL append + fsync, memory apply, dirty mark와 flush의 WAL scan 및 immutable plan capture, 확정 후 WAL retention을 직렬화한다.
 - DB checkpoint와 tile bootstrap 상태 조회 및 실제 DB I/O는 coordinator 밖에서 수행하되 single-flight guard는 flush 종료까지 유지한다.
 - readiness 1차 또는 coordinator 내부 2차 검사가 not-ready면 새로운 plan을 만들지 않는다.
 - ready 상태에서 immutable plan capture를 마친 뒤 발생한 후속 fatal은 기존 plan을 취소하지 않으며, 그 plan은 capture한 `flushTargetEventSeq`까지만 transaction을 완료할 수 있다.
@@ -937,7 +939,12 @@ flush 정확성의 source of truth는 WAL이다. `DirtyTileTracker`는 추가 sn
 9. coordinator 밖에서 `pixel_events`, captured `tiles`, conditional checkpoint advance를 `REQUIRES_NEW` physical transaction 하나로 실행한다.
 10. transaction 시작 실패 또는 body 실패 뒤 rollback 완료가 확인된 경우만 definite rollback이며 실제 drained dirty를 restore한다.
 11. commit 호출 중 실패, rollback 완료 미확인, executor의 예기치 않은 실패와 invalid result는 ambiguous outcome으로 처리한다.
-12. 모든 성공·실패·raw Error 경로에서 single-flight guard를 해제한다.
+12. COMMITTED는 plan target을 정리 허가로 전달한다. exact reconciliation의 COMMIT_CONFIRMED는 pending clear 성공 뒤에만 pending target을 전달한다. pending 없는 no-op은 같은 프로세스의 기존 허가로 재시도한다.
+13. 모든 성공·실패·raw Error 경로에서 single-flight guard를 해제한다.
+
+`FlushWalRetention`은 확정 경계를 메모리에만 보관하며 같은 값의 재전달을 허용한다. DB checkpoint 조회·plan expected 값으로 허가를 만들지 않으므로 새 프로세스에서는 첫 확정 commit/reconciliation까지 no-op 정리가 없다. 허가가 있어도 coordinator 안에서 not-ready 또는 pending 존재를 확인하면 파일 접근을 보류한다. 이 보류는 이미 안전하게 capture한 plan의 확정 commit을 취소하지 않는다.
+
+정리는 executor를 감싼 transaction catch 밖에서 실행한다. 단순 삭제 지연과 경고 logger의 RuntimeException은 기존 COMMITTED·RECONCILED_COMMIT·NO_OP 결과를 유지한다. 경고 logger Error는 그대로 전파한다. 검사·허가값·pending 확인 실패는 fatal-not-ready 후 전파하며, 이미 확정된 DB outcome과 정리된 dirty/pending 소유권은 바꾸지 않는다. rollback·ambiguous 미해결·pending 설치 확인 불가·clear 실패·single-flight skip에서는 정리를 호출하지 않는다.
 
 ### 실패 시 처리 원칙
 - `pixel_events`, `tiles`, checkpoint는 반드시 하나의 transaction으로 처리한다.
@@ -1195,7 +1202,7 @@ not-ready 전환 이후에는 새로운 flush plan의 시작과 capture를 금�
 서비스가 ready이고 flush가 허용되는 상태라면 durable WAL tail까지의 모든 성공 WAL record가 memory에 반영되어 있어야 한다. WAL fsync 뒤 memory apply 실패는 이 불변식을 깨므로 fatal이며, not-ready 상태에서 WAL tail과 memory의 불일치를 감춘 새 plan을 만들지 않는다.
 
 ### WAL 전체 스캔의 MVP 한계
-현재 startup recovery와 runtime flush는 같은 storage로 남은 WAL 파일군 전체를 처음부터 끝까지 scan한다. 크기 회전은 연결됐으며 closed segment 정리, WAL read offset과 자동 truncate는 아직 연결하지 않았다.
+현재 startup recovery와 runtime flush는 같은 storage로 남은 WAL 파일군 전체를 처음부터 끝까지 scan한다. 크기 회전과 확정 commit 뒤 closed prefix 정리는 연결됐으며, 정리도 전체 검사 후 수행한다. WAL read offset과 자동 truncate는 아직 연결하지 않았다.
 
 ### WAL record가 없는 경우
 checkpoint 이후 실제 WAL record가 없으면 dirty tracker 상태와 무관하게 checkpoint를 전진시키지 않는다. bootstrap-pending이어도 dirty drain과 DB write 없이 no-op plan만 만들고 coordinator 밖에서 반환하며 DB `tiles`는 0 rows로 유지한다.
@@ -1336,7 +1343,6 @@ WebSocket broadcast나 overview 성공 여부를 checkpoint 조건에 포함하�
 현재 flush/recovery MVP는 다음을 구현하지 않는다.
 
 ```text
-WAL closed segment retention 연결
 WAL archive/index/offset/truncate
 group commit
 partial WAL line 자동 복구
@@ -1387,7 +1393,7 @@ single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application i
 - DB = `pixel_events`, `tiles`, checkpoint를 하나의 transaction으로 따라가는 후행 저장소
 - DB tile bootstrap = 최초 non-no-op transaction에서 canonical z=0 전체 1,024 rows 원자 형성
 - single-flight guard = `flushOnce()` 전체 중첩 방지
-- FlushBoundaryCoordinator = write와 WAL scan/snapshot capture 사이의 짧은 boundary 보호
+- FlushBoundaryCoordinator = write와 WAL scan/snapshot capture 및 확정 후 retention의 boundary 보호
 - flush worker = WAL 기준 immutable plan을 capture하고 DB checkpoint를 안전하게 전진시키는 작업
 
 ## 11) 현재 flush/recovery 구현 구조
@@ -1458,7 +1464,7 @@ overview/web
 - DataSource/JPA auto-configuration과 Spring Data repository
 - recovery 입력 외의 production bean
 
-따라서 `stub`은 DB/Redis/WAL이 없는 전체 application profile이 아니다. 다만 `FlushScheduler`, `FlushSchedulingConfiguration`, `FlushWorker`, persistence/reconciliation runtime bean은 `!stub`으로 비활성화된다. 외부 인프라가 없는 제한 context 테스트는 recovery adapter bean 선택만 검증하고 adapter의 DB/WAL 메서드를 호출하지 않는다.
+따라서 `stub`은 DB/Redis/WAL이 없는 전체 application profile이 아니다. 다만 `FlushScheduler`, `FlushSchedulingConfiguration`, `FlushWorker`, `FlushWalRetention`, persistence/reconciliation runtime bean은 `!stub`으로 비활성화된다. 외부 인프라가 없는 제한 context 테스트는 recovery adapter bean 선택만 검증하고 adapter의 DB/WAL 메서드를 호출하지 않는다.
 
 ### runtime 소비자 안전장치
 

@@ -7,7 +7,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 /*
- * write core+dirty mark와 WAL scan+snapshot capture 사이의 짧은 JVM boundary 직렬화 담당
+ * write core+dirty mark, WAL scan+snapshot capture, 확정 뒤 WAL retention의 JVM boundary 직렬화 담당
  * DB I/O나 flush single-flight 책임은 갖지 않으며 기본 non-fair lock만 사용
  */
 @Component
