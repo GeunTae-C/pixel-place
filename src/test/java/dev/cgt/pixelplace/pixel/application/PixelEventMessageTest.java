@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class PixelEventMessageTest {
 
     @Test
-    void fromCreatesPixelEventMessageWithoutTileVersion() {
+    void fromCreatesPixelEventMessageWithResultTileVersion() {
         PixelWriteResult result = new PixelWriteResult(
                 10L,
                 new TileKey(BoardConstants.Z0_LEVEL, 3, 5),
@@ -31,7 +31,8 @@ class PixelEventMessageTest {
                 () -> assertEquals(result.x(), message.x()),
                 () -> assertEquals(result.y(), message.y()),
                 () -> assertEquals(result.color(), message.color()),
-                () -> assertEquals(result.eventSeq(), message.eventSeq())
+                () -> assertEquals(result.eventSeq(), message.eventSeq()),
+                () -> assertEquals(result.tileVersion(), message.tileVersion())
         );
     }
 }

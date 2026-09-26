@@ -55,10 +55,21 @@ dependencies {
 }
 
 tasks.named('test') {
-    // 외부 MySQL이 필요한 검증은 전용 task로 분리
+    // 외부 저장소가 필요한 검증은 전용 task로 분리
     useJUnitPlatform {
-        excludeTags 'mysql-integration'
+        excludeTags 'mysql-integration', 'redis-integration'
     }
+}
+
+tasks.register('redisIntegrationTest', Test) {
+    description = '격리된 localhost Redis DB 기반 동시 사용자 gate 검증'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform {
+        includeTags 'redis-integration'
+    }
+    shouldRunAfter tasks.named('test')
 }
 
 tasks.register('mysqlIntegrationTest', Test) {
@@ -75,4 +86,55 @@ tasks.register('mysqlIntegrationTest', Test) {
 
     // 두 task를 함께 요청한 경우 일반 테스트 이후 실행
     shouldRunAfter tasks.named('test')
+    shouldRunAfter tasks.named('redisIntegrationTest')
+    // 이번 최종 회귀에만 사용자 지정 E: 인스턴스 연결 주입. 기본 profile과 catalog guard 보존
+    if (providers.gradleProperty('phase15MySqlRegression').isPresent()) {
+        if (providers.gradleProperty('phase15MySqlRegression').get() != '3307') {
+            throw new GradleException('Prepared phase15 MySQL port must be 3307')
+        }
+        systemProperty 'spring.datasource.url', 'jdbc:mysql://127.0.0.1:3307/pixel_place_test?serverTimezone=Asia/Seoul&characterEncoding=UTF-8'
+    }
+}
+
+// 실제 앱과 별도 발생기 JVM만 포함. devtools·JUnit·Mockito 역의존 금지
+// 명시한 측정/검증 실행에서만 build output 이동. 기존 앱·회귀 DB 연결 설정은 유지
+if (providers.gradleProperty('phase15BuildRoot').isPresent()) {
+    layout.buildDirectory = file(providers.gradleProperty('phase15BuildRoot').get())
+}
+if (providers.gradleProperty('phase15TempRoot').isPresent()) {
+    tasks.withType(Test).configureEach {
+        systemProperty 'java.io.tmpdir', providers.gradleProperty('phase15TempRoot').get()
+    }
+}
+sourceSets {
+    benchmark {
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+configurations {
+    benchmarkImplementation.extendsFrom implementation
+    benchmarkRuntimeOnly.extendsFrom runtimeOnly
+}
+sourceSets.test.compileClasspath += sourceSets.benchmark.output
+sourceSets.test.runtimeClasspath += sourceSets.benchmark.output
+tasks.named('compileTestJava') { dependsOn tasks.named('benchmarkClasses') }
+
+tasks.register('phase15Benchmark', JavaExec) {
+    description = '격리된 15-A trial 또는 새 JVM recovery 대조'
+    group = 'verification'
+    dependsOn tasks.named('classes'), tasks.named('compileBenchmarkJava'), tasks.named('processBenchmarkResources')
+    classpath = sourceSets.benchmark.runtimeClasspath
+    mainClass = 'dev.cgt.benchmark.Phase15BenchmarkMain'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+    maxHeapSize = '2g'
+    if (providers.gradleProperty('phase15TempRoot').isPresent()) {
+        systemProperty 'java.io.tmpdir', providers.gradleProperty('phase15TempRoot').get()
+    }
+    jvmArgs '-XX:+UseG1GC', '-Djdk.httpclient.disableRetryConnect=true', '-Djdk.httpclient.enableAllMethodRetry=false'
+    doFirst {
+        if (classpath.files.any { it.name =~ /(?i)(devtools|junit|mockito)/ }) {
+            throw new GradleException('Benchmark runtime contains a forbidden development/test dependency')
+        }
+    }
 }

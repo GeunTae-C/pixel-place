@@ -1,13 +1,9 @@
 package dev.cgt.pixelplace.pixel.websocket;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
-
-import java.io.IOException;
 
 /*
  * /ws raw WebSocket lifecycle 처리
@@ -15,8 +11,6 @@ import java.io.IOException;
  */
 @Component
 public class PixelWebSocketHandler extends TextWebSocketHandler {
-
-    private static final Logger log = LoggerFactory.getLogger(PixelWebSocketHandler.class);
 
     private final PixelWebSocketSessionRegistry sessionRegistry;
 
@@ -48,16 +42,6 @@ public class PixelWebSocketHandler extends TextWebSocketHandler {
      */
     @Override
     public void handleTransportError(WebSocketSession session, Throwable exception) {
-        sessionRegistry.remove(session);
-
-        if (!session.isOpen()) {
-            return;
-        }
-
-        try {
-            session.close();
-        } catch (IOException closeException) {
-            log.warn("Pixel WebSocket session close failed. sessionId={}", session.getId(), closeException);
-        }
+        sessionRegistry.terminate(session, exception);
     }
 }

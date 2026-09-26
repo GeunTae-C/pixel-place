@@ -75,9 +75,9 @@ class OverviewStartupRecoveryTest {
                 board,
                 eventSeqManager,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         OverviewRenderer renderer = spy(new OverviewRenderer(board, canonicalKeys));
-        OverviewService overviewService = new OverviewService(renderer, readiness);
+        OverviewService overviewService = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         RecordingTaskScheduler taskScheduler = new RecordingTaskScheduler();
         OverviewScheduler overviewScheduler = new OverviewScheduler(overviewService, taskScheduler);
 
@@ -120,9 +120,9 @@ class OverviewStartupRecoveryTest {
                 board,
                 new EventSeqManager(),
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         OverviewRenderer renderer = mock(OverviewRenderer.class);
-        OverviewService overviewService = new OverviewService(renderer, readiness);
+        OverviewService overviewService = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         RecordingTaskScheduler taskScheduler = new RecordingTaskScheduler();
         OverviewScheduler scheduler = new OverviewScheduler(overviewService, taskScheduler);
 
@@ -159,7 +159,7 @@ class OverviewStartupRecoveryTest {
                 board,
                 new EventSeqManager(),
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         new StartupRecoveryRunner(recoveryService).run(mock(ApplicationArguments.class));
 
         byte[] recoveredPng = {1, 2, 3};
@@ -167,7 +167,7 @@ class OverviewStartupRecoveryTest {
         when(renderer.render())
                 .thenThrow(new IllegalStateException("first refresh failed"))
                 .thenReturn(recoveredPng);
-        OverviewService overviewService = new OverviewService(renderer, readiness);
+        OverviewService overviewService = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         RecordingTaskScheduler taskScheduler = new RecordingTaskScheduler();
         OverviewScheduler scheduler = new OverviewScheduler(overviewService, taskScheduler);
 

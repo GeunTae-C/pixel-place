@@ -48,6 +48,7 @@ class TileControllerTest {
                 .andExpect(content().contentType(MediaType.APPLICATION_OCTET_STREAM))
                 .andExpect(header().string(HttpHeaders.CONTENT_ENCODING, "gzip"))
                 .andExpect(header().string("X-Tile-Version", "7"))
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
                 .andReturn();
 
         byte[] decompressed = gunzip(result.getResponse().getContentAsByteArray());

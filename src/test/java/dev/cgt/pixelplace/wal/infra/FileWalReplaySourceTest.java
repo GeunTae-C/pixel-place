@@ -211,7 +211,7 @@ class FileWalReplaySourceTest {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
         return new FileWalReplaySource(new SegmentedWalStorage(properties, parser,
-                new dev.cgt.pixelplace.wal.application.WalRecordJsonCodec(new ObjectMapper())));
+                new dev.cgt.pixelplace.wal.application.WalRecordJsonCodec(new ObjectMapper()), dev.cgt.pixelplace.measurement.Measurements.disabled()));
     }
 
     private void writeTerminatedRecords(Path wal, long... eventSeqs) throws IOException {

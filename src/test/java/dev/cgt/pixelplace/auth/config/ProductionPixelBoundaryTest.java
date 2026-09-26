@@ -45,10 +45,35 @@ class ProductionPixelBoundaryTest {
         final InMemoryTileBoard board=spy(new InMemoryTileBoard());
         final DirtyTileTracker dirty=mock(DirtyTileTracker.class);
         final PixelBroadcastService broadcast=mock(PixelBroadcastService.class);
-        final PixelWriteService core=spy(new PixelWriteService(sequence,wal,board,readiness));
-        final PixelCommandService command=spy(new PixelCommandService(cooldown,new FlushBoundaryCoordinator(),core,dirty,broadcast,readiness));
+        final PixelWriteService core=spy(new PixelWriteService(sequence,wal,board,readiness, dev.cgt.pixelplace.measurement.Measurements.disabled()));
+        final PixelUserWriteGate gate = new PixelUserWriteGate();
+        final PixelCommandService command=spy(new PixelCommandService(cooldown,
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled()), core, dirty, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled()),
+                broadcast,
+                readiness,
+                gate,
+                dev.cgt.pixelplace.measurement.Measurements.disabled()));
         Assembly(){when(redis.opsForValue()).thenReturn(values);readiness.markReady();}
         void clear(){clearInvocations(command,core,cooldown,sequence,wal,board,dirty,broadcast,redis,values);}
+    }
+    @Test
+    // production 인증→실제 gate interrupt→controller 503이며 Redis/core 진입 없음
+    void authenticatedBusyWriteMapsTo503WithoutInventedCooldownTtl() {
+        ProductionAuthTestSupport.runner().withUserConfiguration(Fixture.class).run(c -> {
+            var mvc = MockMvcBuilders.webAppContextSetup(c).apply(springSecurity()).build();
+            var a = c.getBean(Assembly.class); a.clear();
+            var token = c.getBean(ServiceJwtTokens.class).issueAccess(42).getTokenValue();
+            Thread.currentThread().interrupt();
+            try {
+                mvc.perform(post("/api/pixels").header("Authorization", "Bearer " + token)
+                                .contentType(MediaType.APPLICATION_JSON).content("{\"x\":1,\"y\":2,\"color\":3}"))
+                        .andExpect(status().isServiceUnavailable())
+                        .andExpect(jsonPath("$.message").value(PixelWriteBusyException.MESSAGE))
+                        .andExpect(jsonPath("$.remainingMillis").doesNotExist());
+                assertTrue(Thread.currentThread().isInterrupted());
+                verifyNoInteractions(a.redis, a.core, a.sequence, a.wal, a.board, a.dirty, a.broadcast);
+            } finally { Thread.interrupted(); }
+        });
     }
     @Test void verifiedInternalIdFlowsThroughCommandRedisAndWalDespiteAttackerHeader() {
         ProductionAuthTestSupport.runner().withUserConfiguration(Fixture.class).run(c->{
@@ -89,7 +114,7 @@ class ProductionPixelBoundaryTest {
             verifyNoInteractions(a.command,a.core,a.wal,a.dirty,a.redis);
         });
     }
-    @Test void missingFieldsStopAtControllerButRangeErrorsReachCoreBeforeAnyWriteMutation() {
+    @Test void missingFieldsStopAtControllerAndRangeErrorsStopAfterRedisBeforeExecutor() {
         ProductionAuthTestSupport.runner().withUserConfiguration(Fixture.class).run(c->{
             var mvc=MockMvcBuilders.webAppContextSetup(c).apply(springSecurity()).build();var a=c.getBean(Assembly.class);
             var token=c.getBean(ServiceJwtTokens.class).issueAccess(42).getTokenValue();a.clear();
@@ -100,7 +125,7 @@ class ProductionPixelBoundaryTest {
                 a.clear();
                 mvc.perform(post("/api/pixels").header("Authorization","Bearer "+token).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"x\":"+v[0]+",\"y\":"+v[1]+",\"color\":"+v[2]+"}")).andExpect(status().isBadRequest());
-                verify(a.command).writePixel(42,v[0],v[1],v[2]);verify(a.core).writePixel(42,v[0],v[1],v[2]);
+                verify(a.command).writePixel(42,v[0],v[1],v[2]);verifyNoInteractions(a.core);
                 verify(a.cooldown).checkWritable(42);verify(a.cooldown,never()).startCooldown(anyLong());
                 verifyNoInteractions(a.sequence,a.wal,a.board,a.dirty,a.broadcast,a.values);
             }

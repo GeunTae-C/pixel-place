@@ -428,7 +428,7 @@ class FileWalAppenderTest {
     private FileWalAppender appender(Path activeFile) {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
-        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper)));
+        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled()), dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 
     private FileWalAppender controlledAppender(
@@ -439,7 +439,7 @@ class FileWalAppenderTest {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
 
-        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper)) {
+        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled()) {
             @Override
             FileChannel openFileChannel(Path ignored, StandardOpenOption... options) {
                 openCount.incrementAndGet();
@@ -455,7 +455,7 @@ class FileWalAppenderTest {
                 when(attributes.size()).thenReturn(size);
                 return attributes;
             }
-        });
+        }, dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 
     private FileChannel writableChannel() throws IOException {
@@ -491,7 +491,7 @@ class FileWalAppenderTest {
     private FileWalReplaySource replaySource(Path activeFile) {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
-        return new FileWalReplaySource(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper)));
+        return new FileWalReplaySource(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled()));
     }
 
     private WalRecord record(long eventSeq) {

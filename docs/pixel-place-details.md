@@ -67,10 +67,10 @@
 | 기능/API | protocol | HTTP method | 실제 route pattern | 현재 지원 범위 | request path variable | request query | request header | request body 또는 client message | 성공 status 또는 handshake 결과 | 실패 status | response body 또는 server payload | response header | Content-Type | Content-Encoding | application-level 사용자 식별 | 현재 security filter 상태 | readiness 적용 여부 | 현재 production 구현 여부 | 문서상 최종 목표 | 현재 구현과 최종 목표의 차이 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Board | HTTP | GET | `/api/board` | 고정 z=0 보드 메타 | 없음 | 없음 | 없음 | 없음 | `200` | readiness `503`; 내부 `500` 계열; 제한 slice unauth JSON `401`, HTML `302` | 8개 `BoardInfoResponse` 필드 JSON | 커스텀 response header 없음 | `application/json` | 없음 | 없음 | 명시적 chain 없음; Board 제한 slice에서 Basic `401`/login `302` 확인 | MVC guard 적용 | 구현 | 최종 `permitAll` | 현재 기본 Security 관측과 최종 공개 계약 불일치; 전체 app 결과 미검증 |
-| Tile | HTTP | GET | `/api/tiles/{z}/{tx}/{ty}` | `z=0`, `tx/ty=0..31`; `/api/tiles/0/{tx}/{ty}`는 구체적 호출 | `z`, `tx`, `ty` | 없음 | 없음 | 없음 | `200` | 범위 `400`; readiness `503`; 내부 `500` 계열 | 성공: gzip palette index bytes; 400 및 readiness 503: `message` JSON; 내부 500 body: Spring 기본 처리; Security 오류 body: 실제 Tile endpoint 미검증 | 성공: `X-Tile-Version`; 오류 응답 header는 경로별 상이하며 Security 응답은 실제 Tile endpoint 미검증 | 성공: `application/octet-stream` | 성공: `gzip` | 없음 | 명시적 chain 없음; 실제 endpoint unauth 응답 미검증 | `/api/tiles/**` MVC guard 적용 | 구현 | 최종 `permitAll`; 조건부 cache | 현재 z=0만 지원; ETag/If-None-Match/Cache-Control/304 미구현 |
+| Tile | HTTP | GET | `/api/tiles/{z}/{tx}/{ty}` | `z=0`, `tx/ty=0..31`; `/api/tiles/0/{tx}/{ty}`는 구체적 호출 | `z`, `tx`, `ty` | 없음 | 없음 | 없음 | `200` | 범위 `400`; readiness `503`; 내부 `500` 계열 | 성공: gzip palette index bytes; 400 및 readiness 503: `message` JSON; 내부 500 body: Spring 기본 처리; Security 오류 body: 실제 Tile endpoint 미검증 | 성공: `X-Tile-Version`; 오류 응답 header는 경로별 상이하며 Security 응답은 실제 Tile endpoint 미검증 | 성공: `application/octet-stream` | 성공: `gzip` | 없음 | 명시적 chain 없음; 실제 endpoint unauth 응답 미검증 | `/api/tiles/**` MVC guard 적용 | 구현 | 최종 `permitAll`; 조건부 cache | 현재 z=0만 지원; Cache-Control: no-store; ETag/If-None-Match/304 미구현 |
 | Overview | HTTP | GET | `/api/overview` | 인메모리 z=0 보드의 고정 2048×2048 PNG | 없음 | 없음 | 없음 | 없음 | `200` | no-image/readiness `503`; 내부 `500` 계열; 제한 slice unauth JSON `401`, HTML `302` | 성공: 완전한 PNG bytes; no-image/readiness: `message` JSON | 성공: `Cache-Control: no-cache` | 성공: `image/png` | 없음 | 없음 | 명시적 chain 없음; Overview 제한 slice에서 Basic `401`/login `302` 확인 | `/api/overview` MVC guard 적용 | 구현 | 최종 `permitAll` | 현재 기본 Security와 최종 공개 계약 불일치; 전체 app 결과 미검증 |
 | Pixel | HTTP | POST | `/api/pixels` | `x/y=0..8191`, `color=0..255`, `userId>0` | 없음 | 없음 | `X-User-Id`, JSON content type | `x`, `y`, `color` JSON | `200` | validation/binding `400`; cooldown `429`; readiness/cooldown check `503`; 최초 fatal/내부 오류 `500` 계열; Security 응답 미검증 | 성공 `accepted`, `eventSeq`, `x`, `y`, `color`, `tileVersion`; 오류 형식은 경로별 상이 | 커스텀 response header 없음 | `application/json` | 없음 | 임시 `X-User-Id`; 실제 인증 아님 | 명시적 chain 없음; Pixel filter/binding 우선순위 미검증 | MVC guard + command/core 재검사 | 구현 | 카카오 OAuth2 + Bearer Access JWT principal, authenticated | X-User-Id 교체와 공통 오류 형식 필요 |
-| WebSocket | WebSocket(JSON) | GET (HTTP Upgrade handshake) | `/ws` | server→client 단건 pixel diff | 해당 없음 | 해당 없음 | 표준 Upgrade handshake header; application 인증 header 계약 없음 | client message 계약 없음 | 실제 handshake 결과 미검증 | 실제 handshake 실패 status 미검증 | 현재 `{type,x,y,color,eventSeq}` 단건 JSON | 실제 handshake response header 미검증 | 해당 없음 | 해당 없음 | 없음 | 명시적 chain 없음; 제한 진단에 config/handler 미포함 | MVC readiness interceptor 미적용; 기존 session 강제 종료 없음 | 단건 broadcast 구현 | 최종 인증/handshake 확정; batch/order/send 직렬화 | 실제 handshake와 최종 인증 미확정; 후속 보강 미구현 |
+| WebSocket | WebSocket(JSON) | GET (HTTP Upgrade handshake) | `/ws` | server→client 단건 pixel diff | 해당 없음 | 해당 없음 | 표준 Upgrade handshake header; application 인증 header 계약 없음 | client message 계약 없음 | `101` | Origin 거부 `403`; 잘못된 handshake `400` | 현재 `{type,x,y,color,eventSeq,tileVersion}` 단건 JSON | 표준 Upgrade 응답 | 해당 없음 | 해당 없음 | 없음 | 13단계 공개 endpoint·공용 Origin 정책 | MVC readiness interceptor 미적용; not-ready로 기존 session 강제 종료 없음 | 단건 broadcast·공용 wrapper·native 전송 제한 | 후속 batch/order 최적화 | production 프론트 재동기화 연결은 19단계 |
 
 ### API별 상세 계약
 
@@ -170,6 +170,7 @@ GET /api/tiles/0/3/5
 ```http
 Content-Type: application/octet-stream
 Content-Encoding: gzip
+Cache-Control: no-store
 X-Tile-Version: 12
 ```
 
@@ -179,7 +180,7 @@ X-Tile-Version: 12
     - DB `tiles.tile_version`은 마지막 flush snapshot version이므로 항상 같지는 않음
 
 #### 후속 cache 목표
-- `ETag`, `If-None-Match`, `Cache-Control`, `304 Not Modified`는 현재 미구현이다.
+- 현재 `Cache-Control: no-store`로 재연결 snapshot의 과거 HTTP 캐시 사용을 막는다. `ETag`, `If-None-Match`, `304 Not Modified`는 미구현이다.
 - `X-Tile-Size`도 현재 응답에 없다.
 
 #### tileVersion
@@ -282,12 +283,15 @@ Content-Type: application/json
 - 현재 DTO에 `cooldownRemainingMs`는 없다.
 
 #### Redis 쿨다운 동작 확정
+- command 사전 readiness/userId 검사 뒤 `PixelUserWriteGate`를 획득하고 readiness를 재검사한다. gate 안에 Redis 검사 → 기존 coordinator의 core/dirty → 성공 후 cooldown 저장을 두고, gate 해제 뒤 broadcast를 시도한다.
+- gate entry는 holder·대기자의 참조를 함께 보존하고 unlock 뒤 마지막 참조가 반환될 때 제거한다. 사용자 간 진입은 독립적이며 timeout·interrupt는 Redis/core 호출 전 busy `503`으로 종료한다. 대기 한도는 callback의 WAL I/O 강제 종료 시간이 아니다.
 - 키 형식은 `cooldown:user:{userId}` 이다.
 - `PTTL > 0` 이면 아직 쿨다운 중이므로 요청을 거부한다.
 - 키가 없거나 TTL이 만료된 경우 요청을 진행한다.
 - core write와 dirty mark 뒤에 `180초` TTL 설정을 시도한다.
 - write 전 cooldown 확인 실패는 `503`이지만 core write 뒤 cooldown start 실패는 완료 write를 취소하지 않고 warning 뒤 성공 응답을 유지한다.
 - 유효성 오류 등 승인되지 않은 write에는 쿨다운을 부여하지 않는다.
+- 성공 후 Redis 저장 실패를 보완하는 로컬 cooldown 캐시는 없으며, 후속 요청은 실제 Redis 상태와 readiness에 따라 처리한다.
 
 #### 인증 관련 확정
 - 현재 `X-User-Id`도 body에 넣지 않는다.
@@ -346,7 +350,8 @@ Content-Type: application/json
   "x": 100,
   "y": 200,
   "color": 17,
-  "eventSeq": 12345
+  "eventSeq": 12345,
+  "tileVersion": 991
 }
 ```
 
@@ -369,8 +374,10 @@ Content-Type: application/json
 
 #### 확정 사항
 - 현재 wire field는 내부 개념과 같은 **`eventSeq`** 다.
-- `seq` 필드와 `tileVersion`은 현재 payload에 없다.
-- batch broadcast, 전역 broadcast 순서 보장, session별 send 직렬화는 후속 보강이다.
+- `seq` 별칭은 없으며 `tileVersion`은 동일 `PixelWriteResult`의 mutation 직후 버전이다. broadcast 시점의 board를 다시 읽지 않는다.
+- registry가 session ID별 공용 `ConcurrentWebSocketSessionDecorator` 하나를 소유한다. snapshot은 wrapper만 반환하며 raw/wrapper callback은 현재 entry identity로 제거하므로 이전 연결의 지연 오류가 새 연결을 지우지 않는다.
+- 등록 전 실제 Tomcat native session의 userProperties에 blocking send timeout을 적용한다. native 설정 실패는 게시 없이 close·실패 보고로 끝낸다. wrapper의 경쟁 send 시간/버퍼 제한과 단독 native send 제한은 서로 다른 경계이며 무음 DROP은 사용하지 않는다.
+- batch broadcast와 전역 도착 순서 보장은 추가하지 않는다. 동기 fan-out 전체 지연은 session 수에 영향을 받으며 전체 작업의 고정 deadline을 보장하지 않는다.
 
 #### 운영 방식 확정
 - 단일 서버 기준 서버 메모리 broadcast를 사용한다.
@@ -378,11 +385,15 @@ Content-Type: application/json
 - core write 완료에는 memory apply 성공이 필요하고, 현재 HTTP `200` 성공 응답에는 command 계약상 dirty mark 성공까지 필요하다.
 - WebSocket broadcast 실패는 write rollback 사유가 아니다.
 - 개별 session send 실패는 해당 session을 registry에서 제거하고 다른 session 전송을 계속한다.
+- IOException·RuntimeException 및 전송 제한 초과는 제거·close 뒤 다음 session으로 진행한다. 직렬화 실패는 미리 확보한 전체 snapshot 연결을 종료한 뒤 원래 실패를 전파한다. close/logging의 통상 실패는 원인을 가리지 않으며 raw Error는 최소 정리 후 identity를 보존해 전파한다.
 - command 경계의 broadcast 실패는 로그만 남기며 클라이언트는 이후 타일 재동기화 로직으로 정합성을 회복한다.
 
 #### 클라이언트 처리 원칙
-- diff 수신 시 해당 픽셀만 즉시 반영
-- `eventSeq` gap 감지 시 관련 타일 재요청
+- WS 연결·수신 buffer 준비 뒤 필요한 Tile snapshot을 GET하고 bytes와 응답 version을 같은 쌍으로 설치한다.
+- 타일 snapshot 기준 B 이하 이벤트는 제외하고, B보다 큰 이벤트는 픽셀별 마지막 적용 version보다 클 때만 반영한다. 다른 픽셀의 큰 version이나 전역 eventSeq 최댓값으로 필터링하지 않는다.
+- 초기 GET 중 buffer와 재조회 중 이미 적용된 이벤트 journal을 새 snapshot 위에 재병합한다. 타일별 요청 generation과 연결 epoch가 지난 응답은 폐기한다.
+- journal은 보이는 타일당 픽셀별 최신 이벤트 65,536개, 활성 타일은 보드의 1,024개 한도다. 타일 해제·연결 전환 시 정리하고 종료/transport 오류 이후 새 연결과 snapshot 설치 전까지 stale로 취급한다.
+- eventSeq gap만으로 누락을 확정하지 않는다. 현재 Java test-only 수신 모델이 계약을 검증하며 production 프론트·인터넷 단절 감지·재시도 UI와 추가 buffer 정책은 19단계에서 연결한다.
 
 ---
 
@@ -421,26 +432,26 @@ Content-Type: application/json
 2. MVC readiness guard 확인
 3. controller의 `X-User-Id`/body binding과 `requiredX()`/`requiredY()`/`requiredColor()` 누락 검사
 4. `PixelCommandService` 진입 직후 readiness 재검사
-5. userId 검증과 Redis `cooldown:user:{userId}` 확인
+5. userId 검증 → 사용자 gate 획득 → readiness 재검사 → Redis `cooldown:user:{userId}` 확인. gate 실패는 busy `503`
 6. `PTTL > 0`이면 `429`로 종료
-7. `PixelWriteService`의 `synchronized` 진입 직후 readiness 재검사
+7. 기존 coordinator 안에서 `PixelWriteService`의 `synchronized` 진입 직후 readiness 재검사
 8. core에서 userId/좌표/색상 범위 재검증
 9. `AtomicLong`으로 `eventSeq` 발급
 10. `(x, y)`에서 `tx`/`ty`를 계산하면서 WAL record 생성
 11. WAL append와 요청 단위 fsync로 1차 내구성 경계 확보
 12. 메모리 타일 상태 반영과 `tileVersion++`
 13. dirty 타일 표시 성공 뒤에만 현재 HTTP `200` 성공 조건 확정
-14. Redis cooldown 시작과 WebSocket broadcast 후처리. 실패해도 완료 write 유지
+14. coordinator 해제 → gate 안에서 Redis cooldown 저장 시도 → gate 해제 → WebSocket broadcast. 통상 후처리 실패에도 완료 write 유지
 15. `accepted`, `eventSeq`, `x`, `y`, `color`, `tileVersion` HTTP `200` 응답 반환
 16. default runtime의 1초 fixed-delay scheduler가 `FlushWorker.flushOnce()`를 호출해 DB를 후행 반영
 
 ---
 
 ### `/ws`
-1. 현재 security filter를 통과한 클라이언트 연결. 실제 handshake 결과는 미검증
-2. 서버는 단일 서버 메모리 기반으로 픽셀 변경 이벤트를 broadcast
-3. 클라이언트는 diff를 즉시 적용
-4. `eventSeq` gap 또는 누락이 감지되면 관련 타일을 재요청해 재동기화
+1. 공개 handshake의 기존 Origin 정책을 확인하고 native 제한을 설정한 session을 공용 wrapper로 등록
+2. command의 gate/coordinator 밖에서 해당 mutation 결과를 단건 JSON으로 broadcast
+3. 전송 실패 연결은 제거·close하고, 수신 측은 위 snapshot/version 계약으로 역순 이벤트를 병합
+4. 연결 종료 시 stale 처리 후 새 연결과 Tile snapshot으로 재동기화
 
 ---
 
@@ -819,16 +830,16 @@ GET /api/tiles/**
 2. MVC readiness guard 확인
 3. controller의 `X-User-Id`/body binding과 `requiredX()`/`requiredY()`/`requiredColor()` 누락 검사
 4. `PixelCommandService` 진입 직후 readiness 재검사
-5. userId 검증과 Redis `cooldown:user:{userId}` 확인
+5. userId 검증 → 사용자 gate 획득 → readiness 재검사 → Redis `cooldown:user:{userId}` 확인. gate 실패는 busy `503`
 6. `PTTL > 0`이면 `429`로 종료
-7. `PixelWriteService`의 `synchronized` 진입 직후 readiness 재검사
+7. 기존 coordinator 안에서 `PixelWriteService`의 `synchronized` 진입 직후 readiness 재검사
 8. core에서 userId/좌표/색상 범위 재검증
 9. `AtomicLong`으로 `eventSeq` 발급
 10. `(x, y)`에서 `tx`/`ty`를 계산하면서 WAL record 생성
 11. WAL append와 요청 단위 fsync로 1차 내구성 경계 확보
 12. 메모리 타일 상태 반영과 `tileVersion++`
 13. dirty 타일 표시 성공 뒤에만 현재 HTTP `200` 성공 조건 확정
-14. Redis cooldown 시작과 WebSocket broadcast 후처리. 실패해도 완료 write 유지
+14. coordinator 해제 → gate 안에서 Redis cooldown 저장 시도 → gate 해제 → WebSocket broadcast. 통상 후처리 실패에도 완료 write 유지
 15. `accepted`, `eventSeq`, `x`, `y`, `color`, `tileVersion` HTTP `200` 응답 반환
 16. default runtime의 1초 fixed-delay scheduler가 `FlushWorker.flushOnce()`를 호출해 DB를 후행 반영
 
@@ -872,7 +883,25 @@ recovery replay는 `DirtyTileTracker`를 채우지 않는다. 따라서 checkpoi
 
 기존 설정 경로의 파일은 번호 0으로 그대로 채택하고 내용을 복사하거나 이름을 바꾸지 않는다. 후속 파일은 같은 기준 이름의 번호 suffix를 사용하며, 남은 연속 번호 중 최대 번호가 active다. namespace 안의 비정규 이름·번호 구멍·symlink·비일반 파일은 실패로 처리하고 namespace 밖 항목은 소비하지 않는다. 경로와 크기는 생성 시 검증·고정하며 생성만으로 파일을 열지 않는다.
 
-`FileWalAppender`와 default profile의 `FileWalReplaySource`는 같은 storage를 사용한다. 첫 writer 사용 직전에 파일군 전체를 다시 검증하고, 이후 append는 채택한 active 경로의 속성과 channel 크기를 확인한다. 다음 record가 크기 한도를 넘기는 경우 old channel close → 정확한 다음 파일 생성 → 빈 파일 force → active 게시 → record 전체 write와 force 순서로 회전한다. 빈 active에는 큰 record 한 건도 분할 없이 기록하므로 크기는 record 단위의 soft threshold다.
+`FileWalAppender`와 default profile의 `FileWalReplaySource`는 같은 storage를 사용한다. 단건과 batch는 같은 저장 루프를 사용하며 전체 입력 검증·JSON line 준비 뒤에만 I/O를 시작한다. 첫 writer 사용 직전에 파일군 전체를 다시 검증하고, 이후 append는 채택한 active 경로의 속성과 channel 크기를 확인한다. batch의 여러 record가 같은 파일에 들어가면 record force를 함께 수행한다. 다음 record가 크기 한도를 넘기면 old의 미확정 prefix force → old close → 정확한 다음 파일 생성 → 빈 파일 force → active 게시 순서로 회전한다. 이미 force된 record를 다시 force하지 않는다. 물리 size는 완전한 line write마다 증가하지만 durable tail은 해당 파일 force 뒤에만 전진하며, batch 전체에 필요한 force가 끝나야 append가 성공한다. 일부 파일만 durable해진 뒤 실패해도 batch 성공이나 자동 truncate로 바꾸지 않는다. 빈 active에는 큰 record 한 건도 분할 없이 기록하므로 크기는 record 단위의 soft threshold다.
+
+### 현재 write 실행 경계
+
+일반 실행의 기본은 group, stub의 기본은 single이며 선택된 executor 하나에 연결된다. `PIXELPLACE_WRITE_MODE`로 기본 YAML의 mode를 덮어쓸 수 있고 더 높은 우선순위의 명시 `pixel-place.write.mode`도 적용한다. stub에서 최종 선택이 group이면 부팅을 거부한다. single에서도 잘못된 group 수치나 unknown key를 숨기지 않으며 설정 검증·bean 생성만으로 WAL I/O나 worker 시작을 하지 않는다. 정상 startup recovery의 기존 파일 읽기는 유지한다. mode 변경은 재기동 시 적용하며 hot switch나 자동 fallback은 없다. command는 기존 사용자 gate 안에서 readiness와 Redis cooldown을 확인한 뒤 좌표·색을 검사하고 executor에 접수한다. command의 caller가 terminal 결과까지 gate를 소유하고 성공 후 cooldown을 저장하며, gate 해제 뒤 broadcast를 수행한다.
+
+group은 유한 FIFO에 게시된 요청만 접수로 취급한다. 최초 유효 접수 때 이름 있는 non-daemon platform worker 하나가 시작되어 이미 대기 중인 요청을 즉시 제한된 batch로 claim하며 별도 수집 지연은 두지 않는다. 접수 한도는 queued와 claimed를 함께 세고 terminal 선택 시 permit을 한 번 반환한다. QUEUED의 timeout·interrupt 취소와 worker claim은 같은 상태 경계에서 승자를 정한다. claim 이후 caller interrupt는 작업을 취소하지 않고 terminal까지 기다린 뒤 interrupt 상태를 복원한다.
+
+single executor는 coordinator → 기존 core monitor → 공유 WAL storage 순서로 core와 dirty를 마친 뒤 반환한다. 종료와 신규 등록은 같은 상태 경계에서 선후 관계를 정하며, 종료 전 등록한 요청은 coordinator 대기부터 core/dirty 반환까지 계수하고 close가 소진을 기다린다. storage는 executor의 실제 소진 뒤 닫힌다. native I/O를 강제로 취소하는 종료 deadline은 제공하지 않는다.
+
+group도 같은 coordinator → core monitor → storage 순서로 WAL batch를 완료한다. memory→dirty→terminal 선택과 종료 abort는 짧은 공유 결과 guard에서 직렬화하며, 그 guard에서 상위 lock 획득·파일 I/O·future 대기를 하지 않는다. terminal 게시 스레드는 자신의 write/state 잠금을 모두 반환한 뒤 결과를 게시한다. DB transaction·cooldown·WS·HTTP는 write coordinator 밖이며, flush capture는 WAL tail과 memory가 일치하는 경계에서만 새 plan을 만든다.
+
+group 종료는 신규 접수를 차단하고 기존 QUEUED deadline을 유지한 채 소진 유예를 준다. 유예 초과 시 irreversible write 실패/abort를 설치하고 queued는 busy, 미확정 claimed는 고정 비민감 UNKNOWN `503`, 기존 terminal은 원래 결과로 보존한다. UNKNOWN은 미기록이나 자동 재시도 가능을 뜻하지 않는다. 늦게 돌아온 I/O가 새 memory·dirty·claim·성공 재게시를 만들지 못하며, 실제 worker 반환을 기다린 뒤 storage를 닫는다. worker interrupt나 강제 channel close로 I/O를 취소하지 않는다. 유예는 전체 JVM 종료 상한이 아니며 memory/dirty의 guard 보유가 지연되면 UNKNOWN 선택이나 snapshot도 기다릴 수 있다. single에는 group queue·UNKNOWN 유예 처리를 추가하지 않는다.
+
+eventSeq 발급기는 최댓값에서 CAS 상태를 바꾸지 않고 고갈을 거부하며 준비 중 소비한 번호는 되돌리지 않는다. WAL force 완료 뒤 memory를 반영하고 command 계약의 dirty mark까지 성공해야 HTTP accepted가 된다.
+
+필수 실행 snapshot은 계측 off에서도 queued·claimed·worker 작업·outstanding·미게시 terminal과 종료 상태를 제공한다. single은 별도 worker나 게시 큐 없이 등록된 coordinator/core/dirty 활동을 유지한다. caller 완료만으로 소진을 판정하지 않는다.
+
+준비·WAL·memory의 치명 실패와 raw Error는 coordinator를 반환하기 전에 재활성화할 수 없는 write 실패 상태를 설치한다. 새 capture는 기존 coordinator 내부 readiness 재검사로 차단한다. 정상적으로 capture된 기존 plan의 commit과 pending exact reconciliation은 계속 허용하며, pending 소유권을 확인할 수 없는 기존 전역 fatal은 계속 reconciliation까지 차단한다. batch memory 실패는 이미 완료한 prefix를 보존하고 미확정 suffix를 차단한다. dirty RuntimeException은 해당 요청의 원인을 보존한 실패이며 이미 완료한 WAL/memory를 취소하지 않고 다음 요청 처리는 계속한다. 실패한 요청의 cooldown/broadcast는 실행하지 않는다. raw Error는 원래 instance와 suppressed를 유지하며 worker를 자동 재시작하지 않는다.
 
 scan은 모든 파일의 newline·UTF-8·record·전역 eventSeq 순서를 검증한 뒤 checkpoint 초과 record와 마지막 실제 tail을 반환한다. 빈 legacy 단독은 최초 상태로 허용하고, 이전 record가 있는 파일 뒤의 빈 최신 active는 그 이전 실제 tail을 유지한다. 빈 closed나 단독 빈 numbered 파일은 복구 가능한 정상 상태로 채택하지 않는다. 중단 뒤에는 새 storage가 disk를 다시 검사하며 partial line을 자동 truncate하지 않는다.
 
@@ -1344,7 +1373,6 @@ WebSocket broadcast나 overview 성공 여부를 checkpoint 조건에 포함하�
 
 ```text
 WAL archive/index/offset/truncate
-group commit
 partial WAL line 자동 복구
 JDBC/Hibernate batch tuning
 다중 인스턴스 distributed flush lock
@@ -1359,7 +1387,13 @@ production metrics/alert 체계와 custom scheduler thread-pool tuning
 
 single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application instance의 동시 flush를 막는 분산 lock이 아니다. 남은 WAL 파일군 전체 scan은 coordinator 안에서 수행하므로 WAL이 커지면 write blocking 시간이 길어질 수 있다. parent-directory fsync도 적용하지 않는다.
 
-후속 최적화 판단을 위해 checkpoint lag, WAL backlog, 한 plan의 event/tile 수와 byte 크기, coordinator 보유 시간, WAL scan 시간과 DB transaction 시간을 측정 후보로 둔다. canonical 1,024-tile bootstrap은 운영 예정 heap에서 peak heap과 전체 transaction elapsed time을 실측한다. 현재 단계에서 production metric/alert나 근거 없는 통과 임계값을 추가하지 않는다.
+기본 비활성인 `PixelMeasurement`의 성능 계측을 켜면 force·lock·scan/snapshot·DB transaction·Redis·broadcast·Overview를 관측한다. core timer는 정상 반환/예외 의미를 유지하며 실제 요청 성공은 HTTP 결과와 정합성 증거로 판단한다. DB transaction은 committed/rollback/ambiguous outcome을 구분한다. record force는 파일의 실제 호출 횟수이며, 마지막 성공 force 이후 새로 완성한 line 수로 coverage를 대조한다. rotation의 empty force는 별도다. 같은 singleton의 유한한 메모리 집계만 호출하며 write 순서와 자동 flush/retention 정책을 유지한다.
+
+계측 off에서도 command/executor activity, 정상 capture의 실제 record 수·시각, 실제 WAL/force coverage와 batch 계수는 유지한다. 선택적으로 끈 timer·cycle 관측·broadcast 실패 진단은 필드별 비활성 사유와 함께 구분하며 수집 실패나 0으로 대체하지 않는다. group의 batch 크기 분포는 계측 on에서 수집하며 single의 batch 계수는 0, on 분포는 빈 값이고 off 분포는 null이다. eventSeq 차이를 건수로 바꾸거나 계측 목적으로 추가 WAL scan을 수행하지 않는다. sampler는 오래된 표본과 pending 동안의 관측 공백을 구분한다.
+
+전용 benchmark는 production scan 밖에서 실제 앱을 격리된 DB·Redis·WAL과 별도 Spring 환경으로 시작한다. 선택한 single/group의 실제 executor bean 하나와 공유 measurement/storage identity를 확인하고, 별도 JVM의 HTTP/WS 발생기가 bootstrap 이후 warmup·측정·drain을 나눈다. 발생기는 먼 예정 시각에는 park하고 마지막 유한 구간에는 spin해 짧은 도착 간격의 wake-up 손실을 줄인다. 늦은 요청의 not_sent와 원래 예정 도착률은 유지한다. drain은 servlet exact count·command·pending·ready와 executor의 모든 활동 잔여 및 RUNNING 상태를 함께 확인한 뒤, idle 이후의 fresh zero-record capture와 checkpoint/tail 일치를 요구한다. FAILED의 close 완료는 정상 drain을 뜻하지 않는다. 명시 mode의 benchmark 성공은 일반 default 설정 로딩 검증을 대신하지 않는다.
+
+자동 flush가 소진되면 accepted/unknown·DB event·canonical 1,024 tiles·메모리·checkpoint/tail을 대조하고, 정상 종료 후 같은 코드·mode·설정·fixture를 새 JVM으로 복구해 다시 비교한다. 복구는 schema/seed/users를 재실행하지 않는다. A의 21회 baseline은 보존된 당시 source로 검증하고, C의 15회 비교 matrix와 별도 smoke는 해당 manifest/source snapshot으로 독립 분석한다. benchmark 출력은 원래 bootJar나 기본 check의 자동 부하에 포함하지 않는다. 실행 결과·예산·인계는 `작업기록/phase-15-progress.md`에 남기며 운영 metrics/alert 체계는 별도 범위다.
 
 ### 현재 bootstrap/recovery 검증
 - `0 rows + checkpoint 0 + WAL 없음`: dirty drain과 DB write 없는 no-op, DB tiles 0 rows 유지

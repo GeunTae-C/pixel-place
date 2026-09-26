@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.flush.application;
 
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
 import dev.cgt.pixelplace.wal.application.WalRetentionResult;
 import dev.cgt.pixelplace.wal.application.WalSegmentRetention;
 import org.slf4j.Logger;
@@ -19,6 +20,7 @@ import java.util.Objects;
 public class FlushWalRetention {
     private static final Logger log = LoggerFactory.getLogger(FlushWalRetention.class);
     private final FlushBoundaryCoordinator coordinator;
+    private final PixelMeasurement measurement;
     private final ServiceReadiness readiness;
     private final PendingAmbiguousFlushStore pendingStore;
     private final WalSegmentRetention retention;
@@ -26,11 +28,12 @@ public class FlushWalRetention {
     private long confirmedCheckpoint;
 
     public FlushWalRetention(FlushBoundaryCoordinator coordinator, ServiceReadiness readiness,
-                             PendingAmbiguousFlushStore pendingStore, WalSegmentRetention retention) {
+                             PendingAmbiguousFlushStore pendingStore, WalSegmentRetention retention, PixelMeasurement measurement) {
         this.coordinator = Objects.requireNonNull(coordinator);
         this.readiness = Objects.requireNonNull(readiness);
         this.pendingStore = Objects.requireNonNull(pendingStore);
         this.retention = Objects.requireNonNull(retention);
+        this.measurement = measurement;
     }
 
     /** executor commit 또는 exact pending clear 성공 뒤에만 호출. 지연 전 허가를 먼저 보관 */
@@ -48,11 +51,12 @@ public class FlushWalRetention {
         if (confirmedCheckpoint == 0) return;
         WalRetentionResult result;
         try {
-            result = coordinator.coordinate(() -> {
+            result = coordinator.retention(() -> {
                 if (!readiness.isReady()) return null;
                 var pending = Objects.requireNonNull(pendingStore.current(), "Retention pending lookup returned null");
                 if (pending.isPresent()) return null;
-                return Objects.requireNonNull(retention.deleteCommittedPrefix(confirmedCheckpoint), "Retention returned null");
+                return Objects.requireNonNull(measurement.observe(PixelMeasurement.Operation.retention,
+                        () -> retention.deleteCommittedPrefix(confirmedCheckpoint)), "Retention returned null");
             });
         } catch (RuntimeException | Error failure) {
             // 파일 검사·pending 확인 실패를 executor catch 밖에서 fail-closed 처리

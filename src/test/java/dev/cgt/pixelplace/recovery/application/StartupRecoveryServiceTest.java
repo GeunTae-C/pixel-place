@@ -164,7 +164,7 @@ class StartupRecoveryServiceTest {
                 board,
                 eventSeqManager,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         IllegalStateException actual = assertThrows(IllegalStateException.class, service::recover);
 
@@ -290,7 +290,7 @@ class StartupRecoveryServiceTest {
                 board,
                 eventSeqManager,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         service.recover();
 
@@ -321,7 +321,7 @@ class StartupRecoveryServiceTest {
                 mock(InMemoryTileBoard.class),
                 mock(EventSeqManager.class),
                 new ServiceReadiness()
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         service.recover();
 
@@ -373,7 +373,7 @@ class StartupRecoveryServiceTest {
                 board,
                 eventSeqManager,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         return new Fixture(service, wal, board, eventSeqManager, readiness);
     }
 

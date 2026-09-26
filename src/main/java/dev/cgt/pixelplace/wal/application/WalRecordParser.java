@@ -41,7 +41,8 @@ public class WalRecordParser {
         return record;
     }
 
-    private void validate(WalRecord record, long lineNumber) {
+    /* append 사전 검증과 replay가 같은 record shape 규칙 공유. 파일 접근 책임 없음 */
+    public void validate(WalRecord record, long lineNumber) {
         if (record.eventSeq() <= 0) {
             // eventSeq는 replay 순서와 발급 seed의 기준이라 0 이하를 허용하지 않음
             throw new IllegalArgumentException("Invalid WAL eventSeq. lineNumber=" + lineNumber);

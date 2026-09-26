@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.wal.application;
 
 import dev.cgt.pixelplace.wal.domain.WalRecord;
+import java.util.List;
 
 /*
  * write path가 WAL 저장 방식에 의존하지 않도록 분리한 append 포트
@@ -13,5 +14,10 @@ public interface WalAppender {
      * 승인 이벤트 1건을 WAL에 기록하고 fsync까지 완료함
      * null record는 기록 가능한 승인 이벤트가 아니므로 이후 메모리 반영이나 쿨다운 적용으로 진행되면 안됨
      */
-    void appendAndFsync(WalRecord record);
+    default void appendAndFsync(WalRecord record) {
+        appendBatchAndFsync(List.of(record));
+    }
+
+    /* 전체 입력 준비 후 파일별 필요한 force가 모두 끝난 경우만 정상 반환. 빈 목록 거부 */
+    void appendBatchAndFsync(List<WalRecord> records);
 }

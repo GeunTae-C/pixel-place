@@ -33,6 +33,18 @@ class PixelControllerTest {
             .build();
 
     @Test
+    // gate 획득 실패는 cooldown TTL을 꾸며내지 않는 별도 503 계약
+    void busyReturns503MessageWithoutRemainingMillis() throws Exception {
+        when(pixelCommandService.writePixel(7, 768, 1280, 17))
+                .thenThrow(new dev.cgt.pixelplace.pixel.application.PixelWriteBusyException());
+        mockMvc.perform(post("/api/pixels").principal(principal()).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"x\":768,\"y\":1280,\"color\":17}"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.message").value("Pixel write is busy. Please retry later."))
+                .andExpect(jsonPath("$.remainingMillis").doesNotExist());
+    }
+
+    @Test
     // 승인된 write 결과를 HTTP 응답 DTO로 변환하는 기본 계약
     void writePixelReturnsAcceptedResponse() throws Exception {
         when(pixelCommandService.writePixel(7L, 768, 1280, 17))

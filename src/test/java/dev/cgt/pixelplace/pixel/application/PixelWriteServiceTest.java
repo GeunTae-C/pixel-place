@@ -107,7 +107,7 @@ class PixelWriteServiceTest {
                 walAppender,
                 board,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         IllegalStateException exception = assertThrows(
                 IllegalStateException.class,
@@ -133,7 +133,7 @@ class PixelWriteServiceTest {
                 walAppender,
                 board,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         IllegalStateException exception = assertThrows(
                 IllegalStateException.class,
@@ -157,7 +157,7 @@ class PixelWriteServiceTest {
                 walAppender,
                 board,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         service.writePixel(7L, 768, 1280, 17);
 
@@ -176,7 +176,7 @@ class PixelWriteServiceTest {
                 walAppender,
                 board,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         ServiceNotReadyException exception = assertThrows(
                 ServiceNotReadyException.class,
@@ -217,7 +217,7 @@ class PixelWriteServiceTest {
                 walAppender,
                 board,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         AtomicReference<Throwable> firstThrown = new AtomicReference<>();
         AtomicReference<Throwable> secondThrown = new AtomicReference<>();
         Thread first = new Thread(
@@ -370,7 +370,7 @@ class PixelWriteServiceTest {
             WalAppender walAppender,
             InMemoryTileBoard board
     ) {
-        return new PixelWriteService(eventSeqManager, walAppender, board, readyReadiness());
+        return new PixelWriteService(eventSeqManager, walAppender, board, readyReadiness(), dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 
     private ServiceReadiness readyReadiness() {
@@ -411,6 +411,9 @@ class PixelWriteServiceTest {
         public void appendAndFsync(WalRecord record) {
             records.add(record);
         }
+
+        @Override
+        public void appendBatchAndFsync(List<WalRecord> batch) { records.addAll(List.copyOf(batch)); }
     }
 
     private static class InspectingWalAppender implements WalAppender {
@@ -424,6 +427,12 @@ class PixelWriteServiceTest {
             this.board = board;
             this.tileKey = tileKey;
             this.pixelIndex = pixelIndex;
+        }
+
+        @Override
+        public void appendBatchAndFsync(List<WalRecord> batch) {
+            assertEquals(BoardConstants.DEFAULT_COLOR_INDEX, board.getRequired(tileKey).pixels()[pixelIndex]);
+            callCount += batch.size();
         }
 
         @Override

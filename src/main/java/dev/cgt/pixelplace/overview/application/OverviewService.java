@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.overview.application;
 
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -20,14 +21,17 @@ public class OverviewService {
     private static final Logger LOGGER = LoggerFactory.getLogger(OverviewService.class);
 
     private final OverviewRenderer overviewRenderer;
+    private final PixelMeasurement measurement;
     private final ServiceReadiness serviceReadiness;
     private final AtomicReference<byte[]> currentPng = new AtomicReference<>();
     private final AtomicBoolean generationInProgress = new AtomicBoolean();
 
     public OverviewService(
             OverviewRenderer overviewRenderer,
-            ServiceReadiness serviceReadiness
+            ServiceReadiness serviceReadiness,
+            PixelMeasurement measurement
     ) {
+        this.measurement = measurement;
         this.overviewRenderer = Objects.requireNonNull(
                 overviewRenderer,
                 "overviewRenderer must not be null"
@@ -43,13 +47,17 @@ public class OverviewService {
      * RuntimeException은 기록 후 정상 반환하며 기존 정상 이미지와 다른 subsystem 상태 보존
      */
     public void refresh() {
+        var scope = measurement.begin(PixelMeasurement.Operation.overview);
         if (!serviceReadiness.isReady()) {
+            measurement.end(scope, PixelMeasurement.Outcome.skipped);
             return;
         }
         if (!generationInProgress.compareAndSet(false, true)) {
+            measurement.end(scope, PixelMeasurement.Outcome.skipped);
             return;
         }
 
+        Throwable failure = null;
         try {
             byte[] renderedPng = overviewRenderer.render();
             if (renderedPng == null || renderedPng.length == 0) {
@@ -58,12 +66,14 @@ public class OverviewService {
             }
             currentPng.set(renderedPng);
         } catch (RuntimeException generationFailure) {
-            LOGGER.error(
-                    "Overview PNG generation failed; keeping the last successful image.",
-                    generationFailure
-            );
+            failure = generationFailure;
+            try {
+                LOGGER.error("Overview PNG generation failed; keeping the last successful image.", generationFailure);
+            } catch (Error loggingError) { failure = loggingError; throw loggingError; }
+        } catch (Error error) { failure = error; throw error;
         } finally {
             generationInProgress.set(false);
+            measurement.endPreserving(scope, failure == null ? PixelMeasurement.Outcome.success : PixelMeasurement.Outcome.failure, failure);
         }
     }
 

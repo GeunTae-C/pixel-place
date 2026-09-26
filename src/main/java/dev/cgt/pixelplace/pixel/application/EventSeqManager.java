@@ -33,7 +33,20 @@ public class EventSeqManager {
      * 반환값은 이전에 발급된 마지막 eventSeq보다 정확히 1 큰 값이어야 함
      */
     public long allocate() {
-        return lastIssuedEventSeq.incrementAndGet();
+        while (true) {
+            long previous = lastIssuedEventSeq.get();
+            if (previous == Long.MAX_VALUE) {
+                // wraparound로 음수/0을 발급하면 WAL 순서·recovery seed를 복구할 수 없음
+                throw new IllegalStateException("Event sequence exhausted");
+            }
+            if (lastIssuedEventSeq.compareAndSet(previous, previous + 1)) return previous + 1;
+        }
+    }
+
+    /** batch 준비 전 고갈 확인. 발급 자체의 CAS guard를 대체하거나 번호를 예약하지 않음 */
+    public void requireCapacity(int count) {
+        if (count <= 0 || count > Long.MAX_VALUE - lastIssuedEventSeq.get())
+            throw new IllegalStateException("Insufficient event sequence capacity");
     }
 
     /*

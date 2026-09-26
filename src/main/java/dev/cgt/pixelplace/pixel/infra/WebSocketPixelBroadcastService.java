@@ -1,17 +1,16 @@
 package dev.cgt.pixelplace.pixel.infra;
 
 import dev.cgt.pixelplace.pixel.application.PixelBroadcastService;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
 import dev.cgt.pixelplace.pixel.application.PixelEventMessage;
 import dev.cgt.pixelplace.pixel.websocket.PixelWebSocketSessionRegistry;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
-import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
+import java.util.List;
 
 /*
  * PixelBroadcastService WebSocket 구현체
@@ -20,17 +19,18 @@ import java.io.IOException;
 @Component
 public class WebSocketPixelBroadcastService implements PixelBroadcastService {
 
-    private static final Logger log = LoggerFactory.getLogger(WebSocketPixelBroadcastService.class);
-
     private final PixelWebSocketSessionRegistry sessionRegistry;
+    private final PixelMeasurement measurement;
     private final ObjectMapper objectMapper;
 
     public WebSocketPixelBroadcastService(
             PixelWebSocketSessionRegistry sessionRegistry,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            PixelMeasurement measurement
     ) {
         this.sessionRegistry = sessionRegistry;
         this.objectMapper = objectMapper;
+        this.measurement = measurement;
     }
 
     /*
@@ -39,34 +39,41 @@ public class WebSocketPixelBroadcastService implements PixelBroadcastService {
      */
     @Override
     public void broadcast(PixelEventMessage message) {
-        String payload = serialize(message);
-        TextMessage textMessage = new TextMessage(payload);
-
-        for (WebSocketSession session : sessionRegistry.snapshot()) {
-            sendToSession(session, textMessage, message.eventSeq());
+        List<WebSocketSession> targets = sessionRegistry.snapshot();
+        TextMessage textMessage;
+        try {
+            textMessage = new TextMessage(objectMapper.writeValueAsString(message));
+        } catch (RuntimeException | Error failure) {
+            // 확보한 전체 대상은 이 이벤트를 못 받으므로 같은 연결을 유지하지 않음
+            Throwable primary = failure;
+            for (WebSocketSession session : targets) {
+                measurement.broadcastFailure();
+                try { sessionRegistry.terminate(session, failure); }
+                catch (Error cleanupFailure) { primary = PixelWebSocketSessionRegistry.preserveFailure(primary, cleanupFailure); }
+            }
+            if (primary instanceof Error error) throw error;
+            throw failure;
+        }
+        for (WebSocketSession session : targets) {
+            sendToSession(session, textMessage);
         }
     }
 
-    private String serialize(PixelEventMessage message) {
+    private void sendToSession(WebSocketSession session, TextMessage message) {
         try {
-            return objectMapper.writeValueAsString(message);
-        } catch (JacksonException exception) {
-            // 직렬화 실패는 command service에서 write rollback 없이 warning 처리할 후처리 실패
-            throw new IllegalStateException("Pixel event message serialization failed.", exception);
-        }
-    }
-
-    private void sendToSession(WebSocketSession session, TextMessage message, long eventSeq) {
-        if (!session.isOpen()) {
-            sessionRegistry.remove(session);
-            return;
-        }
-
-        try {
+            if (!session.isOpen()) {
+                sessionRegistry.remove(session);
+                return;
+            }
             session.sendMessage(message);
-        } catch (IOException exception) {
-            sessionRegistry.remove(session);
-            log.warn("Pixel WebSocket broadcast failed. sessionId={}, eventSeq={}", session.getId(), eventSeq, exception);
+        } catch (IOException | RuntimeException exception) {
+            measurement.broadcastFailure();
+            sessionRegistry.terminate(session, exception);
+        } catch (Error failure) {
+            measurement.broadcastFailure();
+            // JVM-level 실패를 통상적인 session 실패로 삼키지 않으며 원래 instance로 전파
+            sessionRegistry.terminate(session, failure);
+            throw failure;
         }
     }
 }

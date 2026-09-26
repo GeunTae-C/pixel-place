@@ -29,6 +29,7 @@ class SegmentedWalProfileTest {
         var storage=spy(storage(base,1));
         try(var context=new AnnotationConfigApplicationContext()) {
             context.getEnvironment().setActiveProfiles(profile);
+            context.register(dev.cgt.pixelplace.measurement.Measurements.class);
             context.registerBean(SegmentedWalStorage.class,()->storage);
             context.register(FileWalAppender.class,FileWalReplaySource.class,StubWalReplaySource.class);
             context.register(FlushWalRetention.class, FlushBoundaryCoordinator.class, ServiceReadiness.class, PendingAmbiguousFlushStore.class);

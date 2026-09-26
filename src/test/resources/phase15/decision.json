@@ -1,0 +1,33 @@
+{
+  "purpose": "decision",
+  "targetAcceptedWritesPerSecond": 100,
+  "targetP95Millis": 100,
+  "targetP99Millis": 250,
+  "maxSystemErrorRate": 0.001,
+  "cases": [
+    {"role": "probe", "offeredRate": 1, "webSocketSessions": 0, "pattern": "same-pixel"},
+    {"role": "probe", "offeredRate": 25, "webSocketSessions": 0, "pattern": "spread-tiles"},
+    {"role": "probe", "offeredRate": 50, "webSocketSessions": 0, "pattern": "spread-tiles"},
+    {"role": "probe", "offeredRate": 105, "webSocketSessions": 0, "pattern": "same-pixel"},
+    {"role": "probe", "offeredRate": 105, "webSocketSessions": 0, "pattern": "spread-tiles"},
+    {"role": "target", "offeredRate": 105, "webSocketSessions": 100, "pattern": "same-pixel"},
+    {"role": "target", "offeredRate": 105, "webSocketSessions": 100, "pattern": "spread-tiles"}
+  ],
+  "warmupSeconds": 30,
+  "measurementSeconds": 120,
+  "repetitions": 3,
+  "maxInFlight": 128,
+  "requestTimeoutSeconds": 30,
+  "maxDrainSeconds": 60,
+  "readyTimeoutSeconds": 120,
+  "controlTimeoutSeconds": 15,
+  "maxAttemptsPerTrial": 40000,
+  "maxFixtureUsers": 40000,
+  "maxOfferedRate": 200,
+  "maxTotalBytes": 26843545600,
+  "userMode": "once",
+  "userPoolSize": null,
+  "reuseMarginMillis": 1000,
+  "seed": 15,
+  "sampleIntervalMillis": 1000
+}

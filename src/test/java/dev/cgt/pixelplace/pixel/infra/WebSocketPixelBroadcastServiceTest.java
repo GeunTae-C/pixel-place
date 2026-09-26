@@ -33,13 +33,13 @@ class WebSocketPixelBroadcastServiceTest {
     private final WebSocketPixelBroadcastService service = new WebSocketPixelBroadcastService(
             sessionRegistry,
             objectMapper
-    );
+    , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
     @Test
-    void broadcastSendsPixelEventJsonToOpenSessionWithoutSeqOrTileVersion() throws Exception {
+    void broadcastSendsPixelEventJsonToOpenSessionWithResultTileVersionWithoutSeq() throws Exception {
         WebSocketSession session = session("session-1", true);
         when(sessionRegistry.snapshot()).thenReturn(List.of(session));
-        PixelEventMessage message = new PixelEventMessage("pixel", 768, 1280, 17, 10L);
+        PixelEventMessage message = new PixelEventMessage("pixel", 768, 1280, 17, 10L, 99L);
 
         service.broadcast(message);
 
@@ -57,7 +57,7 @@ class WebSocketPixelBroadcastServiceTest {
                 () -> assertEquals(17, payload.get("color")),
                 () -> assertEquals(10, payload.get("eventSeq")),
                 () -> assertFalse(payload.containsKey("seq")),
-                () -> assertFalse(payload.containsKey("tileVersion"))
+                () -> assertEquals(99, payload.get("tileVersion"))
         );
     }
 
@@ -66,7 +66,7 @@ class WebSocketPixelBroadcastServiceTest {
         WebSocketSession session = session("session-1", false);
         when(sessionRegistry.snapshot()).thenReturn(List.of(session));
 
-        service.broadcast(new PixelEventMessage("pixel", 768, 1280, 17, 10L));
+        service.broadcast(new PixelEventMessage("pixel", 768, 1280, 17, 10L, 99L));
 
         verify(session, never()).sendMessage(org.mockito.ArgumentMatchers.any(TextMessage.class));
         verify(sessionRegistry).remove(session);
@@ -80,9 +80,9 @@ class WebSocketPixelBroadcastServiceTest {
         doThrow(new IOException("send failed"))
                 .when(failedSession).sendMessage(org.mockito.ArgumentMatchers.any(TextMessage.class));
 
-        assertDoesNotThrow(() -> service.broadcast(new PixelEventMessage("pixel", 768, 1280, 17, 10L)));
+        assertDoesNotThrow(() -> service.broadcast(new PixelEventMessage("pixel", 768, 1280, 17, 10L, 99L)));
 
-        verify(sessionRegistry).remove(failedSession);
+        verify(sessionRegistry).terminate(org.mockito.ArgumentMatchers.eq(failedSession), org.mockito.ArgumentMatchers.any(IOException.class));
         verify(successSession).sendMessage(org.mockito.ArgumentMatchers.any(TextMessage.class));
     }
 
@@ -90,7 +90,7 @@ class WebSocketPixelBroadcastServiceTest {
     void broadcastDoesNothingWhenSessionSnapshotIsEmpty() {
         when(sessionRegistry.snapshot()).thenReturn(List.of());
 
-        assertDoesNotThrow(() -> service.broadcast(new PixelEventMessage("pixel", 768, 1280, 17, 10L)));
+        assertDoesNotThrow(() -> service.broadcast(new PixelEventMessage("pixel", 768, 1280, 17, 10L, 99L)));
     }
 
     private WebSocketSession session(String id, boolean open) {

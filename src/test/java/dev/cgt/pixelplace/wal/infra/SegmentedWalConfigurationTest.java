@@ -49,7 +49,7 @@ class SegmentedWalConfigurationTest {
             WalProperties properties = new WalProperties();
             properties.setActiveFile(path);
             assertThrows(IllegalArgumentException.class, properties::validate);
-            assertThrows(IllegalArgumentException.class, () -> new SegmentedWalStorage(properties, mock(WalRecordParser.class), mock(WalRecordJsonCodec.class)));
+            assertThrows(IllegalArgumentException.class, () -> new SegmentedWalStorage(properties, mock(WalRecordParser.class), mock(WalRecordJsonCodec.class), dev.cgt.pixelplace.measurement.Measurements.disabled()));
         }
         runner.withPropertyValues("pixel-place.wal.active-file=")
                 .run(context -> assertNotNull(context.getStartupFailure()));
@@ -60,7 +60,7 @@ class SegmentedWalConfigurationTest {
         WalProperties properties = new WalProperties();
         Path input = directory.resolve("missing/../custom/wal");
         properties.setActiveFile(input);
-        SegmentedWalStorage storage = new SegmentedWalStorage(properties, mock(WalRecordParser.class), mock(WalRecordJsonCodec.class));
+        SegmentedWalStorage storage = new SegmentedWalStorage(properties, mock(WalRecordParser.class), mock(WalRecordJsonCodec.class), dev.cgt.pixelplace.measurement.Measurements.disabled());
         properties.setActiveFile(directory.resolve("other"));
         properties.setMaxSegmentBytes(1);
         assertEquals(input.toAbsolutePath().normalize(), storage.segmentPath(0));

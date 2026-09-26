@@ -4,6 +4,8 @@ import dev.cgt.pixelplace.pixel.application.PixelCommandService;
 import dev.cgt.pixelplace.pixel.application.PixelCooldownActiveException;
 import dev.cgt.pixelplace.pixel.application.PixelCooldownUnavailableException;
 import dev.cgt.pixelplace.pixel.application.PixelWriteResult;
+import dev.cgt.pixelplace.pixel.application.PixelWriteBusyException;
+import dev.cgt.pixelplace.pixel.application.PixelWriteUnknownException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -62,6 +64,20 @@ public class PixelController {
                         "message", ex.getMessage(),
                         "remainingMillis", ex.remainingMillis()
                 ));
+    }
+
+    /* 처리 불확실성 전달. 미기록·재시도 가능성 또는 cooldown TTL을 만들어내지 않음 */
+    @ExceptionHandler(PixelWriteUnknownException.class)
+    public ResponseEntity<Map<String, String>> handleWriteUnknown(PixelWriteUnknownException ex) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(Map.of("message", ex.getMessage()));
+    }
+
+    /* gate/queue 대기 실패는 Redis TTL과 무관한 과부하이므로 503 반환 */
+    @ExceptionHandler(PixelWriteBusyException.class)
+    public ResponseEntity<Map<String, String>> handleWriteBusy(PixelWriteBusyException ex) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(Map.of("message", ex.getMessage()));
     }
 
     /*

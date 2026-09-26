@@ -82,6 +82,7 @@ class AuthProductionContextTest {
                     when(c.getBean(TileReadService.class).readTile(0,0,0)).thenReturn(new TileReadResult(new byte[65536],17));
                     mvc.perform(get("/api/tiles/0/0/0").header("Origin","http://localhost:3000"))
                             .andExpect(status().isOk()).andExpect(header().string("X-Tile-Version","17"))
+                            .andExpect(header().string(HttpHeaders.CACHE_CONTROL,"no-store"))
                             .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_EXPOSE_HEADERS,"X-Tile-Version"))
                             .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN,"http://localhost:3000"))
                             .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_CREDENTIALS,"true"));

@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FlushBoundaryCoordinatorTest {
 
-    private final FlushBoundaryCoordinator coordinator = new FlushBoundaryCoordinator();
+    private final FlushBoundaryCoordinator coordinator = new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled());
 
     @Test
     void secondCallbackWaitsUntilFirstCallbackReleasesBoundary() throws Exception {

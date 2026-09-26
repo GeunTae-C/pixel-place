@@ -1,8 +1,8 @@
 package dev.cgt.pixelplace.pixel.application;
 
-import dev.cgt.pixelplace.flush.application.FlushBoundaryCoordinator;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
+import static dev.cgt.pixelplace.measurement.PixelMeasurement.Operation.*;
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
-import dev.cgt.pixelplace.tile.application.DirtyTileTracker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -18,26 +18,26 @@ public class PixelCommandService {
     private static final Logger log = LoggerFactory.getLogger(PixelCommandService.class);
 
     private final PixelCooldown pixelCooldown;
-    private final FlushBoundaryCoordinator flushBoundaryCoordinator;
-    private final PixelWriteService pixelWriteService;
-    private final DirtyTileTracker dirtyTileTracker;
+    private final PixelMeasurement measurement;
+    private final PixelUserWriteGate userWriteGate;
+    private final PixelWriteExecutor writeExecutor;
     private final PixelBroadcastService pixelBroadcastService;
     private final ServiceReadiness serviceReadiness;
 
     public PixelCommandService(
             PixelCooldown pixelCooldown,
-            FlushBoundaryCoordinator flushBoundaryCoordinator,
-            PixelWriteService pixelWriteService,
-            DirtyTileTracker dirtyTileTracker,
+            PixelWriteExecutor writeExecutor,
             PixelBroadcastService pixelBroadcastService,
-            ServiceReadiness serviceReadiness
+            ServiceReadiness serviceReadiness,
+            PixelUserWriteGate userWriteGate,
+            PixelMeasurement measurement
     ) {
         this.pixelCooldown = pixelCooldown;
-        this.flushBoundaryCoordinator = flushBoundaryCoordinator;
-        this.pixelWriteService = pixelWriteService;
-        this.dirtyTileTracker = dirtyTileTracker;
+        this.writeExecutor = writeExecutor;
         this.pixelBroadcastService = pixelBroadcastService;
         this.serviceReadiness = serviceReadiness;
+        this.userWriteGate = userWriteGate;
+        this.measurement = measurement;
     }
 
     /*
@@ -45,57 +45,59 @@ public class PixelCommandService {
      * 현재 HTTP accepted는 core write와 dirty mark 성공까지 요구하며 cooldown/broadcast는 완료 write의 후처리
      */
     public PixelWriteResult writePixel(long userId, int x, int y, int color) {
+        measurement.commandEntered();
+        try {
+            return measurement.observe(command, () -> executeCommand(userId, x, y, color));
+        } finally {
+            // 후처리·예외·raw Error까지 command 점유 수명을 닫아 drain 관측의 조기 완료 방지
+            measurement.commandExited();
+        }
+    }
+
+    private PixelWriteResult executeCommand(long userId, int x, int y, int color) {
         serviceReadiness.requireReady();
 
         validateUserId(userId);
 
-        pixelCooldown.checkWritable(userId);
+        PixelWriteResult result = userWriteGate.execute(userId, () -> writeUnderUserGate(userId, x, y, color));
 
-        PixelWriteResult result = flushBoundaryCoordinator.coordinate(() -> {
-            PixelWriteResult writeResult = pixelWriteService.writePixel(userId, x, y, color);
-            markDirty(writeResult);
-            return writeResult;
-        });
-
+        // 느린 session의 fan-out이 동일 사용자 gate를 점유하지 않게 후처리 경계 분리
         try {
-            pixelCooldown.startCooldown(userId);
-        } catch (PixelCooldownUnavailableException exception) {
-            /*
-             * WAL fsync와 memory apply 이후 실패
-             * core write rollback 책임 없음, 운영 경고만 남기는 후처리 실패
-             */
-            log.warn("Pixel cooldown set failed after successful write. userId={}", userId, exception);
-        }
-
-        try {
-            pixelBroadcastService.broadcast(PixelEventMessage.from(result));
+            measurement.observe(broadcast, () -> pixelBroadcastService.broadcast(PixelEventMessage.from(result)));
         } catch (RuntimeException exception) {
-            /*
-             * write 성공 이후 전파 실패
-             * WAL/memory/cooldown rollback 사유 아님, 클라이언트 재동기화 대상으로 남김
-             */
-            log.warn("Pixel WebSocket broadcast failed after successful write. eventSeq={}", result.eventSeq(), exception);
+            // 완료 write는 전파 실패로 취소하지 않으며 클라이언트 재동기화 대상
+            warnAfterWrite("Pixel WebSocket broadcast failed after successful write. eventSeq={}", result.eventSeq(), exception);
         }
 
         return result;
     }
 
-    private void markDirty(PixelWriteResult result) {
+    private PixelWriteResult writeUnderUserGate(long userId, int x, int y, int color) {
+        // gate 대기 중 fatal 전환 가능하므로 Redis 접근 전 readiness 재검사
+        serviceReadiness.requireReady();
+        measurement.observe(redis_check, () -> pixelCooldown.checkWritable(userId));
+
+        PixelWriteService.validateWriteRequest(userId, x, y, color);
+        PixelWriteResult result = writeExecutor.execute(userId, x, y, color);
+
         try {
-            dirtyTileTracker.markDirty(
-                    result.tileKey(),
-                    result.eventSeq(),
-                    result.tileVersion()
-            );
-        } catch (RuntimeException exception) {
+            measurement.observe(redis_start, () -> pixelCooldown.startCooldown(userId));
+        } catch (PixelCooldownUnavailableException exception) {
             /*
-             * WAL fsync와 memory apply 이후 보조 dirty 추적 실패
-             * flush source of truth는 WAL이지만 현재 HTTP accepted 계약에는 dirty mark 성공도 필요
+             * WAL fsync와 memory apply 이후 실패
+             * core write rollback 책임 없음, 운영 경고만 남기는 후처리 실패
              */
-            throw new IllegalStateException(
-                    "Dirty tile mark failed after successful write. eventSeq=" + result.eventSeq(),
-                    exception
-            );
+            warnAfterWrite("Pixel cooldown set failed after successful write. userId={}", userId, exception);
+        }
+
+        return result;
+    }
+
+    private void warnAfterWrite(String message, long id, RuntimeException failure) {
+        try {
+            log.warn(message, id, failure);
+        } catch (RuntimeException ignored) {
+            // 통상적인 logging 실패도 완료 write의 성공 의미를 바꾸면 안 됨. raw Error는 전파
         }
     }
 

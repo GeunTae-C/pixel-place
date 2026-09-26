@@ -204,8 +204,8 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
         walProperties.setActiveFile(walPath);
         ObjectMapper objectMapper = new ObjectMapper();
         SegmentedWalStorage storage = new SegmentedWalStorage(walProperties,
-                new WalRecordParser(objectMapper), new WalRecordJsonCodec(objectMapper));
-        FileWalAppender fileWalAppender = new FileWalAppender(storage);
+                new WalRecordParser(objectMapper), new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled());
+        FileWalAppender fileWalAppender = new FileWalAppender(storage, dev.cgt.pixelplace.measurement.Measurements.disabled());
         FileWalReplaySource fileWalReplaySource = new FileWalReplaySource(storage);
         WalRecord eventTwo = new WalRecord(
                 TARGET_CHECKPOINT,
@@ -231,7 +231,7 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
                 board,
                 eventSeqManager,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         ExecutorService executor = Executors.newSingleThreadExecutor();
         Future<?> writer = null;
 

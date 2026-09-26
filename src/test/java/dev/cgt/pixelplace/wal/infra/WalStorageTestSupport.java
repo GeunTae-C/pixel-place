@@ -35,7 +35,7 @@ final class WalStorageTestSupport {
     }
 
     static SegmentedWalStorage storage(Path path, long maximum) {
-        return new SegmentedWalStorage(properties(path, maximum), PARSER, CODEC);
+        return new SegmentedWalStorage(properties(path, maximum), PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 
     static void records(Path path, long... seqs) throws IOException {
@@ -50,7 +50,7 @@ final class WalStorageTestSupport {
         private final List<FileChannel> physicalWriters = new ArrayList<>();
         ChannelSetup setup = (channel, index) -> { };
 
-        ControlledStorage(Path path, long maximum) { super(properties(path, maximum), PARSER, CODEC); }
+        ControlledStorage(Path path, long maximum) { super(properties(path, maximum), PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled()); }
 
         @Override
         FileChannel openFileChannel(Path path, StandardOpenOption... options) throws IOException {

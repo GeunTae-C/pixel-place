@@ -102,7 +102,7 @@ class OverviewIsolationTest {
         when(renderer.render()).thenThrow(new IllegalStateException("overview failed"));
         ServiceReadiness readiness = new ServiceReadiness();
         readiness.markReady();
-        OverviewService overviewService = new OverviewService(renderer, readiness);
+        OverviewService overviewService = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         EventSeqManager eventSeqManager = new EventSeqManager();
         eventSeqManager.initializeLastIssued(41L);
         InMemoryTileBoard board = new InMemoryTileBoard();
@@ -130,7 +130,7 @@ class OverviewIsolationTest {
                 walAppender,
                 board,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         PixelWriteResult writeResult = pixelWriteService.writePixel(5L, 0, 0, 9);
 
         assertEquals(42L, writeResult.eventSeq());
@@ -163,7 +163,7 @@ class OverviewIsolationTest {
                 reconciliation,
                 dirtyTileTracker,
                 mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         assertEquals(FlushRunResult.NO_OP, worker.flushOnce());
         verify(capture).capturePlan();

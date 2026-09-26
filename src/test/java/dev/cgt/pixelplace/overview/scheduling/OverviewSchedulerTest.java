@@ -64,7 +64,7 @@ class OverviewSchedulerTest {
     @Test
     void realServiceSkipsRendererWhenScheduledBeforeReady() {
         OverviewRenderer renderer = mock(OverviewRenderer.class);
-        OverviewService service = new OverviewService(renderer, new ServiceReadiness());
+        OverviewService service = new OverviewService(renderer, new ServiceReadiness(), dev.cgt.pixelplace.measurement.Measurements.disabled());
         OverviewScheduler scheduler = new OverviewScheduler(service, new RecordingTaskScheduler());
 
         scheduler.scheduleInitialRefresh();
@@ -109,7 +109,7 @@ class OverviewSchedulerTest {
         when(renderer.render()).thenReturn(recovered);
         ServiceReadiness readiness = new ServiceReadiness();
         readiness.markReady();
-        OverviewService service = new OverviewService(renderer, readiness);
+        OverviewService service = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         RuntimeException submissionFailure = new IllegalStateException("scheduler rejected task");
         RecordingTaskScheduler taskScheduler = new RecordingTaskScheduler();
         taskScheduler.submissionFailure = submissionFailure;
@@ -169,7 +169,7 @@ class OverviewSchedulerTest {
                 .thenReturn(recovered);
         ServiceReadiness readiness = new ServiceReadiness();
         readiness.markReady();
-        OverviewService service = new OverviewService(renderer, readiness);
+        OverviewService service = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         OverviewScheduler scheduler = new OverviewScheduler(service, new RecordingTaskScheduler());
 
         scheduler.scheduleInitialRefresh();

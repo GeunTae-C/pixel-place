@@ -199,12 +199,13 @@
 #### 현재 응답 헤더
 - `Content-Type: application/octet-stream`
 - `Content-Encoding: gzip`
+- `Cache-Control: no-store`: 재연결 snapshot에 HTTP 캐시의 과거 상태를 사용하지 않음
 - `X-Tile-Version`: 현재 `InMemoryTileBoard`의 실시간 tileVersion
 
 #### 후속 cache 목표
 - `ETag`
 - `If-None-Match`
-- `Cache-Control`
+- 조건부 캐시는 현재 no-store 정책의 별도 변경이 필요함
 - `304 Not Modified`
 
 ### 타일 버전 정책
@@ -232,7 +233,7 @@
     - 좌표 범위 확인
     - 색상 인덱스 범위 확인
 - 임시 `X-User-Id` application-level 사용자 식별 확인
-- 쿨다운 확인(Redis)
+- 사용자별 진입 제어 안에서 쿨다운 확인(Redis)부터 성공 후 cooldown 저장까지 처리
 - WAL append + fsync
 - 메모리 타일 반영과 dirty mark
 - WebSocket diff broadcast
@@ -253,6 +254,9 @@
 - HTTP `200` 성공 응답은 core write와 현재 command 계약상 dirty mark까지 성공한 상태다.
 - DB flush 완료는 HTTP 성공 조건이 아니다.
 - core write 뒤 cooldown start 또는 WebSocket broadcast가 실패해도 완료 write를 취소하지 않는다.
+- 동일 사용자 동시 요청은 정상 Redis 조건에서 첫 성공 뒤 실제 cooldown으로 거부된다. gate 대기 한도 초과·interrupt는 TTL 없는 busy `503`이며, broadcast는 gate 해제 후 수행한다.
+- 일반 write의 기본 전략은 WAL group commit이다. 이미 접수된 요청을 묶어 파일별 내구성을 확보한 뒤 각 요청의 memory·dirty 반영을 완료하며, 위 HTTP 성공 의미는 유지한다. 명시 single을 지원하고 stub의 기본은 single이다. stub의 명시 group과 잘못된 설정은 부팅 시 거부한다. 실행 중 전략 전환이나 자동 fallback은 제공하지 않는다.
+- group의 접수 한도·대기 만료는 busy `503`이다. 종료 중 이미 처리에 들어간 요청의 결과를 확정할 수 없으면 UNKNOWN `503`을 반환할 수 있다. UNKNOWN은 미기록이나 안전한 자동 재시도를 뜻하지 않는다.
 
 ### 6.5 실시간 업데이트(읽기)
 - **WebSocket endpoint:** `/ws`
@@ -267,7 +271,8 @@
       "x": 100,
       "y": 200,
       "color": 17,
-      "eventSeq": 12345
+      "eventSeq": 12345,
+      "tileVersion": 991
     }
 
 ### 후속 배치 전송 목표 예시
@@ -281,19 +286,20 @@
 
 ### 현재 security/readiness 경계
 - WebSocket handler/config 자체에는 application-level 인증 로직이 없다.
-- 실제 `/ws` handshake 접근 제한은 현재 Spring Security filter chain에 따른다.
-- 현재 제한 security 진단에는 WebSocket config/handler가 포함되지 않아 실제 handshake 응답은 미검증이다.
+- `/ws`는 13단계의 공개 endpoint 정책을 유지하며 등록된 공용 frontend Origin 정책으로 handshake를 제한한다.
 - MVC `ReadinessGuardInterceptor`는 `/ws` handshake에 직접 적용되지 않는다.
 - not-ready 전환 시 기존 WebSocket session을 강제로 종료하지 않는다.
-- 별도의 readiness handshake guard와 최종 WebSocket 인증 정책은 현재 미구현이며, 인증 정책은 13단계에서 확정한다.
+- 별도의 readiness handshake guard는 추가하지 않는다.
 
 ### 이벤트 순서 정책
-- WebSocket diff 이벤트에는 단조 증가하는 **`eventSeq`** 를 포함한다.
-- 클라이언트는 sequence gap이 감지되면 관련 타일을 재동기화한다.
+- WebSocket diff는 전역 write 순서 `eventSeq`와 해당 mutation 직후의 타일 버전 `tileVersion`을 함께 전달한다. 같은 session의 동시 전송은 보호하지만 도착 순서는 보장하지 않는다.
+- 클라이언트는 WS 연결과 수신 buffer를 준비한 뒤 snapshot bytes와 `X-Tile-Version`을 한 쌍으로 설치한다. snapshot 버전 이하 이벤트는 버리고, 나머지는 픽셀별 마지막 적용 버전보다 클 때만 반영한다.
+- 재조회 중에는 이미 적용한 이벤트도 journal에 보존·재병합하고 이전 요청 generation·연결 epoch의 응답을 버린다. 연결 종료 후 새 연결과 snapshot 설치 전까지 stale 상태를 유지한다. 실제 프론트 연결은 19단계 범위다.
+- `eventSeq` gap만으로 이벤트 유실을 확정하지 않는다. 느린 연결의 제한 초과·전송 실패는 해당 연결을 종료하여 재동기화 대상으로 남긴다.
 
 ### 후속 보강
 - 50ms 단위 batch broadcast
-- broadcast 순서 보장과 session별 send 직렬화
+- 전체 fan-out 지연 최적화는 후속 범위이며 현재 지연은 session 수에 영향을 받음
 
 > 순수 WebSocket(JSON)을 선택한 이유는 메시지 크기가 작고 구현이 단순하기 때문이다.  
 > 이후 규모가 커지면 메시지 압축 또는 바이너리 프레임을 후속 최적화로 고려할 수 있다.
@@ -314,7 +320,7 @@
 - 뷰포트 이동
 - WebSocket 재연결 후 정합성 확인 필요 시
 - version mismatch
-- sequence gap 감지 시
+- 연결 종료·transport 오류로 기존 상태가 stale인 경우
 - 주기적 재동기화 필요 시
 
 > 픽셀 1개 변경 시 타일 전체를 다시 받지 않는다.  

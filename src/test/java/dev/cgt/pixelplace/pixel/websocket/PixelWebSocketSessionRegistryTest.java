@@ -2,14 +2,12 @@ package dev.cgt.pixelplace.pixel.websocket;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 /*
  * WebSocket session registry 메모리 관리 규칙 검증
@@ -25,7 +23,17 @@ class PixelWebSocketSessionRegistryTest {
 
         registry.add(session);
 
-        assertTrue(registry.snapshot().contains(session));
+        var wrapper = assertInstanceOf(ConcurrentWebSocketSessionDecorator.class, registry.snapshot().getFirst());
+        assertSame(session, wrapper.getDelegate());
+        registry.add(session);
+        registry.add(wrapper);
+        assertSame(wrapper, registry.snapshot().getFirst());
+        assertEquals(5_000, wrapper.getSendTimeLimit());
+        assertEquals(65_536, wrapper.getBufferSizeLimit());
+        assertEquals(ConcurrentWebSocketSessionDecorator.OverflowStrategy.TERMINATE, wrapper.getOverflowStrategy());
+        var nativeSession = ((org.springframework.web.socket.adapter.NativeWebSocketSession) session).getNativeSession(jakarta.websocket.Session.class);
+        assertEquals(5_000L, nativeSession.getUserProperties().get(PixelWebSocketSessionRegistry.BLOCKING_SEND_TIMEOUT));
+        assertInstanceOf(Long.class, nativeSession.getUserProperties().get(PixelWebSocketSessionRegistry.BLOCKING_SEND_TIMEOUT));
     }
 
     @Test
@@ -35,7 +43,7 @@ class PixelWebSocketSessionRegistryTest {
 
         registry.remove(session);
 
-        assertFalse(registry.snapshot().contains(session));
+        assertTrue(registry.snapshot().isEmpty());
     }
 
     @Test
@@ -44,16 +52,38 @@ class PixelWebSocketSessionRegistryTest {
         WebSocketSession second = session("session-1");
 
         registry.add(first);
+        WebSocketSession oldWrapper = registry.snapshot().getFirst();
         registry.add(second);
 
         List<WebSocketSession> snapshot = registry.snapshot();
-        assertSame(second, snapshot.get(0));
+        assertSame(second, ((ConcurrentWebSocketSessionDecorator) snapshot.get(0)).getDelegate());
         assertFalse(snapshot.contains(first));
+        registry.remove(first);
+        registry.terminate(oldWrapper, new IllegalStateException("late failure"));
+        assertSame(snapshot.getFirst(), registry.snapshot().getFirst());
+        registry.remove(snapshot.getFirst());
+        assertTrue(registry.snapshot().isEmpty());
+    }
+
+    @Test
+    void incompatibleNativeOrFailedPropertySettingClosesWithoutPublishing() throws Exception {
+        var raw = mock(WebSocketSession.class);
+        when(raw.getId()).thenReturn("invalid"); when(raw.isOpen()).thenReturn(true);
+        assertThrows(IllegalStateException.class, () -> registry.add(raw));
+        verify(raw).close(org.springframework.web.socket.CloseStatus.SESSION_NOT_RELIABLE);
+        var missing = NativeSessionFixture.session("missing");
+        when(missing.getNativeSession(jakarta.websocket.Session.class)).thenReturn(null);
+        assertThrows(IllegalStateException.class, () -> registry.add(missing));
+        verify(missing).close(org.springframework.web.socket.CloseStatus.SESSION_NOT_RELIABLE);
+        var denied = NativeSessionFixture.session("denied");
+        when(denied.getNativeSession(jakarta.websocket.Session.class).getUserProperties()).thenReturn(java.util.Map.of());
+        assertThrows(UnsupportedOperationException.class, () -> registry.add(denied));
+        verify(denied).close(org.springframework.web.socket.CloseStatus.SESSION_NOT_RELIABLE);
+        assertTrue(registry.snapshot().isEmpty());
+        assertThrows(IllegalStateException.class, () -> registry.add(denied));
     }
 
     private WebSocketSession session(String id) {
-        WebSocketSession session = mock(WebSocketSession.class);
-        when(session.getId()).thenReturn(id);
-        return session;
+        return NativeSessionFixture.session(id);
     }
 }

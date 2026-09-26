@@ -45,6 +45,7 @@ public class TileController {
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
                 .header(HttpHeaders.CONTENT_ENCODING, GZIP_ENCODING)
+                .header(HttpHeaders.CACHE_CONTROL, "no-store")
                 .header(TILE_VERSION_HEADER, Long.toString(result.tileVersion()))
                 .body(gzipped);
     }

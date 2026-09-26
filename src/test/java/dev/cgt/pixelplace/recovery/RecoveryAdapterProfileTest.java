@@ -102,6 +102,7 @@ class RecoveryAdapterProfileTest {
         context.registerBean(ServiceReadiness.class, ServiceReadiness::new);
 
         context.register(
+                dev.cgt.pixelplace.measurement.Measurements.class,
                 JpaCheckpointReader.class,
                 StubCheckpointReader.class,
                 JpaTileSnapshotLoader.class,

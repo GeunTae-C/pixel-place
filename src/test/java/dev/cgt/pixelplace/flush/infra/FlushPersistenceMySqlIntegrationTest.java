@@ -146,6 +146,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Execution(ExecutionMode.SAME_THREAD)
 @ResourceLock(value = "pixel_place_test", mode = ResourceAccessMode.READ_WRITE)
 @Import({
+        dev.cgt.pixelplace.measurement.Measurements.class,
         CanonicalZ0TileKeys.class,
         DbBootstrapClassifier.class,
         JpaTileMetadataReader.class,
@@ -437,7 +438,7 @@ class FlushPersistenceMySqlIntegrationTest {
         ProgrammaticFlushTransactionExecutor executor = new ProgrammaticFlushTransactionExecutor(
                 transactionManager,
                 failingService
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         FlushTransactionResult result = executor.execute(plan);
 
@@ -474,7 +475,7 @@ class FlushPersistenceMySqlIntegrationTest {
         ProgrammaticFlushTransactionExecutor executor = new ProgrammaticFlushTransactionExecutor(
                 transactionManager,
                 failingService
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         FlushTransactionResult result = executor.execute(plan);
 
@@ -1059,7 +1060,7 @@ class FlushPersistenceMySqlIntegrationTest {
         };
         var failingExecutor = new ProgrammaticFlushTransactionExecutor(transactionManager,
                 new FlushPersistenceService(failingFence, tileMetadataReader, dbBootstrapClassifier,
-                        pixelEventWriter, tileSnapshotWriter));
+                        pixelEventWriter, tileSnapshotWriter), dev.cgt.pixelplace.measurement.Measurements.disabled());
         byte[] pixelsA;
         byte[] pixelsB;
         try (FreshRuntimeGraph runtime = createFreshRuntime(path, null, false, storage, failingExecutor)) {
@@ -1159,6 +1160,80 @@ class FlushPersistenceMySqlIntegrationTest {
         assertEquals(1L, runtime.write(7L, 0, 0, 11).eventSeq());
         assertEquals(2L, runtime.write(7L, BoardConstants.TILE_SIZE, 0, 21).eventSeq());
         assertEquals(3L, runtime.write(7L, 0, 0, 12).eventSeq());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"commit", "rollback", "lost-response", "cleanup-delay"})
+    // 실제 group write의 rotation→MySQL commit/reconciliation→retention→새 graph. 기존 단건 fixture 유지
+    void groupRotationAndActualDatabaseCleanupRecoverWithLastNonemptyAndEmptyActive(String outcome) throws Exception {
+        prepareInitialized(KEY_A, KEY_B);
+        Path path = tempDirectory.resolve("group-" + outcome + ".wal");
+        var storage = new MySqlRetentionTestStorage(tempDirectory, path);
+        var transactions = new AtomicInteger();
+        var lost = new RuntimeException("Test-only lost group commit response");
+        var rollback = new AtomicBoolean(outcome.equals("rollback"));
+        CheckpointFence fence = new CheckpointFence() {
+            public long lockMainCheckpoint() { return checkpointFence.lockMainCheckpoint(); }
+            public void advanceMainCheckpoint(long expected, long target) {
+                checkpointFence.advanceMainCheckpoint(expected,target);
+                if (rollback.get()) throw new IllegalStateException("Test-only group persistence body rollback");
+            }
+        };
+        var actualTransaction = new ProgrammaticFlushTransactionExecutor(transactionManager,
+                new FlushPersistenceService(fence,tileMetadataReader,dbBootstrapClassifier,pixelEventWriter,tileSnapshotWriter),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
+        byte[] pixelsA, pixelsB;
+        try (var runtime = createFreshRuntime(path, null, false, storage, plan -> {
+            transactions.incrementAndGet();
+            var result = actualTransaction.execute(plan);
+            if (!rollback.get()) assertEquals(FlushTransactionOutcome.COMMITTED, result.outcome());
+            return outcome.equals("lost-response") ? FlushTransactionResult.ambiguousCommit(lost) : result;
+        })) {
+            runtime.recover();
+            var measure = dev.cgt.pixelplace.measurement.Measurements.disabled();
+            try (var group = new dev.cgt.pixelplace.pixel.application.GroupPixelWriteExecutor(runtime.flushBoundaryCoordinator,
+                    runtime.pixelWriteService, runtime.dirtyTileTracker, runtime.serviceReadiness,
+                    new dev.cgt.pixelplace.pixel.application.WriteExecutionProperties(), measure)) {
+                assertEquals(1L, group.execute(7,0,0,11).eventSeq());
+                assertEquals(2L, group.execute(7,BoardConstants.TILE_SIZE,0,21).eventSeq());
+                assertEquals(3L, group.execute(7,0,0,12).eventSeq());
+            }
+            pixelsA = runtime.board.getRequired(KEY_A).pixels(); pixelsB = runtime.board.getRequired(KEY_B).pixels();
+            var before = walBytes(path);
+            if (outcome.equals("cleanup-delay")) storage.failDeletion(true);
+            if (outcome.equals("rollback")) {
+                assertThrows(FlushPersistenceRolledBackException.class,runtime::flush);
+                assertDatabaseState(0,List.of(),ZERO_TILE,0,ZERO_TILE,0);
+                assertWalBytes(before,path); assertEquals(0,storage.deleteAttempts());
+                assertDirtyState(runtime,List.of(new DirtyTile(KEY_A,3,2),new DirtyTile(KEY_B,2,1)));
+                rollback.set(false); assertEquals(FlushRunResult.COMMITTED,runtime.flush());
+            } else if (outcome.equals("lost-response")) {
+                assertThrows(AmbiguousFlushCommitException.class, runtime::flush);
+                var pending = runtime.pendingAmbiguousFlushStore.current().orElseThrow();
+                assertEquals(0L, pending.expectedLastFlushedEventSeq()); assertEquals(3L, pending.flushTargetEventSeq());
+                assertEquals(DbBootstrapState.INITIALIZED, pending.bootstrapState());
+                assertEquals(0, storage.deleteAttempts()); assertWalBytes(before, path);
+                assertEquals(FlushRunResult.RECONCILED_COMMIT, runtime.flush());
+            } else assertEquals(FlushRunResult.COMMITTED, runtime.flush());
+            assertEquals(outcome.equals("rollback")?2:1, transactions.get()); assertDirtyEmpty(runtime);
+            assertDatabaseState(3L,List.of(1L,2L,3L),pixelsA,2L,pixelsB,1L);
+            if (outcome.equals("cleanup-delay")) {
+                assertWalBytes(before,path); storage.failDeletion(false);
+                assertEquals(FlushRunResult.NO_OP,runtime.flush()); assertEquals(1,transactions.get());
+            }
+            assertEquals(List.of(segment(path,2)),walFiles(path));
+        }
+        Path empty = segment(path,3);
+        try (var channel = FileChannel.open(empty,StandardOpenOption.CREATE_NEW,StandardOpenOption.WRITE)) { channel.force(true); }
+        var beforeRecovery = walBytes(path);
+        try (var recovered = createSegmentedRuntime(path)) {
+            recovered.recover(); assertTrue(recovered.serviceReadiness.isReady());
+            assertEquals(3L,recovered.eventSeqManager.currentLastIssued());
+            assertEquals(3L,recovered.fileWalReplaySource.readAfter(3).walLastEventSeq());
+            assertTrue(recovered.fileWalReplaySource.readAfter(3).records().isEmpty());
+            assertMemoryState(recovered,pixelsA,2L,pixelsB,1L); assertWalBytes(beforeRecovery,path);
+            assertEquals(FlushRunResult.NO_OP,recovered.flush());
+        }
     }
 
     private Map<Path, byte[]> walBytes(Path path) throws IOException {
@@ -1341,7 +1416,7 @@ class FlushPersistenceMySqlIntegrationTest {
         properties.setActiveFile(walPath);
         properties.setMaxSegmentBytes(maxBytes);
         ObjectMapper mapper = new ObjectMapper();
-        return new SegmentedWalStorage(properties, new WalRecordParser(mapper), new WalRecordJsonCodec(mapper));
+        return new SegmentedWalStorage(properties, new WalRecordParser(mapper), new WalRecordJsonCodec(mapper), dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 
     private FreshRuntimeGraph createFreshRuntime(
@@ -1357,11 +1432,11 @@ class FlushPersistenceMySqlIntegrationTest {
         EventSeqManager eventSeqManager = new EventSeqManager();
         ServiceReadiness serviceReadiness = new ServiceReadiness();
         SynchronizedDirtyTileTracker dirtyTileTracker = new SynchronizedDirtyTileTracker();
-        FlushBoundaryCoordinator flushBoundaryCoordinator = new FlushBoundaryCoordinator();
+        FlushBoundaryCoordinator flushBoundaryCoordinator = new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled());
         FlushSingleFlightGuard flushSingleFlightGuard = new FlushSingleFlightGuard();
         PendingAmbiguousFlushStore pendingAmbiguousFlushStore = new PendingAmbiguousFlushStore();
 
-        FileWalAppender fileWalAppender = new FileWalAppender(storage);
+        FileWalAppender fileWalAppender = new FileWalAppender(storage, dev.cgt.pixelplace.measurement.Measurements.disabled());
         FileWalReplaySource fileWalReplaySource = failureObservationEnabled
                 ? new TrackingFileWalReplaySource(
                         storage,
@@ -1376,13 +1451,13 @@ class FlushPersistenceMySqlIntegrationTest {
                 board,
                 eventSeqManager,
                 serviceReadiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         PixelWriteService pixelWriteService = new PixelWriteService(
                 eventSeqManager,
                 fileWalAppender,
                 board,
                 serviceReadiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         PixelCooldown noOpCooldown = new PixelCooldown() {
             @Override
             public void checkWritable(long userId) {
@@ -1397,14 +1472,12 @@ class FlushPersistenceMySqlIntegrationTest {
         PixelBroadcastService noOpBroadcast = message -> {
             // 실제 WebSocket 없이 durable runtime 상태 전이만 검증
         };
-        PixelCommandService pixelCommandService = new PixelCommandService(
-                noOpCooldown,
-                flushBoundaryCoordinator,
-                pixelWriteService,
-                dirtyTileTracker,
+        PixelCommandService pixelCommandService = new PixelCommandService(noOpCooldown,
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(flushBoundaryCoordinator, pixelWriteService, dirtyTileTracker, serviceReadiness, dev.cgt.pixelplace.measurement.Measurements.disabled()),
                 noOpBroadcast,
-                serviceReadiness
-        );
+                serviceReadiness,
+                new dev.cgt.pixelplace.pixel.application.PixelUserWriteGate(),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
         FlushPlanCaptureService flushPlanCaptureService = new FlushPlanCaptureService(
                 serviceReadiness,
                 checkpointReader,
@@ -1414,7 +1487,7 @@ class FlushPersistenceMySqlIntegrationTest {
                 fileWalReplaySource,
                 dirtyTileTracker,
                 board
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         FlushWorker flushWorker = new FlushWorker(
                 flushSingleFlightGuard,
                 serviceReadiness,
@@ -1423,8 +1496,8 @@ class FlushPersistenceMySqlIntegrationTest {
                 pendingAmbiguousFlushStore,
                 flushReconciliationService,
                 dirtyTileTracker,
-                new dev.cgt.pixelplace.flush.application.FlushWalRetention(flushBoundaryCoordinator, serviceReadiness, pendingAmbiguousFlushStore, storage)
-        );
+                new dev.cgt.pixelplace.flush.application.FlushWalRetention(flushBoundaryCoordinator, serviceReadiness, pendingAmbiguousFlushStore, storage, dev.cgt.pixelplace.measurement.Measurements.disabled())
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         return new FreshRuntimeGraph(
                 storage,

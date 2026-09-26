@@ -116,7 +116,7 @@ class SegmentedWalAppendTest {
     void configurationMutationCannotMoveOrResizeInitializedStore() throws Exception {
         Path base=directory.resolve("wal");
         var properties=properties(base,Long.MAX_VALUE);
-        try(var storage=new SegmentedWalStorage(properties,PARSER,CODEC)) {
+        try(var storage=new SegmentedWalStorage(properties,PARSER,CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled())) {
             properties.setActiveFile(directory.resolve("other")); properties.setMaxSegmentBytes(1);
             storage.appendAndFsync(record(2)); storage.appendAndFsync(record(5));
             assertEquals(1,storage.inspectFiles().size());

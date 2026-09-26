@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.flush.application;
 
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
 import dev.cgt.pixelplace.tile.application.DirtyTile;
 import dev.cgt.pixelplace.tile.application.DirtyTileTracker;
 import org.springframework.context.annotation.Profile;
@@ -20,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class FlushWorker {
 
     private final FlushSingleFlightGuard flushSingleFlightGuard;
+    private final PixelMeasurement measurement;
     private final ServiceReadiness serviceReadiness;
     private final FlushPlanCaptureService flushPlanCaptureService;
     private final FlushTransactionExecutor flushTransactionExecutor;
@@ -36,7 +38,8 @@ public class FlushWorker {
             PendingAmbiguousFlushStore pendingAmbiguousFlushStore,
             FlushReconciliationService flushReconciliationService,
             DirtyTileTracker dirtyTileTracker,
-            FlushWalRetention flushWalRetention
+            FlushWalRetention flushWalRetention,
+            PixelMeasurement measurement
     ) {
         this.flushSingleFlightGuard = flushSingleFlightGuard;
         this.serviceReadiness = serviceReadiness;
@@ -46,10 +49,28 @@ public class FlushWorker {
         this.flushReconciliationService = flushReconciliationService;
         this.dirtyTileTracker = dirtyTileTracker;
         this.flushWalRetention = flushWalRetention;
+        this.measurement = measurement;
     }
 
     /* pending 확인부터 outcome 처리까지 기다림 없는 단일 cycle로 보호하는 scheduler 독립 API */
     public FlushRunResult flushOnce() {
+        var scope = measurement.begin(PixelMeasurement.Operation.flush_cycle);
+        measurement.cycleStarted(scope);
+        Throwable failure = null;
+        PixelMeasurement.Outcome outcome = PixelMeasurement.Outcome.failure;
+        try {
+            FlushRunResult result = measuredCycle();
+            outcome = switch (result) {
+                case COMMITTED, RECONCILED_COMMIT -> PixelMeasurement.Outcome.committed;
+                case RECONCILED_ROLLBACK -> PixelMeasurement.Outcome.rollback;
+                case NO_OP, SKIPPED_ALREADY_RUNNING -> PixelMeasurement.Outcome.skipped;
+            };
+            return result;
+        } catch (RuntimeException | Error problem) { failure = problem; throw problem; }
+        finally { measurement.cycleCompleted(scope, outcome); measurement.endPreserving(scope, outcome, failure); }
+    }
+
+    private FlushRunResult measuredCycle() {
         AtomicReference<FlushRunResult> cycleResult = new AtomicReference<>();
         boolean executed = flushSingleFlightGuard.tryRun(() -> cycleResult.set(runCycle()));
         if (!executed) {
@@ -118,7 +139,7 @@ public class FlushWorker {
 
     private FlushRunResult reconcilePending(PendingAmbiguousFlush pending) {
         FlushReconciliationDecision decision = Objects.requireNonNull(
-                flushReconciliationService.reconcile(pending),
+                measurement.observe(PixelMeasurement.Operation.reconciliation, () -> flushReconciliationService.reconcile(pending)),
                 "reconciliation returned null decision"
         );
         if (decision == FlushReconciliationDecision.COMMIT_CONFIRMED) {

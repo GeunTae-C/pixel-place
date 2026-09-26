@@ -1,6 +1,8 @@
 package dev.cgt.pixelplace.flush.application;
 
 import dev.cgt.pixelplace.checkpoint.application.CheckpointReader;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
+import static dev.cgt.pixelplace.measurement.PixelMeasurement.Operation.*;
 import dev.cgt.pixelplace.checkpoint.domain.CheckpointSnapshot;
 import dev.cgt.pixelplace.recovery.application.ServiceReadiness;
 import dev.cgt.pixelplace.tile.application.DirtyTile;
@@ -41,6 +43,7 @@ public class FlushPlanCaptureService {
             .thenComparingInt(TileKey::tx);
 
     private final ServiceReadiness serviceReadiness;
+    private final PixelMeasurement measurement;
     private final CheckpointReader checkpointReader;
     private final TileMetadataReader tileMetadataReader;
     private final DbBootstrapClassifier dbBootstrapClassifier;
@@ -57,7 +60,8 @@ public class FlushPlanCaptureService {
             FlushBoundaryCoordinator flushBoundaryCoordinator,
             WalReplaySource walReplaySource,
             DirtyTileTracker dirtyTileTracker,
-            InMemoryTileBoard inMemoryTileBoard
+            InMemoryTileBoard inMemoryTileBoard,
+            PixelMeasurement measurement
     ) {
         this.serviceReadiness = serviceReadiness;
         this.checkpointReader = checkpointReader;
@@ -67,6 +71,7 @@ public class FlushPlanCaptureService {
         this.walReplaySource = walReplaySource;
         this.dirtyTileTracker = dirtyTileTracker;
         this.inMemoryTileBoard = inMemoryTileBoard;
+        this.measurement = measurement;
     }
 
     /*
@@ -77,10 +82,10 @@ public class FlushPlanCaptureService {
         serviceReadiness.requireReady();
 
         CheckpointSnapshot checkpoint = Objects.requireNonNull(
-                checkpointReader.readMainCheckpoint(),
+                measurement.observe(checkpoint_read, checkpointReader::readMainCheckpoint),
                 "checkpointReader returned null"
         );
-        List<TileKey> tileKeys = tileMetadataReader.readAllTileKeys();
+        List<TileKey> tileKeys = measurement.observe(metadata_read, tileMetadataReader::readAllTileKeys);
         DbBootstrapState bootstrapState = dbBootstrapClassifier.classify(
                 checkpoint.lastFlushedEventSeq(),
                 tileKeys
@@ -91,7 +96,7 @@ public class FlushPlanCaptureService {
         }
 
         long expectedLastFlushedEventSeq = checkpoint.lastFlushedEventSeq();
-        FlushPlan plan = flushBoundaryCoordinator.coordinate(
+        FlushPlan plan = flushBoundaryCoordinator.capture(
                 () -> captureWithinBoundary(expectedLastFlushedEventSeq, bootstrapState)
         );
         return plan;
@@ -105,11 +110,12 @@ public class FlushPlanCaptureService {
         serviceReadiness.requireReady();
 
         WalReplayBatch batch = Objects.requireNonNull(
-                walReplaySource.readAfter(expectedLastFlushedEventSeq),
+                measurement.observe(capture_scan, () -> walReplaySource.readAfter(expectedLastFlushedEventSeq)),
                 "walReplaySource returned null"
         );
         List<WalRecord> walRecords = validateWalBatch(expectedLastFlushedEventSeq, batch);
         long flushTargetEventSeq = batch.walLastEventSeq();
+        measurement.captured(expectedLastFlushedEventSeq, flushTargetEventSeq, walRecords.size());
 
         if (walRecords.isEmpty()) {
             // no-op은 dirty 상태가 아니라 checkpoint 이후 실제 WAL record 부재로만 판정
@@ -124,7 +130,7 @@ public class FlushPlanCaptureService {
 
         try {
             List<TileKey> targetKeys = determineTargetKeys(bootstrapState, walAffectedKeys, drainedDirtyTiles);
-            Map<TileKey, FlushTileSnapshot> snapshotsByKey = captureSnapshots(targetKeys);
+            Map<TileKey, FlushTileSnapshot> snapshotsByKey = measurement.observe(snapshot, () -> captureSnapshots(targetKeys));
             validateDirtyInvariants(drainedDirtyTiles, flushTargetEventSeq, snapshotsByKey);
             return createNonNoOpPlan(
                     expectedLastFlushedEventSeq,

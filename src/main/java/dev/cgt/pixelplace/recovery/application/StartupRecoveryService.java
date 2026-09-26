@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.recovery.application;
 
 import dev.cgt.pixelplace.checkpoint.domain.CheckpointSnapshot;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
 import dev.cgt.pixelplace.common.constant.BoardConstants;
 import dev.cgt.pixelplace.flush.application.DbBootstrapClassifier;
 import dev.cgt.pixelplace.flush.application.DbBootstrapState;
@@ -27,6 +28,7 @@ import java.util.Objects;
 public class StartupRecoveryService {
 
     private final StartupRecoveryDbViewCaptureService dbViewCaptureService;
+    private final PixelMeasurement measurement;
     private final DbBootstrapClassifier dbBootstrapClassifier;
     private final CanonicalZ0TileKeys canonicalZ0TileKeys;
     private final WalReplaySource walReplaySource;
@@ -41,7 +43,8 @@ public class StartupRecoveryService {
             WalReplaySource walReplaySource,
             InMemoryTileBoard inMemoryTileBoard,
             EventSeqManager eventSeqManager,
-            ServiceReadiness serviceReadiness
+            ServiceReadiness serviceReadiness,
+            PixelMeasurement measurement
     ) {
         this.dbViewCaptureService = dbViewCaptureService;
         this.dbBootstrapClassifier = dbBootstrapClassifier;
@@ -50,6 +53,7 @@ public class StartupRecoveryService {
         this.inMemoryTileBoard = inMemoryTileBoard;
         this.eventSeqManager = eventSeqManager;
         this.serviceReadiness = serviceReadiness;
+        this.measurement = measurement;
     }
 
     /* 모든 입력·WAL invariant와 memory 복구 성공 뒤에만 ready 전환 */
@@ -68,7 +72,7 @@ public class StartupRecoveryService {
         validateDbView(checkpoint, bootstrapState, tileLoadResult);
 
         WalReplayBatch replayBatch = Objects.requireNonNull(
-                walReplaySource.readAfter(checkpoint),
+                measurement.observe(PixelMeasurement.Operation.recovery_scan, () -> walReplaySource.readAfter(checkpoint)),
                 "walReplayBatch must not be null."
         );
         validateWalReplayBatch(checkpoint, replayBatch);

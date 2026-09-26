@@ -34,7 +34,7 @@ class OverviewServiceTest {
     void notReadySkipsRendererWithoutChangingReadiness() {
         OverviewRenderer renderer = mock(OverviewRenderer.class);
         ServiceReadiness readiness = new ServiceReadiness();
-        OverviewService service = new OverviewService(renderer, readiness);
+        OverviewService service = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         service.refresh();
 
@@ -49,7 +49,7 @@ class OverviewServiceTest {
         byte[] first = {1, 2, 3};
         byte[] second = {4, 5, 6};
         when(renderer.render()).thenReturn(first, second);
-        OverviewService service = new OverviewService(renderer, readyReadiness());
+        OverviewService service = new OverviewService(renderer, readyReadiness(), dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         service.refresh();
         assertSame(first, service.currentPng().orElseThrow());
@@ -65,7 +65,7 @@ class OverviewServiceTest {
         RuntimeException failure = new IllegalStateException("render failed");
         when(renderer.render()).thenReturn(first).thenThrow(failure);
         ServiceReadiness readiness = readyReadiness();
-        OverviewService service = new OverviewService(renderer, readiness);
+        OverviewService service = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         FailureLogAppender appender = attachAppender();
 
         try {
@@ -88,7 +88,7 @@ class OverviewServiceTest {
         when(renderer.render())
                 .thenThrow(new IllegalStateException("first failed"))
                 .thenReturn(recovered);
-        OverviewService service = new OverviewService(renderer, readyReadiness());
+        OverviewService service = new OverviewService(renderer, readyReadiness(), dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         service.refresh();
         assertTrue(service.currentPng().isEmpty());
@@ -106,7 +106,7 @@ class OverviewServiceTest {
         AssertionError fatal = new AssertionError("renderer fatal");
         when(renderer.render()).thenReturn(first).thenThrow(fatal).thenReturn(recovered);
         ServiceReadiness readiness = readyReadiness();
-        OverviewService service = new OverviewService(renderer, readiness);
+        OverviewService service = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         service.refresh();
         AssertionError thrown = assertThrows(AssertionError.class, service::refresh);
@@ -125,7 +125,7 @@ class OverviewServiceTest {
         OverviewRenderer renderer = mock(OverviewRenderer.class);
         byte[] valid = {7};
         when(renderer.render()).thenReturn(null, new byte[0], valid);
-        OverviewService service = new OverviewService(renderer, readyReadiness());
+        OverviewService service = new OverviewService(renderer, readyReadiness(), dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         service.refresh();
         assertTrue(service.currentPng().isEmpty());
@@ -146,7 +146,7 @@ class OverviewServiceTest {
             awaitOrFail(releaseFirst);
             return completed;
         });
-        OverviewService service = new OverviewService(renderer, readyReadiness());
+        OverviewService service = new OverviewService(renderer, readyReadiness(), dev.cgt.pixelplace.measurement.Measurements.disabled());
         ExecutorService executor = Executors.newFixedThreadPool(2);
 
         try {
@@ -180,7 +180,7 @@ class OverviewServiceTest {
                     awaitOrFail(releaseSecond);
                     return newImage;
                 });
-        OverviewService service = new OverviewService(renderer, readyReadiness());
+        OverviewService service = new OverviewService(renderer, readyReadiness(), dev.cgt.pixelplace.measurement.Measurements.disabled());
         service.refresh();
         ExecutorService executor = Executors.newSingleThreadExecutor();
 

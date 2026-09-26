@@ -61,7 +61,7 @@ class PixelPlaceApplicationTests {
                 board,
                 eventSeqManager,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         service.recover();
 

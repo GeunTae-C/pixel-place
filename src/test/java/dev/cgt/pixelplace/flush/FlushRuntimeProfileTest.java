@@ -114,6 +114,7 @@ class FlushRuntimeProfileTest {
         context.registerBean(ServiceReadiness.class, ServiceReadiness::new);
 
         context.register(
+                dev.cgt.pixelplace.measurement.Measurements.class,
                 CanonicalZ0TileKeys.class,
                 DbBootstrapClassifier.class,
                 FlushBoundaryCoordinator.class,

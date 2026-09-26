@@ -122,7 +122,7 @@ class FlushPlanCaptureServiceTest {
 
         assertThrows(IllegalStateException.class, fixture.service::capturePlan);
 
-        verify(fixture.coordinator, never()).coordinate(any());
+        verify(fixture.coordinator, never()).capture(any());
         verifyNoInteractions(fixture.walReplaySource, fixture.dirtyTileTracker, fixture.board);
     }
 
@@ -136,7 +136,7 @@ class FlushPlanCaptureServiceTest {
 
         assertThrows(ServiceNotReadyException.class, fixture.service::capturePlan);
 
-        verify(fixture.coordinator).coordinate(any());
+        verify(fixture.coordinator).capture(any());
         verifyNoInteractions(fixture.walReplaySource, fixture.dirtyTileTracker, fixture.board);
     }
 
@@ -163,11 +163,11 @@ class FlushPlanCaptureServiceTest {
                 () -> new CheckpointSnapshot(0L),
                 CANONICAL_KEYS::orderedKeys,
                 classifier(),
-                new FlushBoundaryCoordinator(),
+                new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled()),
                 expected -> new WalReplayBatch(List.of(), expected),
                 tracker,
                 mock(InMemoryTileBoard.class)
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         FlushPlan plan = service.capturePlan();
 
@@ -358,7 +358,7 @@ class FlushPlanCaptureServiceTest {
         board.applyPixel(0, 0, 7);
         FlushPlanCaptureService service = standaloneService(
                 readyReadiness(),
-                new FlushBoundaryCoordinator(),
+                new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled()),
                 expected -> new WalReplayBatch(List.of(record(1L, KEY_A)), 1L),
                 mockTrackerReturning(List.of()),
                 board
@@ -469,7 +469,7 @@ class FlushPlanCaptureServiceTest {
                 fixture.walReplaySource,
                 fixture.dirtyTileTracker,
                 fixture.board
-        ) {
+        , dev.cgt.pixelplace.measurement.Measurements.disabled()) {
             @Override
             FlushPlan createNonNoOpPlan(
                     long expectedLastFlushedEventSeq,
@@ -599,7 +599,7 @@ class FlushPlanCaptureServiceTest {
     // WAL scan부터 snapshot 완료까지 같은 coordinator를 공유하여 후속 write가 plan에 섞이지 않음
     void sharedBoundaryBlocksCommandCoreUntilPlanCaptureCompletes() throws Exception {
         ServiceReadiness readiness = readyReadiness();
-        FlushBoundaryCoordinator coordinator = new FlushBoundaryCoordinator();
+        FlushBoundaryCoordinator coordinator = new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled());
         InMemoryTileBoard board = new InMemoryTileBoard();
         board.applyPixel(0, 0, 17);
         CountDownLatch walEntered = new CountDownLatch(1);
@@ -632,15 +632,13 @@ class FlushPlanCaptureServiceTest {
                 commandAppender,
                 board,
                 readiness
-        );
-        PixelCommandService commandService = new PixelCommandService(
-                cooldown,
-                coordinator,
-                writeService,
-                tracker,
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        PixelCommandService commandService = new PixelCommandService(cooldown,
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(coordinator, writeService, tracker, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled()),
                 mock(PixelBroadcastService.class),
-                readiness
-        );
+                readiness,
+                new dev.cgt.pixelplace.pixel.application.PixelUserWriteGate(),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
         ExecutorService executor = Executors.newFixedThreadPool(2);
 
         try {
@@ -720,7 +718,7 @@ class FlushPlanCaptureServiceTest {
 
     private void assertDatabaseReadDoesNotHoldCoordinator(boolean blockCheckpoint) throws Exception {
         ServiceReadiness readiness = readyReadiness();
-        FlushBoundaryCoordinator coordinator = new FlushBoundaryCoordinator();
+        FlushBoundaryCoordinator coordinator = new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled());
         CountDownLatch dbReadEntered = new CountDownLatch(1);
         CountDownLatch releaseDbRead = new CountDownLatch(1);
         CheckpointReader checkpointReader = () -> {
@@ -747,19 +745,17 @@ class FlushPlanCaptureServiceTest {
                 expected -> new WalReplayBatch(List.of(), expected),
                 tracker,
                 mock(InMemoryTileBoard.class)
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         PixelCooldown cooldown = mock(PixelCooldown.class);
         PixelWriteService writeService = mock(PixelWriteService.class);
         PixelWriteResult result = new PixelWriteResult(1L, KEY_A, 1L, 0, 0, 17);
         when(writeService.writePixel(7L, 0, 0, 17)).thenReturn(result);
-        PixelCommandService commandService = new PixelCommandService(
-                cooldown,
-                coordinator,
-                writeService,
-                tracker,
+        PixelCommandService commandService = new PixelCommandService(cooldown,
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(coordinator, writeService, tracker, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled()),
                 mock(PixelBroadcastService.class),
-                readiness
-        );
+                readiness,
+                new dev.cgt.pixelplace.pixel.application.PixelUserWriteGate(),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
         ExecutorService executor = Executors.newFixedThreadPool(2);
 
         try {
@@ -796,7 +792,7 @@ class FlushPlanCaptureServiceTest {
                 walReplaySource,
                 dirtyTileTracker,
                 board
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 
     private static DirtyTileTracker mockTrackerReturning(List<DirtyTile> drained) {
@@ -880,7 +876,7 @@ class FlushPlanCaptureServiceTest {
             doAnswer(invocation -> {
                 Supplier<?> action = invocation.getArgument(0);
                 return action.get();
-            }).when(coordinator).coordinate(any());
+            }).when(coordinator).capture(any());
             when(walReplaySource.readAfter(0L)).thenReturn(new WalReplayBatch(List.of(), 0L));
             when(dirtyTileTracker.drainDirtyTiles()).thenReturn(List.of());
             when(board.getRequired(any())).thenReturn(tileState(100L));
@@ -893,7 +889,7 @@ class FlushPlanCaptureServiceTest {
                     walReplaySource,
                     dirtyTileTracker,
                     board
-            );
+            , dev.cgt.pixelplace.measurement.Measurements.disabled());
         }
 
         private void checkpoint(long expected) {

@@ -46,19 +46,17 @@ import static org.mockito.Mockito.when;
 class PixelCommandServiceTest {
 
     private final PixelCooldown pixelCooldown = mock(PixelCooldown.class);
-    private final FlushBoundaryCoordinator flushBoundaryCoordinator = new FlushBoundaryCoordinator();
+    private final FlushBoundaryCoordinator flushBoundaryCoordinator = new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled());
     private final PixelWriteService pixelWriteService = mock(PixelWriteService.class);
     private final DirtyTileTracker dirtyTileTracker = mock(DirtyTileTracker.class);
     private final PixelBroadcastService pixelBroadcastService = mock(PixelBroadcastService.class);
     private final ServiceReadiness serviceReadiness = readyReadiness();
-    private final PixelCommandService service = new PixelCommandService(
-            pixelCooldown,
-            flushBoundaryCoordinator,
-            pixelWriteService,
-            dirtyTileTracker,
-            pixelBroadcastService,
-            serviceReadiness
-    );
+    private final PixelCommandService service = new PixelCommandService(pixelCooldown,
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(flushBoundaryCoordinator, pixelWriteService, dirtyTileTracker, serviceReadiness, dev.cgt.pixelplace.measurement.Measurements.disabled()),
+                pixelBroadcastService,
+                serviceReadiness,
+                new dev.cgt.pixelplace.pixel.application.PixelUserWriteGate(),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
 
     @Test
     // cooldown check -> core write -> dirty mark -> cooldown start -> broadcast 순서 고정
@@ -125,17 +123,15 @@ class PixelCommandServiceTest {
                 walAppender,
                 board,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         DirtyTileTracker tracker = mock(DirtyTileTracker.class);
         PixelBroadcastService broadcaster = mock(PixelBroadcastService.class);
-        PixelCommandService commandService = new PixelCommandService(
-                cooldown,
-                new FlushBoundaryCoordinator(),
-                realWriteService,
-                tracker,
+        PixelCommandService commandService = new PixelCommandService(cooldown,
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled()), realWriteService, tracker, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled()),
                 broadcaster,
-                readiness
-        );
+                readiness,
+                new dev.cgt.pixelplace.pixel.application.PixelUserWriteGate(),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
         doAnswer(invocation -> {
             readiness.markNotReady();
             return null;
@@ -182,15 +178,12 @@ class PixelCommandServiceTest {
     }
 
     @Test
-    // core validation 실패는 승인된 write가 아니므로 cooldown 시작 금지
-    void writePixelDoesNotStartCooldownWhenCoreWriteFailsWithIllegalArgumentException() {
-        when(pixelWriteService.writePixel(7L, -1, 1280, 17))
-                .thenThrow(new IllegalArgumentException("x coordinate is out of board range. x=-1"));
-
+    // Redis 검사 뒤 executor 접수 전 좌표 거부. core 재검증과 별개의 admission 계약
+    void writePixelRejectsInvalidCoordinatesAfterRedisBeforeExecutorAdmission() {
         assertThrows(IllegalArgumentException.class, () -> service.writePixel(7L, -1, 1280, 17));
 
         verify(pixelCooldown).checkWritable(7L);
-        verify(pixelWriteService).writePixel(7L, -1, 1280, 17);
+        verifyNoInteractions(pixelWriteService);
         verifyNoInteractions(dirtyTileTracker);
         verifyNoInteractions(pixelBroadcastService);
         verifyNoMoreInteractions(pixelCooldown);
@@ -289,7 +282,7 @@ class PixelCommandServiceTest {
     // Redis 사전 확인과 성공 후처리는 boundary 밖, core write와 dirty mark만 같은 callback 내부
     void writeAndDirtyMarkShareBoundaryWhileCooldownAndBroadcastStayOutside() {
         AtomicBoolean insideBoundary = new AtomicBoolean();
-        FlushBoundaryCoordinator trackingCoordinator = new FlushBoundaryCoordinator() {
+        FlushBoundaryCoordinator trackingCoordinator = new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled()) {
             @Override
             public <T> T coordinate(Supplier<T> action) {
                 assertFalse(insideBoundary.get());
@@ -326,14 +319,12 @@ class PixelCommandServiceTest {
             assertFalse(insideBoundary.get());
             return null;
         }).when(broadcaster).broadcast(any(PixelEventMessage.class));
-        PixelCommandService commandService = new PixelCommandService(
-                cooldown,
-                trackingCoordinator,
-                writeService,
-                tracker,
+        PixelCommandService commandService = new PixelCommandService(cooldown,
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(trackingCoordinator, writeService, tracker, readyReadiness(), dev.cgt.pixelplace.measurement.Measurements.disabled()),
                 broadcaster,
-                readyReadiness()
-        );
+                readyReadiness(),
+                new dev.cgt.pixelplace.pixel.application.PixelUserWriteGate(),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         PixelWriteResult actual = commandService.writePixel(7L, 768, 1280, 17);
 
@@ -371,17 +362,15 @@ class PixelCommandServiceTest {
                 walAppender,
                 board,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         DirtyTileTracker tracker = mock(DirtyTileTracker.class);
         PixelBroadcastService broadcaster = mock(PixelBroadcastService.class);
-        PixelCommandService commandService = new PixelCommandService(
-                cooldown,
-                blockingCoordinator,
-                realWriteService,
-                tracker,
+        PixelCommandService commandService = new PixelCommandService(cooldown,
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(blockingCoordinator, realWriteService, tracker, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled()),
                 broadcaster,
-                readiness
-        );
+                readiness,
+                new dev.cgt.pixelplace.pixel.application.PixelUserWriteGate(),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
         ExecutorService executor = Executors.newSingleThreadExecutor();
 
         try {
@@ -426,6 +415,7 @@ class PixelCommandServiceTest {
     }
 
     private static final class BlockingCoordinator extends FlushBoundaryCoordinator {
+        private BlockingCoordinator() { super(dev.cgt.pixelplace.measurement.Measurements.disabled()); }
 
         private final CountDownLatch entered = new CountDownLatch(1);
         private final CountDownLatch release = new CountDownLatch(1);

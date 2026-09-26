@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.flush.infra;
 
 import dev.cgt.pixelplace.flush.application.FlushPersistenceService;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
 import dev.cgt.pixelplace.flush.application.FlushPlan;
 import dev.cgt.pixelplace.flush.application.FlushTransactionExecutor;
 import dev.cgt.pixelplace.flush.application.FlushTransactionResult;
@@ -24,14 +25,17 @@ public class ProgrammaticFlushTransactionExecutor implements FlushTransactionExe
     static final String TRANSACTION_NAME = "pixel-place-flush-persistence";
 
     private final PlatformTransactionManager transactionManager;
+    private final PixelMeasurement measurement;
     private final FlushPersistenceService flushPersistenceService;
 
     public ProgrammaticFlushTransactionExecutor(
             PlatformTransactionManager transactionManager,
-            FlushPersistenceService flushPersistenceService
+            FlushPersistenceService flushPersistenceService,
+            PixelMeasurement measurement
     ) {
         this.transactionManager = transactionManager;
         this.flushPersistenceService = flushPersistenceService;
+        this.measurement = measurement;
     }
 
     /*
@@ -40,6 +44,22 @@ public class ProgrammaticFlushTransactionExecutor implements FlushTransactionExe
      */
     @Override
     public FlushTransactionResult execute(FlushPlan plan) {
+        var scope = measurement.begin(PixelMeasurement.Operation.transaction);
+        Throwable failure = null;
+        PixelMeasurement.Outcome outcome = PixelMeasurement.Outcome.failure;
+        try {
+            FlushTransactionResult result = executeTransaction(plan);
+            outcome = switch (result.outcome()) {
+                case COMMITTED -> PixelMeasurement.Outcome.committed;
+                case DEFINITE_ROLLBACK -> PixelMeasurement.Outcome.rollback;
+                case AMBIGUOUS_COMMIT -> PixelMeasurement.Outcome.ambiguous;
+            };
+            return result;
+        } catch (RuntimeException | Error problem) { failure = problem; throw problem; }
+        finally { measurement.endPreserving(scope, outcome, failure); }
+    }
+
+    private FlushTransactionResult executeTransaction(FlushPlan plan) {
         FlushPlan currentPlan = Objects.requireNonNull(plan, "plan must not be null");
         if (currentPlan.noOp()) {
             throw new IllegalArgumentException("No-op plan must not start a transaction.");

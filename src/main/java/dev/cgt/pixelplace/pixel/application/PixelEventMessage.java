@@ -9,16 +9,19 @@ public record PixelEventMessage(
         int x,
         int y,
         int color,
-        long eventSeq
+        long eventSeq,
+        long tileVersion
 ) {
 
+    /* 해당 mutation 직후의 version 전달. broadcast 시점의 board 재조회 금지 */
     public static PixelEventMessage from(PixelWriteResult result) {
         return new PixelEventMessage(
                 "pixel",
                 result.x(),
                 result.y(),
                 result.color(),
-                result.eventSeq()
+                result.eventSeq(),
+                result.tileVersion()
         );
     }
 }

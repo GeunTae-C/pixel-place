@@ -118,6 +118,6 @@ class SegmentedWalFileSetTest {
 
     private SegmentedWalStorage storage(Path path) {
         WalProperties properties = new WalProperties(); properties.setActiveFile(path);
-        return new SegmentedWalStorage(properties, mock(WalRecordParser.class), mock(WalRecordJsonCodec.class));
+        return new SegmentedWalStorage(properties, mock(WalRecordParser.class), mock(WalRecordJsonCodec.class), dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 }

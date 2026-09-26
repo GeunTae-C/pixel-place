@@ -12,7 +12,7 @@ public final class MySqlRetentionTestStorage extends SegmentedWalStorage {
 
     public MySqlRetentionTestStorage(Path temporaryRoot, Path walPath) {
         super(WalStorageTestSupport.properties(requireTemporaryPath(temporaryRoot, walPath), 1L),
-                WalStorageTestSupport.PARSER, WalStorageTestSupport.CODEC);
+                WalStorageTestSupport.PARSER, WalStorageTestSupport.CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 
     /** 테스트가 소유한 임시 경로 밖에서는 실패 주입 거부 */

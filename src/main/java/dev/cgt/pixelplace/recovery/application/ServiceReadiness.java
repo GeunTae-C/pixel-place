@@ -27,7 +27,7 @@ public class ServiceReadiness {
         }
     }
 
-    /* temporary not-ready의 pending reconciliation은 허용하고 irreversible fatal만 차단 */
+    /* temporary/확정 write 실패의 기존 pending은 허용하고 pending 소유권 불명 fatal은 차단 */
     public synchronized void requireNotFatal() {
         if (state == State.FATAL_NOT_READY) {
             throw new ServiceNotReadyException();
@@ -36,14 +36,14 @@ public class ServiceReadiness {
 
     /* startup recovery 전체 성공 뒤에만 보호 대상 요청 처리 허용 */
     public synchronized void markReady() {
-        if (state != State.FATAL_NOT_READY) {
+        if (state == State.NOT_READY || state == State.READY) {
             state = State.READY;
         }
     }
 
     /* recovery 시작 같은 temporary not-ready 전환, irreversible fatal 해제 책임은 갖지 않음 */
     public synchronized void markNotReady() {
-        if (state != State.FATAL_NOT_READY) {
+        if (state == State.NOT_READY || state == State.READY) {
             state = State.NOT_READY;
         }
     }
@@ -56,6 +56,11 @@ public class ServiceReadiness {
         state = State.FATAL_NOT_READY;
     }
 
+    /* write 불일치는 재시작 전 해제 금지. 이미 정상 capture된 pending의 exact reconciliation은 허용 */
+    public synchronized void markWriteFailed() {
+        if (state != State.FATAL_NOT_READY) state = State.WRITE_FAILED;
+    }
+
     /* protected request와 pending reconciliation 허용 범위를 구분하는 내부 상태 */
     private enum State {
         /* startup recovery 중이거나 재진입 가능한 임시 차단 */
@@ -63,6 +68,9 @@ public class ServiceReadiness {
 
         /* WAL durable tail과 memory authoritative state 일치 확인 완료 */
         READY,
+
+        /* 새 write/capture 차단. pending 소유권 불명과 달리 기존 정상 plan의 결과 판정 가능 */
+        WRITE_FAILED,
 
         /* pending exact identity 확인 불가 뒤 process restart 전 해제 금지 */
         FATAL_NOT_READY

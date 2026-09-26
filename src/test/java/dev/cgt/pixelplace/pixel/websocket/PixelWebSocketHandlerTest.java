@@ -41,24 +41,30 @@ class PixelWebSocketHandlerTest {
 
     @Test
     void handleTransportErrorRemovesAndClosesOpenSession() throws IOException {
-        WebSocketSession session = mock(WebSocketSession.class);
-        when(session.isOpen()).thenReturn(true);
+        var registry = new PixelWebSocketSessionRegistry();
+        var realHandler = new PixelWebSocketHandler(registry);
+        WebSocketSession session = NativeSessionFixture.session("transport");
+        realHandler.afterConnectionEstablished(session);
 
-        handler.handleTransportError(session, new RuntimeException("network error"));
+        realHandler.handleTransportError(session, new RuntimeException("network error"));
+        realHandler.handleTransportError(session, new RuntimeException("duplicate"));
+        realHandler.afterConnectionClosed(session, CloseStatus.NORMAL);
 
-        verify(sessionRegistry).remove(session);
-        verify(session).close();
+        org.junit.jupiter.api.Assertions.assertTrue(registry.snapshot().isEmpty());
+        verify(session).close(CloseStatus.SESSION_NOT_RELIABLE);
     }
 
     @Test
     void handleTransportErrorDoesNotPropagateCloseFailure() throws IOException {
-        WebSocketSession session = mock(WebSocketSession.class);
-        when(session.isOpen()).thenReturn(true);
-        doThrow(new IOException("close failed")).when(session).close();
+        var registry = new PixelWebSocketSessionRegistry();
+        var realHandler = new PixelWebSocketHandler(registry);
+        WebSocketSession session = NativeSessionFixture.session("close-failed");
+        registry.add(session);
+        doThrow(new IOException("close failed")).when(session).close(CloseStatus.SESSION_NOT_RELIABLE);
 
-        assertDoesNotThrow(() -> handler.handleTransportError(session, new RuntimeException("network error")));
+        assertDoesNotThrow(() -> realHandler.handleTransportError(session, new RuntimeException("network error")));
 
-        verify(sessionRegistry).remove(session);
-        verify(session).close();
+        org.junit.jupiter.api.Assertions.assertTrue(registry.snapshot().isEmpty());
+        verify(session).close(CloseStatus.SESSION_NOT_RELIABLE);
     }
 }

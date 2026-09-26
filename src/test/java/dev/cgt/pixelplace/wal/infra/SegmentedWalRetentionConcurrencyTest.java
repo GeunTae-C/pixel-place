@@ -55,7 +55,7 @@ class SegmentedWalRetentionConcurrencyTest {
         AtomicBoolean first = new AtomicBoolean(true), readerClosed = new AtomicBoolean();
         AtomicInteger deletes = new AtomicInteger();
         Path base = directory.resolve("wal");
-        try (var storage = new SegmentedWalStorage(properties(base, 10000), PARSER, CODEC) {
+        try (var storage = new SegmentedWalStorage(properties(base, 10000), PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled()) {
             @Override BufferedReader openReader(Path path) throws IOException {
                 var actual = super.openReader(path);
                 if (!first.getAndSet(false)) return actual;
@@ -205,7 +205,7 @@ class SegmentedWalRetentionConcurrencyTest {
         final InMemoryTileBoard board = spy(new InMemoryTileBoard());
         final ServiceReadiness ready = new ServiceReadiness();
         final SynchronizedDirtyTileTracker dirty = spy(new SynchronizedDirtyTileTracker());
-        final FlushBoundaryCoordinator coordinator = new FlushBoundaryCoordinator();
+        final FlushBoundaryCoordinator coordinator = new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled());
         final FlushSingleFlightGuard guard = new FlushSingleFlightGuard();
         final PendingAmbiguousFlushStore store = spy(new PendingAmbiguousFlushStore());
         final PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
@@ -227,17 +227,20 @@ class SegmentedWalRetentionConcurrencyTest {
             // 최초 1,024 snapshot 원자성은 기존 capture/MySQL 회귀의 실제 assertion 유지
             when(metadata.readAllTileKeys()).thenReturn(keys.orderedKeys());
             capture = spy(new FlushPlanCaptureService(ready, checkpointReader, metadata, new DbBootstrapClassifier(keys),
-                    coordinator, new FileWalReplaySource(storage), dirty, board));
+                    coordinator, new FileWalReplaySource(storage), dirty, board, dev.cgt.pixelplace.measurement.Measurements.disabled()));
             var persistence = mock(FlushPersistenceService.class);
             doAnswer(inv -> { target.set(((FlushPlan) inv.getArgument(0)).flushTargetEventSeq()); return null; }).when(persistence).persist(any());
             when(manager.getTransaction(any())).thenReturn(status);
             doAnswer(inv -> { checkpoint.set(target.get()); return null; }).when(manager).commit(status);
-            retention = spy(new FlushWalRetention(coordinator, ready, store, storage));
-            worker = new FlushWorker(guard, ready, capture, new ProgrammaticFlushTransactionExecutor(manager, persistence),
-                    store, new FlushReconciliationService(probe), dirty, retention);
-            command = new PixelCommandService(mock(PixelCooldown.class), coordinator,
-                    new PixelWriteService(new EventSeqManager(), new FileWalAppender(storage), board, ready),
-                    dirty, mock(PixelBroadcastService.class), ready);
+            retention = spy(new FlushWalRetention(coordinator, ready, store, storage, dev.cgt.pixelplace.measurement.Measurements.disabled()));
+            worker = new FlushWorker(guard, ready, capture, new ProgrammaticFlushTransactionExecutor(manager, persistence, dev.cgt.pixelplace.measurement.Measurements.disabled()),
+                    store, new FlushReconciliationService(probe), dirty, retention, dev.cgt.pixelplace.measurement.Measurements.disabled());
+            command = new PixelCommandService(mock(PixelCooldown.class),
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(coordinator, new PixelWriteService(new EventSeqManager(), new FileWalAppender(storage, dev.cgt.pixelplace.measurement.Measurements.disabled()), board, ready, dev.cgt.pixelplace.measurement.Measurements.disabled()), dirty, ready, dev.cgt.pixelplace.measurement.Measurements.disabled()),
+                mock(PixelBroadcastService.class),
+                ready,
+                new dev.cgt.pixelplace.pixel.application.PixelUserWriteGate(),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
             ready.markReady();
             ownedMocks.addAll(List.of(board, dirty, store, manager, status, probe, checkpointReader,
                     metadata, capture, persistence, retention));

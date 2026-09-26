@@ -141,16 +141,21 @@ class SegmentedWalConsumerTest {
         final PixelCommandService command;
 
         Fixture(SegmentedWalStorage storage) {
-            var coordinator=new FlushBoundaryCoordinator();
+            var coordinator=new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled());
             var reader=new FileWalReplaySource(storage);
             var db=mock(StartupRecoveryDbViewCaptureService.class);
             when(db.capture()).thenReturn(new StartupRecoveryDbView(new CheckpointSnapshot(0),TileLoadResult.allMissingResult()));
             var classifier=new DbBootstrapClassifier(keys);
             when(checkpoint.readMainCheckpoint()).thenReturn(new CheckpointSnapshot(0));
             when(metadata.readAllTileKeys()).thenReturn(List.of());
-            recovery=new StartupRecoveryService(db,classifier,keys,reader,board,sequence,ready);
-            capture=new FlushPlanCaptureService(ready,checkpoint,metadata,classifier,coordinator,reader,dirty,board);
-            command=new PixelCommandService(cooldown,coordinator,new PixelWriteService(sequence,new FileWalAppender(storage),board,ready),dirty,broadcast,ready);
+            recovery=new StartupRecoveryService(db,classifier,keys,reader,board,sequence,ready, dev.cgt.pixelplace.measurement.Measurements.disabled());
+            capture=new FlushPlanCaptureService(ready,checkpoint,metadata,classifier,coordinator,reader,dirty,board, dev.cgt.pixelplace.measurement.Measurements.disabled());
+            command=new PixelCommandService(cooldown,
+                new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(coordinator, new PixelWriteService(sequence,new FileWalAppender(storage, dev.cgt.pixelplace.measurement.Measurements.disabled()),board,ready, dev.cgt.pixelplace.measurement.Measurements.disabled()), dirty, ready, dev.cgt.pixelplace.measurement.Measurements.disabled()),
+                broadcast,
+                ready,
+                new dev.cgt.pixelplace.pixel.application.PixelUserWriteGate(),
+                dev.cgt.pixelplace.measurement.Measurements.disabled());
         }
         void checkpoint(long seq) {
             when(checkpoint.readMainCheckpoint()).thenReturn(new CheckpointSnapshot(seq));

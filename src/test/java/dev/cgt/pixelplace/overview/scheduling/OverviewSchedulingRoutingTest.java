@@ -202,7 +202,7 @@ class OverviewSchedulingRoutingTest {
                 OverviewRenderer overviewRenderer,
                 ServiceReadiness serviceReadiness
         ) {
-            return new OverviewService(overviewRenderer, serviceReadiness);
+            return new OverviewService(overviewRenderer, serviceReadiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         }
 
         @Bean

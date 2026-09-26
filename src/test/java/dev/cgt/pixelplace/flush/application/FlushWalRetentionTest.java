@@ -186,7 +186,7 @@ class FlushWalRetentionTest {
         verify(f.port, times(2)).deleteCommittedPrefix(10);
         verify(f.port).deleteCommittedPrefix(20);
         clearInvocations(f.port);
-        new FlushWalRetention(f.coordinator, f.ready, f.store, f.port).retryIfEligible();
+        new FlushWalRetention(f.coordinator, f.ready, f.store, f.port, dev.cgt.pixelplace.measurement.Measurements.disabled()).retryIfEligible();
         verifyNoInteractions(f.port);
     }
 
@@ -225,7 +225,7 @@ class FlushWalRetentionTest {
     /** 실제 dirty drain·executor를 쓰되 DB syscall과 retention port만 실패 대역으로 제한 */
     private static class Fixture {
         final ServiceReadiness ready = spy(new ServiceReadiness());
-        final FlushBoundaryCoordinator coordinator = spy(new FlushBoundaryCoordinator());
+        final FlushBoundaryCoordinator coordinator = spy(new FlushBoundaryCoordinator(dev.cgt.pixelplace.measurement.Measurements.disabled()));
         final PendingAmbiguousFlushStore store = spy(new PendingAmbiguousFlushStore());
         final WalSegmentRetention port = mock(WalSegmentRetention.class);
         final SynchronizedDirtyTileTracker dirty = spy(new SynchronizedDirtyTileTracker());
@@ -235,7 +235,7 @@ class FlushWalRetentionTest {
         final FlushPersistenceService persistence = mock(FlushPersistenceService.class);
         final FlushDbStateProbe probe = mock(FlushDbStateProbe.class);
         final FlushSingleFlightGuard guard = new FlushSingleFlightGuard();
-        final FlushWalRetention retention = spy(new FlushWalRetention(coordinator, ready, store, port));
+        final FlushWalRetention retention = spy(new FlushWalRetention(coordinator, ready, store, port, dev.cgt.pixelplace.measurement.Measurements.disabled()));
         final FlushPlan plan;
         final FlushWorker worker;
 
@@ -248,8 +248,8 @@ class FlushWalRetentionTest {
             when(capture.capturePlan()).thenReturn(plan);
             when(manager.getTransaction(any())).thenReturn(status);
             when(port.deleteCommittedPrefix(anyLong())).thenReturn(WalRetentionResult.completed(0));
-            worker = new FlushWorker(guard, ready, capture, new ProgrammaticFlushTransactionExecutor(manager, persistence),
-                    store, new FlushReconciliationService(probe), dirty, retention);
+            worker = new FlushWorker(guard, ready, capture, new ProgrammaticFlushTransactionExecutor(manager, persistence, dev.cgt.pixelplace.measurement.Measurements.disabled()),
+                    store, new FlushReconciliationService(probe), dirty, retention, dev.cgt.pixelplace.measurement.Measurements.disabled());
         }
 
         void assertCommittedOwnership() {

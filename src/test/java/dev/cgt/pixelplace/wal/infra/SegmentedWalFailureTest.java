@@ -90,7 +90,7 @@ class SegmentedWalFailureTest {
         when(codec.serializeLine(any())).thenAnswer(inv->CODEC.serializeLine(inv.getArgument(0)));
         var bad=record(5);
         doThrow(new IllegalArgumentException("serialization")).when(codec).serializeLine(bad);
-        try(var storage=spy(new SegmentedWalStorage(properties(directory.resolve("wal"),1000),PARSER,codec))) {
+        try(var storage=spy(new SegmentedWalStorage(properties(directory.resolve("wal"),1000),PARSER,codec, dev.cgt.pixelplace.measurement.Measurements.disabled()))) {
             if(alreadyOpen) storage.appendAndFsync(record(2));
             clearInvocations(storage);
             assertThrows(NullPointerException.class,()->storage.appendAndFsync(null));

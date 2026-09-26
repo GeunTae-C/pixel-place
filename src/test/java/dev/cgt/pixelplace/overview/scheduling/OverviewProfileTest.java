@@ -21,6 +21,7 @@ class OverviewProfileTest {
         try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
             context.getEnvironment().setActiveProfiles("stub");
             context.register(
+                    dev.cgt.pixelplace.measurement.Measurements.class,
                     InMemoryTileBoard.class,
                     CanonicalZ0TileKeys.class,
                     ServiceReadiness.class,

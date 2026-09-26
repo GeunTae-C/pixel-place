@@ -1,6 +1,7 @@
 package dev.cgt.pixelplace.wal.infra;
 
 import dev.cgt.pixelplace.wal.application.WalRecordJsonCodec;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
 import dev.cgt.pixelplace.wal.application.WalRecordParser;
 import dev.cgt.pixelplace.wal.application.WalReplayBatch;
 import dev.cgt.pixelplace.wal.application.WalRetentionResult;
@@ -39,6 +40,7 @@ import java.util.Objects;
 public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
     private static final Logger log = LoggerFactory.getLogger(SegmentedWalStorage.class);
     private final Path basePath;
+    private final PixelMeasurement measurement;
     private final long maxSegmentBytes;
     private final WalRecordParser parser;
     private final WalRecordJsonCodec codec;
@@ -48,12 +50,13 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
     private SegmentFile active;
     private long durableTail;
 
-    public SegmentedWalStorage(WalProperties properties, WalRecordParser parser, WalRecordJsonCodec codec) {
+    public SegmentedWalStorage(WalProperties properties, WalRecordParser parser, WalRecordJsonCodec codec, PixelMeasurement measurement) {
         properties.validate();
         this.basePath = properties.normalizedBasePath();
         this.maxSegmentBytes = properties.getMaxSegmentBytes();
         this.parser = Objects.requireNonNull(parser);
         this.codec = Objects.requireNonNull(codec);
+        this.measurement = Objects.requireNonNull(measurement);
     }
 
     // namespace 밖 항목은 attributes조차 읽지 않으며 canonical 연속 suffix만 채택
@@ -97,7 +100,7 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
         try {
             validateActive();
             // 반환 record는 불필요하지만 checkpoint 이하를 포함한 전체 내용 검증은 동일
-            ScanResult inspected = scan(Long.MAX_VALUE);
+            ScanResult inspected = measuredScan(Long.MAX_VALUE, PixelMeasurement.Operation.retention_scan);
             if (inspected.batch().walLastEventSeq() < confirmedCheckpoint) {
                 throw new IllegalStateException("Confirmed checkpoint exceeds actual WAL tail");
             }
@@ -129,46 +132,79 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
         }
     }
 
-    /** record 전체 write와 force(true) 성공 이후에만 확인한 size·tail 전진 */
+    /** 단건도 동일 batch 저장 알고리즘 사용. 물리 size와 durable tail의 전진 시점 분리 */
     public synchronized void appendAndFsync(WalRecord record) {
+        measurement.observe(PixelMeasurement.Operation.storage_append,
+                () -> appendWithinMonitor(java.util.Collections.singletonList(record), false));
+    }
+
+    /** 전체 직렬화·순서 검증 후 파일별 force. 일부 durable prefix도 batch 성공으로 반환 금지 */
+    public synchronized void appendBatchAndFsync(List<WalRecord> records) {
+        measurement.observe(PixelMeasurement.Operation.storage_append, () -> appendWithinMonitor(records, true));
+    }
+
+    private void appendWithinMonitor(List<WalRecord> input, boolean batch) {
         requireUsable();
         // 정상 개방 상태에서도 순수 입력 실패로 파일 접근하거나 고장 전환하지 않음
-        Objects.requireNonNull(record, "record must not be null");
-        byte[] bytes = codec.serializeLine(record);
-        if (record.eventSeq() <= 0) throw new IllegalArgumentException("WAL eventSeq must be positive");
+        List<WalRecord> records = List.copyOf(Objects.requireNonNull(input, "records must not be null"));
+        if (records.isEmpty()) throw new IllegalArgumentException("WAL batch must not be empty");
+        List<byte[]> lines = new ArrayList<>(records.size());
+        long previous = 0;
+        for (WalRecord record : records) {
+            parser.validate(record, lines.size() + 1L);
+            if (record.eventSeq() <= previous) throw new IllegalArgumentException("WAL batch eventSeq must increase");
+            lines.add(codec.serializeLine(record));
+            previous = record.eventSeq();
+        }
 
         ScanResult initial = null;
         if (channel == null) {
             try {
                 // scan-only 성공은 writer 초기화가 아님. 실제 첫 기록 직전에 전체 재검증
-                initial = scan(0);
+                initial = measuredScan(0, PixelMeasurement.Operation.first_write_scan);
             } catch (IOException | RuntimeException | Error failure) {
                 throw fail(failure);
             }
         }
         long previousTail = initial == null ? durableTail : initial.batch().walLastEventSeq();
-        if (record.eventSeq() <= previousTail) {
+        if (records.getFirst().eventSeq() <= previousTail) {
             // 잘못된 호출은 정상 파일군을 고장 상태로 만들거나 writer를 열지 않음
             throw new IllegalArgumentException("WAL append eventSeq must exceed durable tail");
         }
         try {
+            measurement.walStarted(batch, records.size());
             if (initial != null) adoptWriter(initial);
-            validateActive();
-            long size = active.size();
-            if (size > 0 && (size >= maxSegmentBytes || bytes.length > maxSegmentBytes - size)) {
-                rotate();
-            }
-            channel.position(active.size());
-            ByteBuffer buffer = ByteBuffer.wrap(bytes);
-            while (buffer.hasRemaining()) {
-                if (channel.write(buffer) <= 0) {
-                    // 진행 없는 write를 재시도하면 lock을 쥔 채 무한 대기할 수 있음
-                    throw new IOException("WAL write made no progress");
+            long unforcedTail = durableTail;
+            int unforcedRecords = 0;
+            for (int i = 0; i < records.size(); i++) {
+                byte[] bytes = lines.get(i);
+                validateActive();
+                long size = active.size();
+                if (size > 0 && (size >= maxSegmentBytes || bytes.length > maxSegmentBytes - size)) {
+                    if (unforcedTail != durableTail) {
+                        measuredForce(PixelMeasurement.Operation.record_force, unforcedRecords);
+                        durableTail = unforcedTail;
+                        unforcedRecords = 0;
+                    }
+                    rotate();
                 }
+                channel.position(active.size());
+                ByteBuffer buffer = ByteBuffer.wrap(bytes);
+                while (buffer.hasRemaining()) {
+                    if (channel.write(buffer) <= 0) {
+                        // 진행 없는 write는 재시도로 숨기지 않고 파일 실패 처리
+                        throw new IOException("WAL write made no progress");
+                    }
+                }
+                active = new SegmentFile(active.number(), active.path(), Math.addExact(active.size(), bytes.length));
+                unforcedTail = records.get(i).eventSeq();
+                unforcedRecords++;
             }
-            channel.force(true);
-            active = new SegmentFile(active.number(), active.path(), Math.addExact(active.size(), bytes.length));
-            durableTail = record.eventSeq();
+            if (unforcedTail != durableTail) {
+                measuredForce(PixelMeasurement.Operation.record_force, unforcedRecords);
+                durableTail = unforcedTail;
+            }
+            measurement.walCompleted(records.size());
         } catch (IOException | RuntimeException | Error failure) {
             throw fail(failure);
         }
@@ -199,8 +235,9 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
         channel = null;
         channel = openFileChannel(nextPath, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ, StandardOpenOption.WRITE);
         // active 게시 전 candidate도 소유하여 empty force 실패 시 반드시 close 시도
-        channel.force(true);
+        measuredForce(PixelMeasurement.Operation.empty_force, 0);
         active = new SegmentFile(next, nextPath, 0);
+        measurement.walRotated();
     }
 
     private void validateActive() throws IOException {
@@ -245,6 +282,24 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
             if (read.lastEventSeq() > 0) tail = read.lastEventSeq();
         }
         return new ScanResult(List.copyOf(facts), new WalReplayBatch(records, tail));
+    }
+
+    // 실제 force 호출만 측정. append·회전·monitor 대기를 fsync로 합산하지 않음
+    private void measuredForce(PixelMeasurement.Operation operation, int records) throws IOException {
+        var scope = measurement.begin(operation); Throwable failure = null;
+        try { channel.force(true); }
+        catch (IOException | RuntimeException | Error problem) { failure = problem; throw problem; }
+        finally {
+            measurement.walForced(records, failure == null);
+            measurement.endPreserving(scope, failure == null ? PixelMeasurement.Outcome.success : PixelMeasurement.Outcome.failure, failure);
+        }
+    }
+
+    private ScanResult measuredScan(long checkpoint, PixelMeasurement.Operation operation) throws IOException {
+        var scope = measurement.begin(operation); Throwable failure = null;
+        try { return scan(checkpoint); }
+        catch (IOException | RuntimeException | Error problem) { failure = problem; throw problem; }
+        finally { measurement.endPreserving(scope, failure == null ? PixelMeasurement.Outcome.success : PixelMeasurement.Outcome.failure, failure); }
     }
 
     private SegmentFacts readRecords(BufferedReader reader, SegmentFile file, long checkpoint,

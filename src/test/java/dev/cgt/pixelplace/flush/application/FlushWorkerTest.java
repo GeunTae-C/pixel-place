@@ -46,6 +46,23 @@ import static org.mockito.Mockito.when;
 
 class FlushWorkerTest {
 
+    @Test
+    // write fatal은 새 capture만 차단. 정상 capture된 pending의 exact commit 판정과 소유권 정리는 보존
+    void writeFailureStillAllowsExactPendingReconciliationWithoutNewCapture() {
+        Fixture fixture = new Fixture();
+        PendingAmbiguousFlush pending = PendingAmbiguousFlush.from(fixture.plan);
+        when(fixture.store.current()).thenReturn(Optional.of(pending));
+        when(fixture.reconciliationService.reconcile(pending)).thenReturn(FlushReconciliationDecision.COMMIT_CONFIRMED);
+        fixture.readiness.markWriteFailed();
+        fixture.readiness.markReady();
+        assertFalse(fixture.readiness.isReady());
+        assertEquals(FlushRunResult.RECONCILED_COMMIT, fixture.worker.flushOnce());
+        verify(fixture.store).clearIfSame(pending);
+        verifyNoInteractions(fixture.captureService, fixture.transactionExecutor, fixture.dirtyTileTracker);
+        fixture.readiness.markFatalNotReady();
+        assertThrows(ServiceNotReadyException.class, fixture.worker::flushOnce);
+    }
+
     private static final TileKey KEY_A = new TileKey(0, 0, 0);
     private static final TileKey KEY_B = new TileKey(0, 1, 0);
     private static final LocalDateTime TIME = LocalDateTime.of(2026, 4, 3, 6, 0);
@@ -717,7 +734,7 @@ class FlushWorkerTest {
                 mock(FlushReconciliationService.class),
                 mock(DirtyTileTracker.class),
                 mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         workerReference.set(worker);
 
         assertEquals(FlushRunResult.COMMITTED, worker.flushOnce());
@@ -742,7 +759,7 @@ class FlushWorkerTest {
                 fixture.reconciliationService,
                 fixture.dirtyTileTracker,
                 mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
-        ) {
+        , dev.cgt.pixelplace.measurement.Measurements.disabled()) {
             @Override
             PendingAmbiguousFlush createPendingCandidateFrom(FlushPlan plan) {
                 throw candidateFailure;
@@ -774,7 +791,7 @@ class FlushWorkerTest {
                 fixture.reconciliationService,
                 fixture.dirtyTileTracker,
                 mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
-        ) {
+        , dev.cgt.pixelplace.measurement.Measurements.disabled()) {
             @Override
             PendingAmbiguousFlush createPendingCandidateFrom(FlushPlan plan) {
                 throw sameFailure;
@@ -1055,7 +1072,7 @@ class FlushWorkerTest {
                 reconciliation,
                 tracker,
                 mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 
     private static ServiceReadiness readyReadiness() {
@@ -1168,7 +1185,7 @@ class FlushWorkerTest {
                     reconciliationService,
                     dirtyTileTracker,
                     mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
-            );
+            , dev.cgt.pixelplace.measurement.Measurements.disabled());
         }
     }
 }

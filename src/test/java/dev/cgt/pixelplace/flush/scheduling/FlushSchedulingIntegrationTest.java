@@ -186,7 +186,7 @@ class FlushSchedulingIntegrationTest {
                 reconciliation,
                 dirtyTileTracker,
                 mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
         FlushWorker observedWorker = spy(realWorker);
         CountDownLatch firstCall = new CountDownLatch(1);
         CountDownLatch secondCall = new CountDownLatch(1);
@@ -258,7 +258,7 @@ class FlushSchedulingIntegrationTest {
                 reconciliation,
                 dirtyTileTracker,
                 mock(dev.cgt.pixelplace.flush.application.FlushWalRetention.class)
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         try (SchedulingContext scheduling = openContext(worker, new UnqualifiedScheduledTask())) {
             try {

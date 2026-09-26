@@ -56,7 +56,7 @@ class ServiceReadinessTest {
                 walAppender,
                 board,
                 readiness
-        );
+        , dev.cgt.pixelplace.measurement.Measurements.disabled());
 
         assertThrows(
                 ServiceNotReadyException.class,

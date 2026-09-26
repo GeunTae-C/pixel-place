@@ -38,7 +38,7 @@ class ProgrammaticFlushTransactionExecutorTest {
     private final ProgrammaticFlushTransactionExecutor executor = new ProgrammaticFlushTransactionExecutor(
             transactionManager,
             persistenceService
-    );
+    , dev.cgt.pixelplace.measurement.Measurements.disabled());
     private final FlushPlan plan = plan();
 
     @BeforeEach
