@@ -148,7 +148,7 @@ class SegmentedWalConsumerTest {
             var classifier=new DbBootstrapClassifier(keys);
             when(checkpoint.readMainCheckpoint()).thenReturn(new CheckpointSnapshot(0));
             when(metadata.readAllTileKeys()).thenReturn(List.of());
-            recovery=new StartupRecoveryService(db,classifier,keys,reader,board,sequence,ready, dev.cgt.pixelplace.measurement.Measurements.disabled());
+            recovery=new StartupRecoveryService(db,classifier,keys,reader,board,sequence,ready, dev.cgt.pixelplace.measurement.Measurements.disabled(), storage::prepareForRecovery);
             capture=new FlushPlanCaptureService(ready,checkpoint,metadata,classifier,coordinator,reader,dirty,board, dev.cgt.pixelplace.measurement.Measurements.disabled());
             command=new PixelCommandService(cooldown,
                 new dev.cgt.pixelplace.pixel.application.SinglePixelWriteExecutor(coordinator, new PixelWriteService(sequence,new FileWalAppender(storage, dev.cgt.pixelplace.measurement.Measurements.disabled()),board,ready, dev.cgt.pixelplace.measurement.Measurements.disabled()), dirty, ready, dev.cgt.pixelplace.measurement.Measurements.disabled()),

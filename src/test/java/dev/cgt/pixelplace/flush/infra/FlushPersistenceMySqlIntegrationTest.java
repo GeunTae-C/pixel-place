@@ -122,6 +122,7 @@ import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -1038,6 +1039,146 @@ class FlushPersistenceMySqlIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"success", "R-flush", "R-close", "last-S"})
+    // record force 실패로 남은 완성 line을 재작성하지 않고 새 graph에서 복구. 새 append/dirty 없이 실제 DB flush
+    void completeFailedRecordForceRequiresRecoverySyncBeforeReadyAndMysqlFlushWithoutAppend(String point) throws Exception {
+        prepareInitialized(KEY_A,KEY_B);
+        Path path=tempDirectory.resolve("failed-record-force.wal");
+        var records=List.of(record(2L,KEY_A,17,LocalDateTime.of(2026,9,28,1,2)),
+                record(5L,KEY_B,23,LocalDateTime.of(2026,9,28,1,3)));
+        try(var writer=new MySqlRetentionTestStorage(tempDirectory,path)) {
+            writer.appendAndFsync(records.getFirst());writer.failRecordForce();
+            var failure=assertThrows(IllegalStateException.class,()->writer.appendAndFsync(records.getLast()));
+            assertTrue(failure.getCause().getMessage().contains("complete record force"));
+        }
+        Map<Path,byte[]> failedBytes=walBytes(path);
+        assertEquals(2,failedBytes.size());
+        try(var scan=newWalStorage(path,1)) {assertEquals(records,scan.readAfter(0).records());}
+        var durability=new dev.cgt.pixelplace.wal.infra.RecoveryBridgeTestDurability(point);
+        var storage=new MySqlRetentionTestStorage(tempDirectory,path,durability);
+        AtomicInteger transactions=new AtomicInteger();
+        try(FreshRuntimeGraph runtime=createFreshRuntime(path,UnaryOperator.identity(),true,storage,plan->{
+            transactions.incrementAndGet();
+            assertTrue(runtimeReadyAfterSync(durability));
+            return transactionExecutor.execute(plan);
+        })) {
+            int bootstrapMemoryCalls=runtime.memoryMutationCalls();
+            durability.beforeIo=()->{
+                assertNoActualTransaction();assertFalse(runtime.serviceReadiness.isReady());
+                assertEquals(bootstrapMemoryCalls,runtime.memoryMutationCalls());assertEquals(0,runtime.eventSeqManager.currentLastIssued());
+                assertEquals(0,transactions.get());
+            };
+            if(!point.equals("success")) {
+                var failure=assertThrows(IllegalStateException.class,runtime::recover);
+                assertTrue(failure.getCause().getMessage().contains(point));
+                assertEquals(bootstrapMemoryCalls,runtime.memoryMutationCalls());assertRuntimePristine(runtime);
+                assertThrows(ServiceNotReadyException.class,runtime::flush);
+                assertEquals(0,transactions.get());assertEquals(0L,checkpoint());assertEquals(0,eventCount());
+                assertEquals(durability.opened,durability.closed);
+                assertEquals(point.equals("last-S")?2:1,durability.opened);
+                if(!point.equals("last-S"))assertFalse(durability.events.contains("S"));
+                assertWalBytes(failedBytes,path);
+            } else {
+                runtime.recover();assertTrue(runtime.serviceReadiness.isReady());assertTrue(runtimeReadyAfterSync(durability));
+                assertEquals(2,durability.opened);assertEquals(2,durability.closed);
+                assertEquals(5,runtime.eventSeqManager.currentLastIssued());assertDirtyEmpty(runtime);
+                assertWalBytes(failedBytes,path);
+                // 이후 호출은 flush만. retention의 S는 READY 이후 정상 DB transaction 밖에서 수행
+                durability.beforeIo=FlushPersistenceMySqlIntegrationTest.this::assertNoActualTransaction;
+                byte[] pixelsA=runtime.board.getRequired(KEY_A).pixels(),pixelsB=runtime.board.getRequired(KEY_B).pixels();
+                assertEquals(FlushRunResult.COMMITTED,runtime.flush());assertEquals(1,transactions.get());
+                assertDatabaseState(5L,List.of(2L,5L),pixelsA,1L,pixelsB,1L);assertPersistedRecords(records);assertDirtyEmpty(runtime);
+                assertEquals(FlushRunResult.NO_OP,runtime.flush());assertEquals(1,transactions.get());
+            }
+        }
+    }
+
+    private boolean runtimeReadyAfterSync(dev.cgt.pixelplace.wal.infra.RecoveryBridgeTestDurability durability) {
+        return durability.opened==2 && durability.closed==2
+                && durability.events.equals(List.of("prepare","R-open","R-flush","R-close","R-complete",
+                "R-open","R-flush","R-close","R-complete","S"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    // 실제 DB commit/응답 유실의 exact clear 뒤 필수 S 실패. OS 실패만 seam, DB는 실제 MySQL
+    void directorySyncFailureAfterActualCommitOrExactPendingClearPreservesCommittedState(boolean lostResponse) throws Exception {
+        prepareInitialized(KEY_A,KEY_B);
+        Path path=tempDirectory.resolve("post-commit-sync.wal");
+        AtomicBoolean armed=new AtomicBoolean();
+        AtomicInteger transactions=new AtomicInteger();
+        AtomicReference<FreshRuntimeGraph> graph=new AtomicReference<>();
+        IOException syncFailure=new IOException("Test-only post-commit S failure");
+        var durability=new dev.cgt.pixelplace.wal.infra.TestWalFileDurability() {
+            @Override public void syncDirectory(DirectoryProof proof) throws IOException {
+                super.syncDirectory(proof);
+                if(armed.get()) {
+                    assertNoActualTransaction();
+                    assertEquals(3L,checkpoint());assertEquals(3,eventCount());
+                    assertDirtyEmpty(graph.get());assertTrue(graph.get().pendingAmbiguousFlushStore.current().isEmpty());
+                    throw syncFailure;
+                }
+            }
+        };
+        var storage=new MySqlRetentionTestStorage(tempDirectory,path,durability);
+        try(FreshRuntimeGraph runtime=createFreshRuntime(path,null,false,storage,plan->{
+            transactions.incrementAndGet();
+            var result=transactionExecutor.execute(plan);
+            assertEquals(FlushTransactionOutcome.COMMITTED,result.outcome());
+            return lostResponse ? FlushTransactionResult.ambiguousCommit(new IOException("lost response")) : result;
+        })) {
+            graph.set(runtime);runtime.recover();writeThreeAcrossTiles(runtime);
+            var records=runtime.fileWalReplaySource.readAfter(0).records();
+            byte[] pixelsA=runtime.board.getRequired(KEY_A).pixels(), pixelsB=runtime.board.getRequired(KEY_B).pixels();
+            if(lostResponse) {
+                assertThrows(AmbiguousFlushCommitException.class,runtime::flush);
+                assertTrue(runtime.pendingAmbiguousFlushStore.current().isPresent());
+                assertEquals(0,storage.deleteAttempts());
+            }
+            armed.set(true);
+            assertSameThrowable(syncFailure,assertThrows(IllegalStateException.class,runtime::flush).getCause());
+            assertEquals(1,transactions.get());assertEquals(1,storage.deleteAttempts());
+            assertFalse(runtime.serviceReadiness.isReady());
+            assertThrows(ServiceNotReadyException.class,runtime.serviceReadiness::requireNotFatal);
+            assertTrue(runtime.pendingAmbiguousFlushStore.current().isEmpty());assertDirtyEmpty(runtime);
+            assertDatabaseState(3L,List.of(1L,2L,3L),pixelsA,2L,pixelsB,1L);assertPersistedRecords(records);
+            assertThrows(ServiceNotReadyException.class,runtime::flush);
+            assertThrows(ServiceNotReadyException.class,()->runtime.write(7L,0,0,4));
+            assertEquals(1,transactions.get());assertEquals(1,storage.deleteAttempts());
+            assertTrue(Files.exists(segment(path,1)));assertTrue(Files.exists(segment(path,2)));
+        }
+    }
+
+    @Test
+    // write S 실패는 기존 정상 pending의 exact reconciliation을 차단하지 않으며 READY 복원/retention은 금지
+    void writeDirectorySyncFailureStillAllowsExistingActualCommitReconciliation()throws Exception {
+        prepareInitialized(KEY_A,KEY_B);Path path=tempDirectory.resolve("pending-write-S.wal");
+        AtomicBoolean armed=new AtomicBoolean();AtomicInteger transactions=new AtomicInteger();
+        var durability=new dev.cgt.pixelplace.wal.infra.TestWalFileDurability() {
+            @Override public void syncDirectory(DirectoryProof proof)throws IOException {
+                super.syncDirectory(proof);if(armed.get())throw new IOException("write S");
+            }
+        };
+        var storage=new MySqlRetentionTestStorage(tempDirectory,path,durability);
+        try(FreshRuntimeGraph runtime=createFreshRuntime(path,null,false,storage,plan->{
+            transactions.incrementAndGet();transactionExecutor.execute(plan);
+            return FlushTransactionResult.ambiguousCommit(new IOException("response lost"));
+        })) {
+            runtime.recover();writeThreeAcrossTiles(runtime);
+            assertThrows(AmbiguousFlushCommitException.class,runtime::flush);
+            var pending=runtime.pendingAmbiguousFlushStore.current().orElseThrow();
+            armed.set(true);assertThrows(IllegalStateException.class,()->runtime.write(7L,0,0,4));
+            assertSame(pending,runtime.pendingAmbiguousFlushStore.current().orElseThrow());
+            assertFalse(runtime.serviceReadiness.isReady());runtime.serviceReadiness.requireNotFatal();
+            assertEquals(FlushRunResult.RECONCILED_COMMIT,runtime.flush());
+            assertTrue(runtime.pendingAmbiguousFlushStore.current().isEmpty());assertDirtyEmpty(runtime);
+            assertEquals(1,transactions.get());assertEquals(0,storage.deleteAttempts());
+            assertEquals(3L,checkpoint());assertEquals(3,eventCount());assertFalse(runtime.serviceReadiness.isReady());
+            assertThrows(ServiceNotReadyException.class,runtime::flush);
+        }
+    }
+
     @Test
     // events·tiles·checkpoint 실제 write 후 body 실패로 rollback, dirty/WAL 소유권과 정상 재시도·복구 검증
     void persistenceBodyRollbackPreservesWalAndDirtyThenFlushAndRestartSucceed() throws Exception {
@@ -1416,7 +1557,7 @@ class FlushPersistenceMySqlIntegrationTest {
         properties.setActiveFile(walPath);
         properties.setMaxSegmentBytes(maxBytes);
         ObjectMapper mapper = new ObjectMapper();
-        return new SegmentedWalStorage(properties, new WalRecordParser(mapper), new WalRecordJsonCodec(mapper), dev.cgt.pixelplace.measurement.Measurements.disabled());
+        return new SegmentedWalStorage(properties, new WalRecordParser(mapper), new WalRecordJsonCodec(mapper), dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability());
     }
 
     private FreshRuntimeGraph createFreshRuntime(
@@ -1451,7 +1592,7 @@ class FlushPersistenceMySqlIntegrationTest {
                 board,
                 eventSeqManager,
                 serviceReadiness
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), storage::prepareForRecovery);
         PixelWriteService pixelWriteService = new PixelWriteService(
                 eventSeqManager,
                 fileWalAppender,

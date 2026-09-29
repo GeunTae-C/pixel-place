@@ -18,7 +18,7 @@ public final class PixelMeasurement {
     public enum Outcome { success, failure, skipped, committed, rollback, ambiguous }
     public enum Operation {
         command, core_call, core_inside, batch_core_call, batch_core_inside, group_request, queue_wait,
-        append, storage_append, record_force, empty_force,
+        append, storage_append, record_force, empty_force, adoption_force, recovery_file_sync, directory_sync,
         write_wait, write_held, capture_wait, capture_held, retention_wait, retention_held,
         recovery_scan, capture_scan, retention_scan, first_write_scan, snapshot,
         checkpoint_read, metadata_read, transaction, reconciliation, flush_cycle, retention,

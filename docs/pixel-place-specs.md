@@ -355,11 +355,13 @@
 ### WAL
 - 승인된 픽셀 write의 **1차 내구성 저장소**
 - 포맷은 **JSON Lines**
-- 요청마다 `append + fsync`
+- single/group의 성공 write는 해당 record를 포함한 `append + fsync` 완료가 선행
 - 기존 WAL을 보존하면서 크기 기준으로 record 경계에서 파일을 나누고, 복구와 flush는 남은 파일 전체를 같은 규칙으로 읽음
 - 한 프로세스가 독점 관리하는 로컬 filesystem을 전제로 하며, DB commit이 확정된 closed prefix를 정리하되 active와 마지막 실제 record가 있는 파일은 보존
 - 미해결 ambiguous 상태에서는 삭제를 보류하고, 단순 삭제 지연은 확정 commit을 취소하지 않음. 같은 프로세스의 이후 정상 no-op에서 재시도하며 재시작 직후에는 새 commit 확정이 필요
-- 크기 기준은 디스크 총량 상한이 아니며 directory entry의 엄격한 전원 장애 내구성은 후속 범위
+- 확인한 Windows x64·로컬 NTFS 환경에서 파일 생성·채택·전환·삭제에 필요한 폴더 동기화를 수행하고, 지원·권한·동기화 확인 실패 시 요청 수락을 차단
+- 시작 시 DB/WAL 검증 후 기존 WAL 파일 전체의 내용과 마지막 폴더 동기화를 완료한 뒤에만 메모리 복구·READY 전환. 이후 새 write 없이도 복구된 WAL의 DB flush 가능
+- 크기 기준은 디스크 총량 상한이 아니며 실제 전원 차단·장치 cache 이행과 다른 OS/FS의 지원까지 보장하지 않음
 - WAL append + fsync 성공은 write의 **1차 내구성 경계**
 - core write 완료는 WAL append + fsync와 memory apply가 모두 성공한 상태
 - 현재 HTTP `200` 성공 응답은 core write와 command 계약상 dirty mark까지 성공한 상태

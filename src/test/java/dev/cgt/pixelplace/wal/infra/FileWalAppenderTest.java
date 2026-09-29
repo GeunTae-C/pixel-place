@@ -134,7 +134,7 @@ class FileWalAppenderTest {
 
         assertEquals(1, openCount.get());
         verify(channel).write(any(ByteBuffer.class));
-        verify(channel).force(true);
+        verify(channel, times(2)).force(true);
     }
 
     @Test
@@ -362,7 +362,7 @@ class FileWalAppenderTest {
 
         appender.appendAndFsync(record(1L));
 
-        verify(channel).force(true);
+        verify(channel, times(2)).force(true);
     }
 
     @Test
@@ -374,7 +374,7 @@ class FileWalAppenderTest {
 
         appender.appendAndFsync(record(1L));
 
-        verify(channel).force(true);
+        verify(channel, times(2)).force(true);
     }
 
     @Test
@@ -385,7 +385,7 @@ class FileWalAppenderTest {
         appender.appendAndFsync(record(1L));
         appender.appendAndFsync(record(2L));
 
-        verify(channel, times(2)).force(true);
+        verify(channel, times(3)).force(true);
     }
 
     @Test
@@ -428,7 +428,7 @@ class FileWalAppenderTest {
     private FileWalAppender appender(Path activeFile) {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
-        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled()), dev.cgt.pixelplace.measurement.Measurements.disabled());
+        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability()), dev.cgt.pixelplace.measurement.Measurements.disabled());
     }
 
     private FileWalAppender controlledAppender(
@@ -439,7 +439,7 @@ class FileWalAppenderTest {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
 
-        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled()) {
+        return new FileWalAppender(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability()) {
             @Override
             FileChannel openFileChannel(Path ignored, StandardOpenOption... options) {
                 openCount.incrementAndGet();
@@ -491,7 +491,7 @@ class FileWalAppenderTest {
     private FileWalReplaySource replaySource(Path activeFile) {
         WalProperties properties = new WalProperties();
         properties.setActiveFile(activeFile);
-        return new FileWalReplaySource(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled()));
+        return new FileWalReplaySource(new SegmentedWalStorage(properties, parser, new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability()));
     }
 
     private WalRecord record(long eventSeq) {

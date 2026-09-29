@@ -820,10 +820,17 @@ GET /api/tiles/**
 - 정상 append 경로에서 `force(false)`를 사용하지 않으며, `force(true)` 완료 전에 성공을 반환하지 않는다.
 - `force(true)` 실패는 WAL I/O fail-stop과 동일하게 poison 처리하며 더 약한 durability 모드로 downgrade하지 않는다.
 
-### parent-directory fsync 미적용 한계
-- 현재 durable WAL tail은 완전한 JSON line, newline, file write와 해당 append의 `FileChannel.force(true)` 성공까지 확인된 마지막 record다.
-- parent directory fsync는 현재 범위가 아니므로 신규 파일명이나 directory entry가 모든 filesystem crash에서 반드시 보존된다고 보장하지 않는다.
-- 14단계 rotation/segment에서도 17단계 완료 전에는 directory metadata의 엄격한 내구성을 보장하지 않으며, 실제 parent-directory fsync는 17단계에서 구현한다.
+### Windows WAL 내용·이름 내구성 경계
+
+일반 runtime은 JNA core의 lazy Windows adapter를 공유 storage에 연결한다. 생성자·설정 검증에서는 native 로딩이나 파일 I/O를 하지 않는다. 확인한 지원 범위는 Windows 10 Pro 22H2 build 19045.6466, Oracle JDK 21.0.10 x64, cgt 비상승 계정과 C: 로컬 NTFS다. 다른 환경의 우연한 호출 성공이나 no-op fallback으로 지원 범위를 확대하지 않는다. 정확한 API 값·검증 사례는 현재 017-B 명령문과 코드·테스트, 실제 지원 증거는 작업기록을 기준으로 한다.
+
+`WindowsWalFileDurability`는 전체 경로 구성요소의 비-reparse directory, Win32 file identity와 로컬 NTFS volume을 확인한다. 존재하는 기준 부모를 동기화한 뒤, 없는 폴더는 하나씩 생성하고 그 이름을 담은 부모와 새 자식을 차례로 동기화한다. 부분 실패가 남긴 폴더를 자동 삭제하지 않으며 새 storage는 준비를 다시 수행한다. storage별 준비 증명은 이후에도 경로 identity/volume 확인을 거치고 복구 파일 내용 동기화를 대신하지 않는다.
+
+일반 startup의 `WalStoragePreparation`은 replay와 같은 storage의 가장 최근 성공 scan batch를 정확히 한 번 받아들인다. DB snapshot transaction 종료와 전체 DB/WAL 검증 후 파일 목록·identity·크기 등 scan 사실을 대조하고, checkpoint 이하 파일과 허용된 빈 tail을 포함한 기존 파일 모두에 R(내용 flush와 handle close)을 수행한다. 마지막 WAL 폴더 S(flush와 close)가 끝난 뒤에만 memory load/replay, sequence seed, READY로 진행한다. scan-only 결과는 이 내구성 준비 완료를 뜻하지 않는다. R/마지막 S 실패 시 storage는 poison되며 memory·READY·새 flush plan/DB write로 진행하지 않는다. stub은 이 startup 입력·준비만 명시 대체한다.
+
+최초 파일은 CREATE_NEW→empty force→폴더 S, 기존 writer 채택은 전체 검사→기준 file force→폴더 S 뒤 active를 게시한다. 회전은 이전 파일의 새 record prefix force와 tail 확정→close→새 파일 생성→empty force→S→active 순서다. 게시 전 candidate도 storage가 소유하여 실패 시 닫는다. 같은 파일의 후속 append에는 새 이름 S를 추가하지 않으며 record force는 계속 필요하다. 기존 채택 force와 복구 R은 새 record coverage나 empty force로 세지 않는다.
+
+내용·이름의 필수 open/query/force/close 실패는 성공으로 반환하지 않는다. raw Error 우선, 원래 instance와 중복 없는 suppressed 원인을 보존하며 같은 poisoned/closed storage의 이후 I/O·재개방을 차단한다. write 실패는 기존 WRITE_FAILED와 정상 pending reconciliation 정책을 유지한다. 실제 전원 차단·OS crash·장치 cache 이행과 무기한 native 정지 취소를 실증한 보장은 아니다.
 
 ### 픽셀 요청 처리에서 WAL 흐름
 1. 현재 Spring Security filter 처리. 실제 Pixel 응답은 제한 진단 범위 밖이라 미검증
@@ -853,12 +860,13 @@ JWT principal 기반 사용자 식별은 13단계의 후속 목표다. 현재 �
 4. 공통 `DbBootstrapClassifier`로 `0 rows + checkpoint 0`, canonical 1,024 rows, inconsistent 상태 판정
 5. classifier 결과와 실제 snapshot key/byte length/version shape를 WAL read 전에 재검증
 6. 남은 WAL 파일군 전체 scan 뒤 `walLastEventSeq >= checkpoint`와 replay batch empty/non-empty tail invariant 검증
-7. bootstrap-pending이면 memory를 all-white로 초기화하고, initialized이면 canonical 1,024 snapshots를 load
-8. checkpoint 이후 WAL record를 순서대로 memory에 replay
-9. 검증된 `walLastEventSeq`를 `EventSeqManager`의 마지막 발급값으로 초기화
-10. 모든 단계가 성공한 뒤에만 ready 전환
+7. 같은 scan batch에 대응하는 storage 경로 준비·기존 파일 전체 R/close·마지막 폴더 S 완료
+8. bootstrap-pending이면 memory를 all-white로 초기화하고, initialized이면 canonical 1,024 snapshots를 load
+9. checkpoint 이후 WAL record를 순서대로 memory에 replay
+10. 검증된 `walLastEventSeq`를 `EventSeqManager`의 마지막 발급값으로 초기화
+11. 모든 단계가 성공한 뒤에만 ready 전환
 
-capture transaction은 DB view 조립까지만 포함한다. bootstrap classifier, WAL scan, memory load/replay, eventSeq seed와 ready 전환까지 transaction을 늘리지 않는다. partial/extra z/범위 밖 key/checkpoint mismatch/row 누락과 WAL tail 불일치는 memory 변경 전에 fail-fast하며 자동 보정하지 않는다.
+capture transaction은 DB view 조립까지만 포함한다. bootstrap classifier, WAL scan·준비/R/S, memory load/replay, eventSeq seed와 ready 전환까지 transaction을 늘리지 않는다. partial/extra z/범위 밖 key/checkpoint mismatch/row 누락과 WAL tail 불일치는 memory 변경 전에 fail-fast하며 자동 보정하지 않는다.
 
 recovery replay는 `DirtyTileTracker`를 채우지 않는다. 따라서 checkpoint 이후 WAL record가 memory에 replay된 뒤에도 dirty tracker는 비어 있을 수 있으며, runtime flush는 WAL에서 affected `TileKey`를 다시 계산해야 한다.
 
@@ -907,9 +915,13 @@ scan은 모든 파일의 newline·UTF-8·record·전역 eventSeq 순서를 검�
 
 열거·scan·append·회전·retention·close는 storage의 같은 lock을 사용한다. command는 coordinator → core monitor → storage 순서로 진입하고, plan은 coordinator 안에서 scan부터 memory snapshot까지 유지한다. 확정 후 retention도 같은 coordinator를 획득해 readiness와 pending을 확인한 뒤 storage로 진입한다. storage는 DB나 바깥 lock을 호출하지 않는다. stream과 임시 channel은 lock 안에서 닫고 결과만 반환한다. stub은 기존 startup 입력만 대체하며 context 생성·종료가 실제 WAL I/O를 일으키지 않는다.
 
-storage는 `WalSegmentRetention`도 직접 구현하므로 appender·reader·정리 port가 한 instance를 공유한다. 정리는 매번 파일군 전체를 같은 scan으로 검증하고 reader를 닫은 뒤, active와 마지막 실제 record가 있는 파일을 제외한 DB 반영 완료 closed prefix만 번호 순서로 삭제한다. 첫 부적격 파일에서 멈추며 파일 일부를 truncate하거나 뒤 파일로 건너뛰지 않는다. 전체 tail보다 확정 checkpoint가 앞서면 삭제 전에 실패한다.
+storage는 `WalSegmentRetention`도 직접 구현하므로 appender·reader·정리 port가 한 instance를 공유한다. 정리는 매번 파일군 전체를 같은 scan으로 검증하고 reader를 닫은 뒤, active와 마지막 실제 record가 있는 파일을 제외한 DB 반영 완료 closed prefix만 번호 순서로 삭제한다. 첫 부적격 파일에서 멈추며 파일 일부를 truncate하거나 뒤 파일로 건너뛰지 않는다. 확정 checkpoint가 실제 WAL tail보다 크면 삭제 전에 실패한다.
 
-개별 delete의 I/O·권한 오류는 그 지점에서 중단하는 삭제 지연이다. 이미 성공이 확인된 prefix만 결과에 반영하며 실패 syscall이 실제 삭제됐는지는 단정하지 않는다. 다음 호출은 남은 파일군을 다시 열거하므로 정상 suffix를 받아들이고, active 소실·번호 구멍·내용 손상은 계속 거부한다. 예상 밖 파일 실패는 storage를 고장 처리한다. 전체 scan·삭제 동안 write 대기가 늘어나는 비용은 남아 있고 read-offset 최적화·자동 truncate·parent-directory fsync는 후속 범위다. 파일군은 단일 프로세스가 독점하는 로컬 filesystem을 전제로 하며 디스크 사용량의 절대 상한이나 전원 장애 시 directory entry 내구성을 제공하지 않는다.
+개별 삭제는 Files.delete→Qbefore(이름 상태)→부모 S→Qafter 순서다. 안전한 같은 부모에서 열거·native 속성·access0 재open/정보·Java 명시 부재가 일치해야 ABSENT로 판단한다. 정상 삭제의 ABSENT/ABSENT와 S/close 성공 뒤에만 count를 올리고 다음 파일로 진행한다. 옛 holder의 pending/link0와 이름 부재가 공존해도 새 이름 조회가 확정한 부재를 뒤집지 않는다.
+
+삭제 자체의 I/O·권한 예외는 두 Q가 같은 PRESENT 또는 ABSENT이고 S가 성공한 경우에만 기존 delayed로 반환한다. 실제로 이미 제거된 파일도 그 호출의 성공 count에 추가하지 않고 즉시 멈춘다. UNKNOWN·상태 전이·정상 반환인데 이름 잔존·필수 조회/S/close 실패는 storage poison과 retention fatal로 전파한다. Qbefore가 실패해도 부모가 안전하면 S를 시도하며 원인을 결합하고, 부모 자체가 불명이면 다른 폴더를 동기화하지 않는다. 이미 확정된 DB commit·exact pending clear·dirty 처리는 되돌리지 않는다.
+
+다음 정상 invocation은 실제 남은 suffix를 다시 검증하며 삭제된 prefix를 복원하지 않는다. 전체 scan·삭제 동안 write 대기가 늘어나는 비용, read-offset 최적화·자동 truncate 미지원과 디스크 총량 상한 부재는 남는다. 파일군의 단일 프로세스 소유 전제와 지원 환경은 위 Windows WAL 내구성 경계를 따른다.
 
 ## 10) DB flush worker 처리 순서
 
@@ -1245,13 +1257,13 @@ WAL 파일군 상태와 크기 확인, 마지막 newline 검증, 전체 record p
 `FileWalReplaySource`가 coordinator를 직접 획득하지 않으며 flush orchestration이 이 runtime scan precondition을 보장한다.
 
 ### FileChannel.force(true) 기준 durable WAL tail
-현재 durable WAL tail은 완전한 JSON line, 마지막 newline, file write 완료와 해당 append의 `FileChannel.force(true)` 성공까지 확인된 마지막 실제 record다. eventSeq 발급값이나 memory의 추정값으로 대체하지 않는다.
+runtime append의 durable WAL tail은 완전한 JSON line, 마지막 newline과 해당 새 record prefix의 `FileChannel.force(true)` 성공 뒤 전진한다. 파일 생성·채택·전환은 위 이름 동기화 경계도 선행하며, 재시작에서는 검증된 기존 파일 전체의 R와 마지막 S 완료 후 실제 tail을 채택한다. eventSeq 발급값이나 memory의 추정값으로 대체하지 않는다.
 
 ### 모든 성공 append의 force(true)와 force(false) 금지
 신규 파일 첫 append, 기존 파일 append와 같은 파일의 두 번째 이후 append를 포함한 모든 성공 append는 `force(true)` 완료 뒤에만 성공을 반환한다. 정상 append 경로에서 `force(false)`를 호출하거나 이를 durable WAL tail의 근거로 사용하지 않는다.
 
-### parent-directory fsync 미적용 한계
-현재는 parent directory fsync를 수행하지 않으므로 file creation과 directory entry의 엄격한 crash durability를 보장하지 않는다. 14단계 rotation/segment도 같은 한계를 유지하며 parent-directory fsync 실제 구현은 17단계 범위다.
+### 파일 이름 동기화와 flush transaction 경계
+이름 동기화와 지원 한계는 위 Windows WAL 내용·이름 내구성 절의 흐름을 따른다. 새 directory I/O는 DB transaction 안으로 들어가지 않으며, COMMITTED 또는 exact COMMIT_CONFIRMED clear 이후 retention의 필수 실패는 확정 DB outcome을 변경하지 않고 fatal-not-ready로 전파한다.
 
 ### 실패 후 dirty 소유권
 현재 dirty tracker의 `drainDirtyTiles()`는 현재 쌓인 dirty tile 목록을 반환하고 내부 목록을 비운다.
@@ -1385,7 +1397,7 @@ flush 전용 scheduler의 application 전역 기본 scheduler 등록
 production metrics/alert 체계와 custom scheduler thread-pool tuning
 ```
 
-single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application instance의 동시 flush를 막는 분산 lock이 아니다. 남은 WAL 파일군 전체 scan은 coordinator 안에서 수행하므로 WAL이 커지면 write blocking 시간이 길어질 수 있다. parent-directory fsync도 적용하지 않는다.
+single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application instance의 동시 flush를 막는 분산 lock이 아니다. 남은 WAL 파일군 전체 scan과 필수 파일/폴더 동기화는 직렬 경계에서 수행하므로 WAL이 커지거나 I/O가 지연되면 write blocking 시간이 길어질 수 있다.
 
 기본 비활성인 `PixelMeasurement`의 성능 계측을 켜면 force·lock·scan/snapshot·DB transaction·Redis·broadcast·Overview를 관측한다. core timer는 정상 반환/예외 의미를 유지하며 실제 요청 성공은 HTTP 결과와 정합성 증거로 판단한다. DB transaction은 committed/rollback/ambiguous outcome을 구분한다. record force는 파일의 실제 호출 횟수이며, 마지막 성공 force 이후 새로 완성한 line 수로 coverage를 대조한다. rotation의 empty force는 별도다. 같은 singleton의 유한한 메모리 집계만 호출하며 write 순서와 자동 flush/retention 정책을 유지한다.
 
@@ -1394,6 +1406,16 @@ single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application i
 전용 benchmark는 production scan 밖에서 실제 앱을 격리된 DB·Redis·WAL과 별도 Spring 환경으로 시작한다. 선택한 single/group의 실제 executor bean 하나와 공유 measurement/storage identity를 확인하고, 별도 JVM의 HTTP/WS 발생기가 bootstrap 이후 warmup·측정·drain을 나눈다. 발생기는 먼 예정 시각에는 park하고 마지막 유한 구간에는 spin해 짧은 도착 간격의 wake-up 손실을 줄인다. 늦은 요청의 not_sent와 원래 예정 도착률은 유지한다. drain은 servlet exact count·command·pending·ready와 executor의 모든 활동 잔여 및 RUNNING 상태를 함께 확인한 뒤, idle 이후의 fresh zero-record capture와 checkpoint/tail 일치를 요구한다. FAILED의 close 완료는 정상 drain을 뜻하지 않는다. 명시 mode의 benchmark 성공은 일반 default 설정 로딩 검증을 대신하지 않는다.
 
 자동 flush가 소진되면 accepted/unknown·DB event·canonical 1,024 tiles·메모리·checkpoint/tail을 대조하고, 정상 종료 후 같은 코드·mode·설정·fixture를 새 JVM으로 복구해 다시 비교한다. 복구는 schema/seed/users를 재실행하지 않는다. A의 21회 baseline은 보존된 당시 source로 검증하고, C의 15회 비교 matrix와 별도 smoke는 해당 manifest/source snapshot으로 독립 분석한다. benchmark 출력은 원래 bootJar나 기본 check의 자동 부하에 포함하지 않는다. 실행 결과·예산·인계는 `작업기록/phase-15-progress.md`에 남기며 운영 metrics/alert 체계는 별도 범위다.
+
+17-C Windows 검증 도구는 별도 `phase17CVerification` 진입점에서 고정 plan의 소유 경로·DB/Redis·예산을 확인한 뒤에만 실행한다. benchmark 관측은 앱 시작 전에 등록하여 실제 production Windows adapter와 storage에 위임하고, preparation의 파일별 R/마지막 S, memory·seq·READY, rotation/retention과 정상 close를 하나의 유한 trace로 연결한다. 개행 검사용 READ 채널은 writer 채택·회전 채널과 구분하여 각 close를 기록하므로, 같은 파일의 reader 종료가 writer 종료 증거를 대신하지 않는다. 기존 transaction advice와 Spring 종료 소유권을 유지하며 관측 누락·overflow·프로세스/로그/XML 실패·관측 기한 초과는 완료로 인정하지 않는다.
+
+startup 판정은 action과 검증된 initial 입력에서 정한 memory 준비 방식·replay 건수·seed 인수를 사용한다. preparation, 기본 memory 준비, 각 replay, seed, READY의 대응하는 성공 반환을 확인하고 앞 호출의 완료 뒤에 다음 호출이 시작해야 한다. 필수 관측의 누락·중복·실패, init/load 동시 수행과 READY 이후의 startup 호출은 거부한다. replay 0건은 허용하며 smoke의 seed는 종료 시점의 발급값이 아닌 startup 관측 인수로 비교한다.
+
+HTTP/DB/메모리/WAL 정합성·coverage·drain·preparation byte 보존은 앱 실행 중 확인한다. 전체 trace의 integrity·물리 전환·startup·파일별 R/마지막 S 판정은 child·reader·diagnostics와 context의 정상 종료 및 flush 관측 생산자의 실제 종료를 확인한 뒤 저장 경로에서 수행한다. 종료 뒤에도 반환·close가 없으면 실패하며 실행·정리·timeout 실패 뒤 늦은 정상 반환으로 성공을 게시하지 않는다. Spring을 띄우지 않는 미반영 WAL writer는 startup 검사만 생략하고 물리 호출·close·trace 완결성은 유지한다.
+
+C의 정상 소진 판정은 기존 HTTP/DB/메모리 대조에 더해 이미 읽은 남은 WAL 구간과 해당 DB event 목록의 길이·순서·내용을 양방향으로 비교한다. 삭제된 prefix 이전 이력은 제외하고 실제 seq gap을 허용한다. 별도 미반영 fixture는 새 catalog와 실제 writer로 만들도록 분리하며, 복구는 정상 종료한 initial의 입력/class/WAL 해시를 대조하고 schema나 사용자를 재초기화하지 않는다. 현재 구현·실행 범위와 후속 실제 앱/최종 task의 증거는 `작업기록/phase-17-progress.md`가 구분한다.
+
+18-A-1 실행 기반은 별도 `Phase18Main`의 읽기 전용 Plan과 서비스 없는 VerifyTools로 시작한다. 엄격한 동결 입력과 산식 기반 예정 요청 집합을 검사하고, 실제 child JVM의 PID/시작시각·종료 및 필수 증거 저장을 함께 판정한다. STOP은 정상 제어 메시지 대기 중에도 적용하며 이미 시작한 작업의 소유·소진을 확인한다. 미확인 적용·기한 초과·증거 실패는 후속 실행을 차단한다. 실제 HTTP/WS·production fixture·collector·분석기는 아직 연결하지 않았으며, 상세 입력/연결 계약은 `docs/phase18-tools.md`, 실행 상태와 증거는 `작업기록/phase-18-progress.md`에 둔다.
 
 ### 현재 bootstrap/recovery 검증
 - `0 rows + checkpoint 0 + WAL 없음`: dirty drain과 DB write 없는 no-op, DB tiles 0 rows 유지
@@ -1418,7 +1440,7 @@ single-flight와 scheduler는 JVM 단일 process 보호다. 다중 application i
 - ready 상태에서 이미 일관되게 capture한 plan은 후속 fatal에도 capture target까지만 transaction 완료 가능
 - not-ready 전환 이후 새로운 flush plan 시작과 capture 금지
 - 신규 파일, 기존 파일과 동일 파일 후속 append 모두 `FileChannel.force(true)` 완료 뒤 성공 반환
-- parent-directory fsync와 partial-line truncate recovery는 아직 구현하지 않음
+- 확인한 Windows NTFS 환경의 필수 내용/폴더 동기화는 연결하며 partial-line truncate recovery는 구현하지 않음
 
 ### 최종 의미
 - WAL = flush event range와 필수 affected tile의 source of truth

@@ -75,7 +75,7 @@ class OverviewStartupRecoveryTest {
                 board,
                 eventSeqManager,
                 readiness
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), org.mockito.Mockito.mock(dev.cgt.pixelplace.wal.application.WalStoragePreparation.class));
         OverviewRenderer renderer = spy(new OverviewRenderer(board, canonicalKeys));
         OverviewService overviewService = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         RecordingTaskScheduler taskScheduler = new RecordingTaskScheduler();
@@ -120,7 +120,7 @@ class OverviewStartupRecoveryTest {
                 board,
                 new EventSeqManager(),
                 readiness
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), org.mockito.Mockito.mock(dev.cgt.pixelplace.wal.application.WalStoragePreparation.class));
         OverviewRenderer renderer = mock(OverviewRenderer.class);
         OverviewService overviewService = new OverviewService(renderer, readiness, dev.cgt.pixelplace.measurement.Measurements.disabled());
         RecordingTaskScheduler taskScheduler = new RecordingTaskScheduler();
@@ -159,7 +159,7 @@ class OverviewStartupRecoveryTest {
                 board,
                 new EventSeqManager(),
                 readiness
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), org.mockito.Mockito.mock(dev.cgt.pixelplace.wal.application.WalStoragePreparation.class));
         new StartupRecoveryRunner(recoveryService).run(mock(ApplicationArguments.class));
 
         byte[] recoveredPng = {1, 2, 3};

@@ -26,6 +26,10 @@ final class BenchmarkConsistency {
     }
     static Map<String, Object> verify(BenchmarkFixtures fixture, ConfigurableApplicationContext context,
             List<Long> users, List<Attempt> attempts, BenchmarkSpec.Case loadCase, long seed) throws Exception {
+        return verify(fixture, context, users, attempts, loadCase, seed, false);
+    }
+    static Map<String, Object> verify(BenchmarkFixtures fixture, ConfigurableApplicationContext context,
+            List<Long> users, List<Attempt> attempts, BenchmarkSpec.Case loadCase, long seed, boolean verifyRetainedInterval) throws Exception {
         Set<Long> requestIds = new HashSet<>(); Map<Long, Attempt> accepted = new HashMap<>();
         Map<Long, List<Attempt>> uncertain = new HashMap<>(); Map<Long, Integer> ordinals = new HashMap<>();
         for (int i = 0; i < users.size(); i++) ordinals.put(users.get(i), i);
@@ -86,6 +90,11 @@ final class BenchmarkConsistency {
                     || e.z != record.z() || e.tx != record.tx() || e.ty != record.ty()) problems++;
         }
         if (batch.walLastEventSeq() != checkpoint || events.isEmpty() || events.keySet().stream().mapToLong(Long::longValue).max().orElse(0) != checkpoint) problems++;
+        if (verifyRetainedInterval) {
+            // 이미 읽은 DB/WAL 목록의 역방향 대조. prefix 이력 제외와 합법적 seq gap 보존
+            Phase17CAnalyzer.retained(events.values().stream().map(e -> new dev.cgt.pixelplace.wal.domain.WalRecord(
+                    e.sequence, e.user, e.z, e.tx, e.ty, e.x, e.y, e.color, null)).toList(), batch.records(), checkpoint, batch.walLastEventSeq());
+        }
         var result = new LinkedHashMap<String, Object>(); result.put("complete", problems == 0 && unresolved == 0);
         result.put("mismatches", problems); result.put("unknownRecorded", unknownRecorded); result.put("unknownUnresolved", unresolved);
         result.put("accepted", accepted.size()); result.put("databaseEvents", events.size()); result.put("phaseEventCounts", phaseCounts);

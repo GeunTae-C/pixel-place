@@ -92,7 +92,7 @@ class SegmentedWalScanTest {
         RuntimeException failure = new IllegalArgumentException(sensitive, new RuntimeException(sensitive));
         failure.addSuppressed(new RuntimeException(sensitive));
         when(parser.parseLine(anyString(), anyLong())).thenThrow(failure);
-        var storage = new SegmentedWalStorage(properties(directory.resolve("wal"),1),parser,CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled());
+        var storage = new SegmentedWalStorage(properties(directory.resolve("wal"),1),parser,CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability());
         records(storage.segmentPath(0), 2);
         var thrown = assertThrows(IllegalArgumentException.class, () -> storage.readAfter(0));
         assertTrue(thrown.getMessage().contains("segment=0"));

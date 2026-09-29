@@ -25,6 +25,7 @@ repositories {
 }
 
 dependencies {
+    implementation 'net.java.dev.jna:jna:5.18.1'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-data-redis'
@@ -55,9 +56,32 @@ dependencies {
 }
 
 tasks.named('test') {
+    // canonical 전체 snapshot·새 복구 graph와 기존 Spring context를 함께 검증하는 test JVM 한도
+    maxHeapSize = '1g'
     // 외부 저장소가 필요한 검증은 전용 task로 분리
     useJUnitPlatform {
-        excludeTags 'mysql-integration', 'redis-integration'
+        excludeTags 'mysql-integration', 'redis-integration', 'windows-wal-integration'
+    }
+}
+
+// 명시한 Windows 기능 검증만 실행. 환경 부재를 skip으로 바꾸지 않는 task 진입 경계
+tasks.register('windowsWalIntegrationTest', Test) {
+    description = '격리된 Windows NTFS WAL native 조합 검증'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'windows-wal-integration' }
+    doFirst {
+        def root = providers.gradleProperty('phase17WalNativeRoot').orNull
+        if (!System.getProperty('os.name').startsWith('Windows') || root == null || !(root ==~ /(?s)^[A-Za-z]:[\\\/].*/)) {
+            throw new GradleException('Windows WAL verification requires an explicit fully qualified fixture root')
+        }
+        def plan = providers.gradleProperty('phase17WalNativePlan').orNull
+        if (plan == null || !(plan ==~ /(?s)^[A-Za-z]:[\\\/].*/) || !file(plan).isFile()) {
+            throw new GradleException('Windows WAL verification requires the recorded G-B03 environment and budget plan')
+        }
+        systemProperty 'pixelplace.test.wal-native-root', root
+        systemProperty 'pixelplace.test.wal-native-plan', plan
     }
 }
 
@@ -104,7 +128,12 @@ if (providers.gradleProperty('phase15BuildRoot').isPresent()) {
 if (providers.gradleProperty('phase15TempRoot').isPresent()) {
     tasks.withType(Test).configureEach {
         systemProperty 'java.io.tmpdir', providers.gradleProperty('phase15TempRoot').get()
+        systemProperty 'jna.tmpdir', providers.gradleProperty('phase15TempRoot').get()
     }
+}
+// 비상승 Windows 검증에서 운영자가 준비한 작은 symbolic-link 입력만 명시 재사용
+if (providers.gradleProperty('phase17SymlinkFixture').isPresent()) {
+    tasks.named('test') { systemProperty 'pixelplace.test.symlink-fixture', providers.gradleProperty('phase17SymlinkFixture').get() }
 }
 sourceSets {
     benchmark {
@@ -119,6 +148,22 @@ configurations {
 sourceSets.test.compileClasspath += sourceSets.benchmark.output
 sourceSets.test.runtimeClasspath += sourceSets.benchmark.output
 tasks.named('compileTestJava') { dependsOn tasks.named('benchmarkClasses') }
+
+// C runner가 명시한 실행에서만 실제 test JVM 내부 provenance 수집 활성화
+if (providers.gradleProperty('phase17CEvidence').isPresent()) {
+    tasks.withType(Test).configureEach {
+        systemProperty 'junit.jupiter.extensions.autodetection.enabled', 'true'
+        systemProperty 'pixelplace.phase17c.evidence', providers.gradleProperty('phase17CEvidence').get()
+        doFirst {
+            def target = file(providers.gradleProperty('phase17CEvidence').get())
+            new File(target, 'resolved-test-runtime.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+                task: name, java: javaLauncher.get().executablePath.asFile.absolutePath,
+                classpath: classpath.files.collect { it.absolutePath }.sort(),
+                testClasses: testClassesDirs.files.collect { it.absolutePath }.sort()
+            ]))
+        }
+    }
+}
 
 tasks.register('phase15Benchmark', JavaExec) {
     description = '격리된 15-A trial 또는 새 JVM recovery 대조'
@@ -136,5 +181,50 @@ tasks.register('phase15Benchmark', JavaExec) {
         if (classpath.files.any { it.name =~ /(?i)(devtools|junit|mockito)/ }) {
             throw new GradleException('Benchmark runtime contains a forbidden development/test dependency')
         }
+    }
+}
+
+// 후속 C 앱/fixture만 명시 실행. production artifact와 기본 check에는 포함하지 않음
+tasks.register('phase17CVerification', JavaExec) {
+    description = '17-C 격리 Windows 앱·fixture·새 JVM 복구 검증'
+    group = 'verification'
+    dependsOn tasks.named('benchmarkClasses')
+    classpath = sourceSets.benchmark.runtimeClasspath
+    mainClass = 'dev.cgt.benchmark.Phase17CVerificationMain'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+    maxHeapSize = '2g'
+    jvmArgs '-XX:+UseG1GC', '-Djdk.httpclient.disableRetryConnect=true', '-Djdk.httpclient.enableAllMethodRetry=false'
+    doFirst {
+        ['phase17CPlan', 'phase17CCase', 'phase17CAction', 'phase17COutput', 'phase17CTemp'].each {
+            if (!providers.gradleProperty(it).isPresent()) throw new GradleException('Missing explicit C input: ' + it)
+        }
+        if (classpath.files.any { it.name =~ /(?i)(devtools|junit|mockito)/ }) throw new GradleException('Forbidden C runtime dependency')
+        args '--plan', providers.gradleProperty('phase17CPlan').get(), '--case', providers.gradleProperty('phase17CCase').get(), '--action', providers.gradleProperty('phase17CAction').get()
+        systemProperty 'phase17c.output', providers.gradleProperty('phase17COutput').get()
+        systemProperty 'java.io.tmpdir', providers.gradleProperty('phase17CTemp').get()
+        systemProperty 'jna.tmpdir', providers.gradleProperty('phase17CTemp').get()
+        if (providers.gradleProperty('phase17CInitial').isPresent()) systemProperty 'phase17c.initial', providers.gradleProperty('phase17CInitial').get()
+    }
+}
+
+// Plan은 컴파일과 분리된 직접 JVM 실행. 이 task는 명시한 새 classpath 파일만 준비
+tasks.register('phase18ToolsClasspath') {
+    group = 'verification'
+    description = '18-A-1 도구 직접 실행용 benchmark classpath 준비'
+    dependsOn tasks.named('benchmarkClasses')
+    doLast {
+        def target = providers.gradleProperty('phase18ClasspathFile').orNull
+        if (target == null || !new File(target).isAbsolute()) throw new GradleException('Absolute phase18ClasspathFile required')
+        def output = new File(target)
+        if (output.exists()) throw new GradleException('New classpath file required')
+        def hash = { f -> java.security.MessageDigest.getInstance('SHA-256').digest(f.bytes).encodeHex().toString() }
+        def sources = (fileTree('src').files + fileTree('scripts').files).findAll { !it.name.toLowerCase().endsWith('.zip') && !it.name.endsWith('.pyc') }
+        sources += ['build.gradle', 'settings.gradle', 'gradlew.bat', 'pixel_place.sql', 'docs/phase18-tools.md'].collect { file(it) }
+        def runtime = sourceSets.benchmark.runtimeClasspath.files.collectMany { it.isDirectory() ? fileTree(it).files.toList() : [it] }
+        def receipt = [schemaVersion: 1, createdUtc: java.time.Instant.now().toString(),
+            inputs: sources.sort { it.path }.collect { [path: relativePath(it).replace('\\', '/'), sha256: hash(it)] },
+            runtime: runtime.sort { it.path }.collect { [path: it.absolutePath, sha256: hash(it)] }]
+        java.nio.file.Files.writeString(new File(target + '.json').toPath(), groovy.json.JsonOutput.toJson(receipt), java.nio.file.StandardOpenOption.CREATE_NEW)
+        java.nio.file.Files.writeString(output.toPath(), sourceSets.benchmark.runtimeClasspath.asPath, java.nio.file.StandardOpenOption.CREATE_NEW)
     }
 }

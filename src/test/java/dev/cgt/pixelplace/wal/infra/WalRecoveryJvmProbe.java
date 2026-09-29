@@ -13,6 +13,14 @@ import java.util.*;
 /** 실패 fixture의 실제 남은 파일을 새 JVM production recovery로 검증. DB/schema/seed/users 변경 기능 없음 */
 public final class WalRecoveryJvmProbe {
     public static void main(String[] args) throws Exception {
+        if(args[0].equals("--case")) {
+            Path wal=Path.of(args[1]);long checkpoint=Long.parseLong(args[2]);
+            List<Long> records=args[3].equals("empty")?List.of():Arrays.stream(args[3].split(",")).map(Long::valueOf).toList();
+            if(args[5].equals("native"))try(var boundary=new WindowsWalNativeTestBoundary()) {
+                WalRecoveryCaseVerifier.verify(wal,checkpoint,records,args[4],new WindowsWalFileDurability(boundary.bridge));
+            } else WalRecoveryCaseVerifier.verify(wal,checkpoint,records,args[4],new TestWalFileDurability());
+            System.out.println("RECOVERY_CASE_EXIT pid="+ProcessHandle.current().pid());return;
+        }
         Path wal = Path.of(args[0]); int expected = Integer.parseInt(args[1]);
         var before = hashes(wal);
         var measure = Measurements.disabled(); var ready = new ServiceReadiness();
@@ -21,7 +29,7 @@ public final class WalRecoveryJvmProbe {
         try (var storage = WalStorageTestSupport.storage(wal, 1)) {
             var capture = new StartupRecoveryDbViewCaptureService(() -> new CheckpointSnapshot(0), TileLoadResult::allMissingResult);
             var recovery = new StartupRecoveryService(capture, new DbBootstrapClassifier(keys), keys,
-                    new FileWalReplaySource(storage), board, seq, ready, measure);
+                    new FileWalReplaySource(storage), board, seq, ready, measure, storage::prepareForRecovery);
             if (expected < 0) {
                 boolean failed = false;
                 try { recovery.recover(); } catch (IllegalStateException failure) { failed = true; }

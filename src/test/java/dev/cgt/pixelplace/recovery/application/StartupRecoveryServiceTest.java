@@ -139,7 +139,7 @@ class StartupRecoveryServiceTest {
                     assertTrue(failure.getMessage().contains("checkpoint="));
                     assertTrue(failure.getMessage().contains("databaseKeyCount="));
                     assertTrue(failure.getMessage().contains("classifierState="));
-                    verifyNoInteractions(fixture.walReplaySource, fixture.board, fixture.eventSeqManager);
+                    verifyNoInteractions(fixture.walReplaySource, fixture.board, fixture.eventSeqManager, fixture.preparation);
                     assertFalse(fixture.readiness.isReady());
                 }
         ));
@@ -164,7 +164,7 @@ class StartupRecoveryServiceTest {
                 board,
                 eventSeqManager,
                 readiness
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), org.mockito.Mockito.mock(dev.cgt.pixelplace.wal.application.WalStoragePreparation.class));
 
         IllegalStateException actual = assertThrows(IllegalStateException.class, service::recover);
 
@@ -216,7 +216,7 @@ class StartupRecoveryServiceTest {
 
                     assertTrue(failure.getMessage().contains("walLastEventSeq="));
                     assertTrue(failure.getMessage().contains("recordCount="));
-                    verifyNoInteractions(fixture.board, fixture.eventSeqManager);
+                    verifyNoInteractions(fixture.board, fixture.eventSeqManager, fixture.preparation);
                     assertFalse(fixture.readiness.isReady());
                 }
         ));
@@ -290,7 +290,7 @@ class StartupRecoveryServiceTest {
                 board,
                 eventSeqManager,
                 readiness
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), org.mockito.Mockito.mock(dev.cgt.pixelplace.wal.application.WalStoragePreparation.class));
 
         service.recover();
 
@@ -321,7 +321,7 @@ class StartupRecoveryServiceTest {
                 mock(InMemoryTileBoard.class),
                 mock(EventSeqManager.class),
                 new ServiceReadiness()
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), org.mockito.Mockito.mock(dev.cgt.pixelplace.wal.application.WalStoragePreparation.class));
 
         service.recover();
 
@@ -365,6 +365,7 @@ class StartupRecoveryServiceTest {
         ServiceReadiness readiness = new ServiceReadiness();
         when(capture.capture()).thenReturn(view);
         when(wal.readAfter(view.checkpoint().lastFlushedEventSeq())).thenReturn(batch);
+        var preparation=mock(dev.cgt.pixelplace.wal.application.WalStoragePreparation.class);
         StartupRecoveryService service = new StartupRecoveryService(
                 capture,
                 classifier,
@@ -373,8 +374,8 @@ class StartupRecoveryServiceTest {
                 board,
                 eventSeqManager,
                 readiness
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
-        return new Fixture(service, wal, board, eventSeqManager, readiness);
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), preparation);
+        return new Fixture(service, wal, board, eventSeqManager, readiness, preparation);
     }
 
     private static StartupRecoveryDbView view(
@@ -433,7 +434,8 @@ class StartupRecoveryServiceTest {
             WalReplaySource walReplaySource,
             InMemoryTileBoard board,
             EventSeqManager eventSeqManager,
-            ServiceReadiness readiness
+            ServiceReadiness readiness,
+            dev.cgt.pixelplace.wal.application.WalStoragePreparation preparation
     ) {
     }
 

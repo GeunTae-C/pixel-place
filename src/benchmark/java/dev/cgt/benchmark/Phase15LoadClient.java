@@ -74,6 +74,28 @@ public final class Phase15LoadClient {
         }
         System.exit(exit);
     }
+    /** C 전용 child 진입. 기존 발생기/응답 분류 재사용, 기한 초과를 System.exit로 마감하지 않음 */
+    static void runC(String trial) throws Exception {
+        Phase15LoadClient client = null; Throwable failure = null;
+        try (var protocol = new BenchmarkProtocol(System.in, System.out, trial)) {
+            client = new Phase15LoadClient(protocol, protocol.receive("START", 120));
+            if (client.loadCase.webSocketSessions() != 0) throw new IllegalArgumentException("C requires zero WS sessions");
+            client.run();
+        } catch (Throwable problem) { failure = problem; }
+        finally {
+            if (client != null) {
+                client.closing = true;
+                client.background.shutdown(); client.http.shutdown(); client.httpExecutor.shutdown();
+                try {
+                    if (!client.background.awaitTermination(120, TimeUnit.SECONDS) || !client.http.awaitTermination(Duration.ofSeconds(120))
+                            || !client.httpExecutor.awaitTermination(120, TimeUnit.SECONDS)) throw new IllegalStateException("C child normal shutdown incomplete");
+                    client.save(failure == null);
+                } catch (Throwable secondary) { failure = Phase15BenchmarkMain.preserve(failure, secondary); }
+            }
+        }
+        if (failure instanceof Error error) throw error;
+        if (failure != null) throw new IllegalStateException("C load client failed; no automatic retry", failure);
+    }
     private void run() throws Exception {
         refreshTokens();
         var sampler = new BenchmarkObserver.JvmResources();

@@ -27,7 +27,7 @@ class SegmentedWalRetentionTest {
     void deletesOnlyWholeEligiblePrefixAndPreservesNamespaceOutside(long checkpoint, int deleted) throws Exception {
         Path base = directory.resolve("custom.wal");
         var properties = properties(base, 10000);
-        try (var storage = new SegmentedWalStorage(properties, PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled())) {
+        try (var storage = new SegmentedWalStorage(properties, PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability())) {
             properties.setActiveFile(directory.resolve("changed"));
             records(storage.segmentPath(0), 2, 5);
             records(storage.segmentPath(1), 9);

@@ -55,7 +55,7 @@ class WriteExecutionConfigurationTest {
         Path path=directory.resolve("absent/wal");
         var properties=new WalProperties();properties.setActiveFile(path);
         var mapper=JsonMapper.builder().build();
-        var storage=spy(new SegmentedWalStorage(properties,new WalRecordParser(mapper),new WalRecordJsonCodec(mapper),Measurements.disabled()));
+        var storage=spy(new SegmentedWalStorage(properties,new WalRecordParser(mapper),new WalRecordJsonCodec(mapper),Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability()));
         var executor=new java.util.concurrent.atomic.AtomicReference<PixelWriteExecutor>();
         doAnswer(call->{assertTrue(executor.get().snapshot().closed());return call.callRealMethod();}).when(storage).close();
         configData(profile,environmentMode,explicitMode)
@@ -143,7 +143,7 @@ class WriteExecutionConfigurationTest {
         context.getEnvironment().getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource("mode",java.util.Map.of("pixel-place.write.mode",mode)));
         var properties=new WalProperties();properties.setActiveFile(directory.resolve("runtime/wal"));
         var mapper=JsonMapper.builder().build();
-        var storage=spy(new SegmentedWalStorage(properties,new WalRecordParser(mapper),new WalRecordJsonCodec(mapper),Measurements.disabled()));
+        var storage=spy(new SegmentedWalStorage(properties,new WalRecordParser(mapper),new WalRecordJsonCodec(mapper),Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability()));
         var entered=new CountDownLatch(1);var release=new CountDownLatch(1);
         var board=mock(InMemoryTileBoard.class);var dirty=mock(DirtyTileTracker.class);
         when(board.applyPixel(1,2,3)).thenAnswer(call->{SinglePixelWriteExecutorTest.pause(entered,release);return new dev.cgt.pixelplace.tile.domain.TileMutationResult(new dev.cgt.pixelplace.tile.domain.TileKey(0,0,0),1);});

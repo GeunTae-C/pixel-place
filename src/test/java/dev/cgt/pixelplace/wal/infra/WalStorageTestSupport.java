@@ -35,7 +35,7 @@ final class WalStorageTestSupport {
     }
 
     static SegmentedWalStorage storage(Path path, long maximum) {
-        return new SegmentedWalStorage(properties(path, maximum), PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled());
+        return new SegmentedWalStorage(properties(path, maximum), PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability());
     }
 
     static void records(Path path, long... seqs) throws IOException {
@@ -49,8 +49,20 @@ final class WalStorageTestSupport {
         final List<FileChannel> writers = new ArrayList<>();
         private final List<FileChannel> physicalWriters = new ArrayList<>();
         ChannelSetup setup = (channel, index) -> { };
+        dev.cgt.pixelplace.measurement.PixelMeasurement.Operation currentForce;
+        ForceSetup beforeForce = (channel, kind) -> { };
+        final List<dev.cgt.pixelplace.measurement.PixelMeasurement.Operation> forceKinds = new ArrayList<>();
 
-        ControlledStorage(Path path, long maximum) { super(properties(path, maximum), PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled()); }
+        ControlledStorage(Path path, long maximum) { this(path, maximum, new TestWalFileDurability()); }
+        ControlledStorage(Path path, long maximum, WalFileDurability durability) {
+            super(properties(path, maximum), PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled(), durability);
+        }
+
+        @Override
+        void forceFile(FileChannel writer, dev.cgt.pixelplace.measurement.PixelMeasurement.Operation kind) throws IOException {
+            currentForce = kind; forceKinds.add(kind); beforeForce.apply(writer, kind);
+            super.forceFile(writer, kind);
+        }
 
         @Override
         FileChannel openFileChannel(Path path, StandardOpenOption... options) throws IOException {
@@ -79,4 +91,6 @@ final class WalStorageTestSupport {
 
     @FunctionalInterface
     interface ChannelSetup { void apply(FileChannel channel, int index) throws IOException; }
+    @FunctionalInterface
+    interface ForceSetup { void apply(FileChannel channel, dev.cgt.pixelplace.measurement.PixelMeasurement.Operation kind) throws IOException; }
 }

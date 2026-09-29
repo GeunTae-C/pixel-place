@@ -61,7 +61,7 @@ class PixelPlaceApplicationTests {
                 board,
                 eventSeqManager,
                 readiness
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), org.mockito.Mockito.mock(dev.cgt.pixelplace.wal.application.WalStoragePreparation.class));
 
         service.recover();
 

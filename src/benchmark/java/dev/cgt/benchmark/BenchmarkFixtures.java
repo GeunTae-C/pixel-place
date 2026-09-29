@@ -15,8 +15,13 @@ final class BenchmarkFixtures implements AutoCloseable {
     final StringRedisTemplate redis;
     final Map<String, Object> redisFacts;
     final String catalog;
+    final Path ownedMysqlRoot;
 
     BenchmarkFixtures(BenchmarkEnvironment.Credentials credentials, String catalog, boolean requireEmptyRedis) {
+        this(credentials, catalog, requireEmptyRedis, null);
+    }
+    BenchmarkFixtures(BenchmarkEnvironment.Credentials credentials, String catalog, boolean requireEmptyRedis, Path ownedMysqlRoot) {
+        this.ownedMysqlRoot = ownedMysqlRoot;
         this.credentials = credentials; this.catalog = catalog;
         var settings = new RedisStandaloneConfiguration(credentials.redisHost(), credentials.redisPort());
         settings.setDatabase(credentials.redisDatabase());
@@ -30,6 +35,9 @@ final class BenchmarkFixtures implements AutoCloseable {
                 throw new IllegalStateException("Benchmark requires local standalone Redis master");
             long size = connection.serverCommands().dbSize();
             if (requireEmptyRedis && size != 0) throw new IllegalStateException("Redis DB has existing usage; no mutation allowed");
+            if (ownedMysqlRoot != null && connection.serverCommands().getClientList().stream()
+                    .filter(client -> client.getDatabaseId() == credentials.redisDatabase()).count() != 1)
+                throw new IllegalStateException("C Redis DB already has another client; dedicated use not established");
             redisFacts = Map.of("database", credentials.redisDatabase(), "productionDatabase", 0, "regressionDatabase", 1,
                     "initialSize", size, "standalone", true, "version", connection.serverCommands().info("server").getProperty("redis_version"));
         } catch (RuntimeException | Error failure) { redisFactory.destroy(); throw failure; }
@@ -42,7 +50,7 @@ final class BenchmarkFixtures implements AutoCloseable {
             BenchmarkGuards.requireCatalog(connection, catalog); connection.setReadOnly(readOnly); return connection;
         } catch (SQLException | RuntimeException failure) { connection.close(); throw failure; }
     }
-    private Connection adminConnect(String database) throws SQLException {
+    Connection adminConnect(String database) throws SQLException {
         var properties = new Properties(); properties.setProperty("user", credentials.dbUsername()); properties.setProperty("password", credentials.dbPassword());
         return DriverManager.getConnection(credentials.jdbc(database), properties);
     }
@@ -157,7 +165,7 @@ final class BenchmarkFixtures implements AutoCloseable {
         try (var connection = adminConnect(""); var statement = connection.createStatement();
              var rows = statement.executeQuery("SHOW VARIABLES WHERE Variable_name IN ('datadir','innodb_data_home_dir','innodb_log_group_home_dir','innodb_undo_directory','tmpdir','innodb_temp_tablespaces_dir','log_bin_basename','log_error','slow_query_log_file','general_log_file')")) {
             int seen = 0;
-            while (rows.next()) { BenchmarkPaths.requireOwned(Path.of(rows.getString(2))); seen++; }
+            while (rows.next()) { requireOwnedPath(Path.of(rows.getString(2))); seen++; }
             if (seen != 10) throw new IllegalStateException("DB storage path observations incomplete");
         }
     }
@@ -170,7 +178,7 @@ final class BenchmarkFixtures implements AutoCloseable {
                 find.setString(1, catalog);
                 try (var rows = find.executeQuery()) {
                     while (rows.next()) {
-                        Path actual = data.resolve(rows.getString(2)).toAbsolutePath().normalize(); BenchmarkPaths.requireOwned(actual);
+                        Path actual = data.resolve(rows.getString(2)).toAbsolutePath().normalize(); requireOwnedPath(actual);
                         if (!Files.isRegularFile(actual)) throw new IllegalStateException("Fixture data file missing");
                         files.put(rows.getString(1), actual.toString());
                     }
@@ -179,6 +187,11 @@ final class BenchmarkFixtures implements AutoCloseable {
         }
         if (files.size() != 4) throw new IllegalStateException("Fixture data file location proof incomplete");
         return files;
+    }
+    private void requireOwnedPath(Path path) throws Exception {
+        // C의 이미 존재하는 MySQL 저장 root만 별도 허용. 기존 15단계 호출은 원래 guard 유지
+        if (ownedMysqlRoot == null) BenchmarkPaths.requireOwned(path);
+        else Phase17CPlan.owned(Phase17CPlan.absolute(path.toString()), ownedMysqlRoot);
     }
     Map<String, Long> cleanupOwnedKeys(List<Long> ids) {
         long removed = 0;

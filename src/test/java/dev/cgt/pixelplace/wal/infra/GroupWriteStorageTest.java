@@ -35,7 +35,7 @@ class GroupWriteStorageTest {
             var forces=new AtomicInteger();
             storage.setup=(channel,index)->doAnswer(call->{assertTrue(Thread.holdsLock(core));assertTrue(Thread.holdsLock(storage));
                 assertTrue(((java.util.concurrent.locks.ReentrantLock)field(boundary,"lock")).isHeldByCurrentThread());
-                if(forces.incrementAndGet()==1)BatchWriteBoundaryTest.pause(entered,release);return call.callRealMethod();}).when(channel).force(true);
+                if(storage.currentForce==dev.cgt.pixelplace.measurement.PixelMeasurement.Operation.record_force && forces.incrementAndGet()==1)BatchWriteBoundaryTest.pause(entered,release);return call.callRealMethod();}).when(channel).force(true);
             try(var group=new GroupPixelWriteExecutor(boundary,core,dirty,ready,props,measure)) {try {
                 var first=callers.submit(()->group.execute(1,0,0,1));assertTrue(entered.await(5,TimeUnit.SECONDS));
                 var requests=new ArrayList<Future<PixelWriteResult>>();
@@ -54,14 +54,15 @@ class GroupWriteStorageTest {
 
     static Object field(Object object,String name) throws Exception {var field=object.getClass().getDeclaredField(name);field.setAccessible(true);return field.get(object);}
 
-    @org.junit.jupiter.api.Test
-    void springUnknownPublicationPrecedesDelayedFileReturnButStorageCloseFollowsWorkerTermination() throws Exception {
+    @ParameterizedTest @ValueSource(booleans={false,true})
+    void springUnknownPublicationPrecedesDelayedDirectorySyncButStorageCloseFollowsWorkerTermination(boolean lateFailure) throws Exception {
         var context=new org.springframework.context.annotation.AnnotationConfigApplicationContext();
         context.getEnvironment().getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource("group",
                 Map.of("pixel-place.write.mode","group","pixel-place.write.group.shutdown-grace","30ms")));
         var entered=new CountDownLatch(1);var release=new CountDownLatch(1);
-        var storage=spy(new ControlledStorage(directory.resolve("wal"),10000));
-        storage.setup=(channel,index)->doAnswer(call->{BatchWriteBoundaryTest.pause(entered,release);return call.callRealMethod();}).when(channel).force(true);
+        var durability=spy(new TestWalFileDurability());
+        var storage=spy(new ControlledStorage(directory.resolve("wal"),10000,durability));
+        doAnswer(call->{BatchWriteBoundaryTest.pause(entered,release);if(lateFailure)throw new IOException("late S failure");return call.callRealMethod();}).when(durability).syncDirectory(any());
         context.registerBean(SegmentedWalStorage.class,()->storage);
         context.registerBean(dev.cgt.pixelplace.measurement.PixelMeasurement.class,Measurements::disabled);
         var board=mock(InMemoryTileBoard.class);var dirty=mock(DirtyTileTracker.class);
@@ -69,10 +70,12 @@ class GroupWriteStorageTest {
         context.register(WriteExecutionConfiguration.class,FileWalAppender.class,PixelWriteService.class,EventSeqManager.class,ServiceReadiness.class,FlushBoundaryCoordinator.class);
         context.refresh();context.getBean(ServiceReadiness.class).markReady();var executor=context.getBean(PixelWriteExecutor.class);
         doAnswer(call->{assertTrue(executor.snapshot().closed());assertFalse(executor.snapshot().workerAlive());return call.callRealMethod();}).when(storage).close();
-        try(var callers=Executors.newFixedThreadPool(2)) {try {
+        try(var callers=Executors.newFixedThreadPool(3)) {try {
             var request=callers.submit(()->executor.execute(1,0,0,1));assertTrue(entered.await(5,TimeUnit.SECONDS));
+            var queued=callers.submit(()->executor.execute(2,0,0,2));await(()->executor.snapshot().queued()==1);
             var closing=callers.submit(context::close);
             assertInstanceOf(PixelWriteUnknownException.class,assertThrows(ExecutionException.class,()->request.get(5,TimeUnit.SECONDS)).getCause());
+            assertInstanceOf(PixelWriteBusyException.class,assertThrows(ExecutionException.class,()->queued.get(5,TimeUnit.SECONDS)).getCause());
             assertTrue(executor.snapshot().workerAlive());assertEquals(1,executor.snapshot().workerInFlight());assertEquals(0,executor.snapshot().outstanding());
             verify(storage,never()).close();assertFalse(closing.isDone());release.countDown();closing.get(5,TimeUnit.SECONDS);
             verify(storage,times(1)).close();verifyNoInteractions(board,dirty);assertTrue(executor.snapshot().closed());
@@ -114,7 +117,7 @@ class GroupWriteStorageTest {
             var callers=Executors.newFixedThreadPool(5)) {
             // 첫 정상 요청을 memory 직전에서 정지하여 다음 batch의 FIFO 3건을 확정
             storage.setup=(channel,index)->{
-                if(index==0)doAnswer(call->{BatchWriteBoundaryTest.pause(entered,release);return call.callRealMethod();}).when(channel).force(true);
+                if(index==0)doAnswer(call->{if(storage.currentForce==dev.cgt.pixelplace.measurement.PixelMeasurement.Operation.record_force)BatchWriteBoundaryTest.pause(entered,release);return call.callRealMethod();}).when(channel).force(true);
             };
             try {
                 var first=callers.submit(()->executor.execute(1,0,0,1));assertTrue(entered.await(5,TimeUnit.SECONDS));

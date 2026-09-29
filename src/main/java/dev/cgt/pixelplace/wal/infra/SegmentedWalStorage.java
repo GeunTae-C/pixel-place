@@ -44,19 +44,24 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
     private final long maxSegmentBytes;
     private final WalRecordParser parser;
     private final WalRecordJsonCodec codec;
+    private final WalFileDurability durability;
+    private WalFileDurability.DirectoryProof preparedDirectory;
+    private ScanResult recoveryScan;
     private boolean poisoned;
     private boolean closed;
     private FileChannel channel;
     private SegmentFile active;
     private long durableTail;
 
-    public SegmentedWalStorage(WalProperties properties, WalRecordParser parser, WalRecordJsonCodec codec, PixelMeasurement measurement) {
+    public SegmentedWalStorage(WalProperties properties, WalRecordParser parser, WalRecordJsonCodec codec,
+                               PixelMeasurement measurement, WalFileDurability durability) {
         properties.validate();
         this.basePath = properties.normalizedBasePath();
         this.maxSegmentBytes = properties.getMaxSegmentBytes();
         this.parser = Objects.requireNonNull(parser);
         this.codec = Objects.requireNonNull(codec);
         this.measurement = Objects.requireNonNull(measurement);
+        this.durability = Objects.requireNonNull(durability);
     }
 
     // namespace 밖 항목은 attributes조차 읽지 않으며 canonical 연속 suffix만 채택
@@ -81,12 +86,59 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
         }
         try {
             validateActive();
-            return scan(checkpoint).batch();
+            ScanResult result = scan(checkpoint);
+            recoveryScan = result;
+            return result.batch();
         } catch (IOException | RuntimeException exception) {
             throw fail(exception);
         } catch (Error error) {
             throw fail(error);
         }
+    }
+
+    /** 같은 storage의 최근 성공 scan 한 번만 복구에 채택. 대응 오류는 I/O·poison 이전 거부 */
+    public synchronized void prepareForRecovery(WalReplayBatch validatedBatch) {
+        requireUsable();
+        if (validatedBatch == null || recoveryScan == null || recoveryScan.batch() != validatedBatch) {
+            throw new IllegalArgumentException("Recovery requires this storage's current unconsumed scan batch");
+        }
+        ScanResult accepted = recoveryScan;
+        recoveryScan = null;
+        try {
+            boolean newlyPrepared = ensurePreparedDirectory();
+            List<SegmentFile> current = inspect();
+            if (!current.equals(accepted.segments().stream().map(SegmentFacts::file).toList())) {
+                throw new IOException("Scanned WAL file set changed before recovery preparation");
+            }
+            for (FileStamp stamp : accepted.stamps()) {
+                if (!stamp.equals(fileStamp(stamp.path()))) throw new IOException("Scanned WAL identity or attributes changed");
+            }
+            for (FileStamp stamp : accepted.stamps()) {
+                measuredIo(PixelMeasurement.Operation.recovery_file_sync, () -> {
+                    durability.syncRecoveredFile(stamp.path()); return null;
+                });
+            }
+            if (!accepted.stamps().isEmpty() || !newlyPrepared) syncDirectory();
+            durableTail = validatedBatch.walLastEventSeq();
+        } catch (IOException | RuntimeException | Error failure) {
+            // 어떤 파일 R/close나 마지막 S라도 실패하면 뒤 파일·memory·READY로 진행 불가
+            throw fail(failure);
+        }
+    }
+
+    private boolean ensurePreparedDirectory() throws IOException {
+        if (preparedDirectory == null) {
+            preparedDirectory = durability.prepareDirectory(basePath.getParent());
+            return true;
+        }
+        durability.verifyDirectory(preparedDirectory);
+        return false;
+    }
+
+    private void syncDirectory() throws IOException {
+        measuredIo(PixelMeasurement.Operation.directory_sync, () -> {
+            durability.syncDirectory(preparedDirectory); return null;
+        });
     }
 
     /** 전체 scan·reader close 후 확정된 closed prefix만 삭제. 삭제 지연은 storage 고장과 구분 */
@@ -104,6 +156,7 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
             if (inspected.batch().walLastEventSeq() < confirmedCheckpoint) {
                 throw new IllegalStateException("Confirmed checkpoint exceeds actual WAL tail");
             }
+            ensurePreparedDirectory();
             long activeNumber = inspected.segments().getLast().file().number();
             long tailNumber = inspected.segments().stream()
                     .filter(segment -> segment.lastEventSeq() > 0)
@@ -116,20 +169,47 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
                     // 첫 부적격 파일을 건너뛰면 연속 suffix와 미반영 record 보존을 깨뜨림
                     break;
                 }
-                try {
-                    deleteFile(segment.file().path());
-                } catch (IOException delayed) {
-                    return WalRetentionResult.delayed(deleted, number, WalRetentionResult.DelayKind.IO);
-                } catch (SecurityException delayed) {
-                    return WalRetentionResult.delayed(deleted, number, WalRetentionResult.DelayKind.SECURITY);
-                }
+                WalRetentionResult.DelayKind delay = deleteAndSynchronize(segment.file().path());
+                if (delay != null) return WalRetentionResult.delayed(deleted, number, delay);
                 deleted++;
             }
             return WalRetentionResult.completed(deleted);
         } catch (IOException | RuntimeException | Error failure) {
-            // 검사 실패·예상 밖 delete 실패만 고장 처리. 이미 삭제된 prefix는 복원하지 않음
+            // 필수 Q/S 실패도 고장 처리. 이미 삭제된 prefix·DB commit은 복원하지 않음
             throw fail(failure);
         }
+    }
+
+    private WalRetentionResult.DelayKind deleteAndSynchronize(Path file) throws IOException {
+        Throwable deletionFailure = null;
+        try { deleteFile(file); }
+        catch (IOException | SecurityException delayed) { deletionFailure = delayed; }
+
+        WalFileDurability.NameObservation before = durability.queryName(file, preparedDirectory);
+        Throwable failure = before.failure();
+        if (!before.parentSafe()) {
+            // 다른 부모를 동기화해 원래 이름의 내구성이 확보됐다고 판단하면 안 됨
+            WalIo.rethrow(WalIo.combine(deletionFailure, WalIo.combine(failure,
+                    new IOException("WAL deletion parent identity is uncertain"))));
+        }
+        if (before.state() == WalFileDurability.NameState.UNKNOWN && failure == null) {
+            failure = new IOException("WAL name before directory sync is uncertain");
+        }
+        try { syncDirectory(); }
+        catch (IOException | RuntimeException | Error syncFailure) {
+            // 안전한 부모의 S는 Q 불명이어도 시도하며 최초 삭제/Q 원인을 보존
+            WalIo.rethrow(WalIo.combine(WalIo.combine(deletionFailure, failure), syncFailure));
+        }
+        WalFileDurability.NameObservation after = durability.queryName(file, preparedDirectory);
+        failure = WalIo.combine(failure, after.failure());
+        if (!after.parentSafe() || after.state() == WalFileDurability.NameState.UNKNOWN
+                || before.state() != after.state()
+                || (deletionFailure == null && before.state() != WalFileDurability.NameState.ABSENT)) {
+            failure = WalIo.combine(failure, new IOException("WAL deletion name state is not durably settled"));
+        }
+        if (failure != null) WalIo.rethrow(WalIo.combine(deletionFailure, failure));
+        if (deletionFailure instanceof SecurityException) return WalRetentionResult.DelayKind.SECURITY;
+        return deletionFailure == null ? null : WalRetentionResult.DelayKind.IO;
     }
 
     /** 단건도 동일 batch 저장 알고리즘 사용. 물리 size와 durable tail의 전진 시점 분리 */
@@ -173,6 +253,8 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
         }
         try {
             measurement.walStarted(batch, records.size());
+            recoveryScan = null;
+            ensurePreparedDirectory();
             if (initial != null) adoptWriter(initial);
             long unforcedTail = durableTail;
             int unforcedRecords = 0;
@@ -211,16 +293,20 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
     }
 
     private void adoptWriter(ScanResult initial) throws IOException {
+        SegmentFile candidate;
         if (initial.segments().isEmpty()) {
-            createDirectories(basePath.getParent());
             // 기존 경로 충돌은 실패. 번호를 우회하거나 기존 파일을 덮어쓰지 않음
             channel = openFileChannel(basePath, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ, StandardOpenOption.WRITE);
-            active = new SegmentFile(0, basePath, 0);
+            candidate = new SegmentFile(0, basePath, 0);
+            measuredForce(PixelMeasurement.Operation.empty_force, 0);
         } else {
-            SegmentFile candidate = initial.segments().getLast().file();
+            candidate = initial.segments().getLast().file();
             channel = openFileChannel(candidate.path(), StandardOpenOption.READ, StandardOpenOption.WRITE);
-            active = candidate;
+            measuredForce(PixelMeasurement.Operation.adoption_force, 0);
         }
+        // channel 필드가 게시 전 candidate도 소유. force/S 실패 정리에서 빠지면 안 됨
+        syncDirectory();
+        active = candidate;
         durableTail = initial.batch().walLastEventSeq();
     }
 
@@ -236,6 +322,7 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
         channel = openFileChannel(nextPath, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ, StandardOpenOption.WRITE);
         // active 게시 전 candidate도 소유하여 empty force 실패 시 반드시 close 시도
         measuredForce(PixelMeasurement.Operation.empty_force, 0);
+        syncDirectory();
         active = new SegmentFile(next, nextPath, 0);
         measurement.walRotated();
     }
@@ -256,6 +343,7 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
     public synchronized void close() {
         if (closed) return;
         closed = true;
+        recoveryScan = null;
         FileChannel owned = channel;
         channel = null;
         if (owned != null) {
@@ -269,30 +357,48 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
     }
 
     private ScanResult scan(long checkpoint) throws IOException {
+        recoveryScan = null;
         List<SegmentFile> files = inspect();
+        List<FileStamp> stamps = new ArrayList<>();
         List<SegmentFacts> facts = new ArrayList<>();
         List<WalRecord> records = new ArrayList<>();
         long tail = 0;
         for (SegmentFile file : files) {
+            FileStamp stamp = fileStamp(file.path());
+            if (stamp.size() != file.size()) throw new IOException("WAL size changed during scan");
             validateNewline(file);
             final long previousTail = tail;
             BufferedReader reader = openReader(file.path());
             SegmentFacts read = using(reader, () -> readRecords(reader, file, checkpoint, previousTail, records));
             facts.add(read);
             if (read.lastEventSeq() > 0) tail = read.lastEventSeq();
+            if (!stamp.equals(fileStamp(file.path()))) throw new IOException("WAL file changed during scan");
+            stamps.add(stamp);
         }
-        return new ScanResult(List.copyOf(facts), new WalReplayBatch(records, tail));
+        return new ScanResult(List.copyOf(facts), new WalReplayBatch(records, tail), List.copyOf(stamps));
+    }
+
+    private FileStamp fileStamp(Path path) throws IOException {
+        BasicFileAttributes attributes = readAttributes(path);
+        return new FileStamp(path, durability.fileIdentity(path), attributes.size(), attributes.lastModifiedTime());
     }
 
     // 실제 force 호출만 측정. append·회전·monitor 대기를 fsync로 합산하지 않음
     private void measuredForce(PixelMeasurement.Operation operation, int records) throws IOException {
         var scope = measurement.begin(operation); Throwable failure = null;
-        try { channel.force(true); }
+        try { forceFile(channel, operation); }
         catch (IOException | RuntimeException | Error problem) { failure = problem; throw problem; }
         finally {
-            measurement.walForced(records, failure == null);
+            if (operation != PixelMeasurement.Operation.adoption_force) measurement.walForced(records, failure == null);
             measurement.endPreserving(scope, failure == null ? PixelMeasurement.Outcome.success : PixelMeasurement.Outcome.failure, failure);
         }
+    }
+
+    private <T> T measuredIo(PixelMeasurement.Operation operation, WalIo.Action<T> action) throws IOException {
+        var scope = measurement.begin(operation); Throwable failure = null;
+        try { return action.run(); }
+        catch (IOException | RuntimeException | Error problem) { failure = problem; throw problem; }
+        finally { measurement.endPreserving(scope, failure == null ? PixelMeasurement.Outcome.success : PixelMeasurement.Outcome.failure, failure); }
     }
 
     private ScanResult measuredScan(long checkpoint, PixelMeasurement.Operation operation) throws IOException {
@@ -423,6 +529,7 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
 
     private RuntimeException fail(Throwable failure) {
         poisoned = true;
+        recoveryScan = null;
         FileChannel owned = channel;
         channel = null;
         if (owned != null) {
@@ -485,6 +592,9 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
         return FileChannel.open(path, options);
     }
 
+    // empty/adoption force와 완성 record force를 구분하는 실패 주입 경계
+    void forceFile(FileChannel writer, PixelMeasurement.Operation operation) throws IOException { writer.force(true); }
+
     BufferedReader openReader(Path path) throws IOException {
         return Files.newBufferedReader(path, StandardCharsets.UTF_8);
     }
@@ -499,5 +609,6 @@ public class SegmentedWalStorage implements AutoCloseable, WalSegmentRetention {
 
     record SegmentFile(long number, Path path, long size) { }
     private record SegmentFacts(SegmentFile file, long firstEventSeq, long lastEventSeq) { }
-    private record ScanResult(List<SegmentFacts> segments, WalReplayBatch batch) { }
+    private record FileStamp(Path path, String identity, long size, java.nio.file.attribute.FileTime modified) { }
+    private record ScanResult(List<SegmentFacts> segments, WalReplayBatch batch, List<FileStamp> stamps) { }
 }

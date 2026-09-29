@@ -13,6 +13,7 @@ import dev.cgt.pixelplace.tile.domain.InMemoryTileBoard;
 import dev.cgt.pixelplace.tile.domain.TileKey;
 import dev.cgt.pixelplace.wal.application.WalReplayBatch;
 import dev.cgt.pixelplace.wal.application.WalReplaySource;
+import dev.cgt.pixelplace.wal.application.WalStoragePreparation;
 import dev.cgt.pixelplace.wal.domain.WalRecord;
 import org.springframework.stereotype.Service;
 
@@ -35,6 +36,7 @@ public class StartupRecoveryService {
     private final InMemoryTileBoard inMemoryTileBoard;
     private final EventSeqManager eventSeqManager;
     private final ServiceReadiness serviceReadiness;
+    private final WalStoragePreparation walStoragePreparation;
 
     public StartupRecoveryService(
             StartupRecoveryDbViewCaptureService dbViewCaptureService,
@@ -44,7 +46,8 @@ public class StartupRecoveryService {
             InMemoryTileBoard inMemoryTileBoard,
             EventSeqManager eventSeqManager,
             ServiceReadiness serviceReadiness,
-            PixelMeasurement measurement
+            PixelMeasurement measurement,
+            WalStoragePreparation walStoragePreparation
     ) {
         this.dbViewCaptureService = dbViewCaptureService;
         this.dbBootstrapClassifier = dbBootstrapClassifier;
@@ -54,6 +57,7 @@ public class StartupRecoveryService {
         this.eventSeqManager = eventSeqManager;
         this.serviceReadiness = serviceReadiness;
         this.measurement = measurement;
+        this.walStoragePreparation = Objects.requireNonNull(walStoragePreparation);
     }
 
     /* 모든 입력·WAL invariant와 memory 복구 성공 뒤에만 ready 전환 */
@@ -76,6 +80,8 @@ public class StartupRecoveryService {
                 "walReplayBatch must not be null."
         );
         validateWalReplayBatch(checkpoint, replayBatch);
+        // 읽을 수 있는 완성 record도 이전 force 성공을 뜻하지 않음. 전체 R/마지막 S 후에만 복구 상태 게시
+        walStoragePreparation.prepareForRecovery(replayBatch);
 
         if (bootstrapState == DbBootstrapState.BOOTSTRAP_PENDING) {
             inMemoryTileBoard.initializeAllWhite();

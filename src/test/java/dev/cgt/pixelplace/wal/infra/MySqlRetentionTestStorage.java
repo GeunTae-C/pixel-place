@@ -9,10 +9,26 @@ public final class MySqlRetentionTestStorage extends SegmentedWalStorage {
     private boolean deletionFails;
     private int deleteAttempts;
     private Runnable beforeDelete = () -> { };
+    private boolean recordForceFails;
 
     public MySqlRetentionTestStorage(Path temporaryRoot, Path walPath) {
+        this(temporaryRoot, walPath, new TestWalFileDurability());
+    }
+
+    public MySqlRetentionTestStorage(Path temporaryRoot, Path walPath, WalFileDurability durability) {
         super(WalStorageTestSupport.properties(requireTemporaryPath(temporaryRoot, walPath), 1L),
-                WalStorageTestSupport.PARSER, WalStorageTestSupport.CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled());
+                WalStorageTestSupport.PARSER, WalStorageTestSupport.CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled(), durability);
+    }
+
+    /** 완성 line이 실제 기록된 뒤 record force에만 실패 주입 */
+    public void failRecordForce() { recordForceFails = true; }
+
+    @Override void forceFile(java.nio.channels.FileChannel writer,
+                             dev.cgt.pixelplace.measurement.PixelMeasurement.Operation kind) throws IOException {
+        if (recordForceFails && kind == dev.cgt.pixelplace.measurement.PixelMeasurement.Operation.record_force) {
+            throw new IOException("Test-only complete record force failure");
+        }
+        super.forceFile(writer, kind);
     }
 
     /** 테스트가 소유한 임시 경로 밖에서는 실패 주입 거부 */

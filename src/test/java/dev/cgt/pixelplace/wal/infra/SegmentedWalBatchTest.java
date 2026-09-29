@@ -23,8 +23,11 @@ class SegmentedWalBatchTest {
             var records=List.of(record(2),record(5),record(9));
             batch.appendBatchAndFsync(records);
             for(var record:records) single.appendAndFsync(record);
-            verify(batch.writers.getFirst(),times(1)).force(true);
-            verify(single.writers.getFirst(),times(3)).force(true);
+            // 최초 empty force를 별도로 포함하고 record force의 batch/single 차이는 유지
+            verify(batch.writers.getFirst(),times(2)).force(true);
+            verify(single.writers.getFirst(),times(4)).force(true);
+            assertEquals(1,batch.forceKinds.stream().filter(k->k==dev.cgt.pixelplace.measurement.PixelMeasurement.Operation.record_force).count());
+            assertEquals(3,single.forceKinds.stream().filter(k->k==dev.cgt.pixelplace.measurement.PixelMeasurement.Operation.record_force).count());
             assertEquals(records,batch.readAfter(0).records());assertEquals(9,batch.readAfter(0).walLastEventSeq());
             assertArrayEquals(Files.readAllBytes(directory.resolve("single")),Files.readAllBytes(directory.resolve("batch")));
         }
@@ -45,7 +48,7 @@ class SegmentedWalBatchTest {
             assertEquals(9,storage.readAfter(0).walLastEventSeq());
             for(int i=0;i<storage.writers.size();i++) {
                 var writer=storage.writers.get(i);
-                int forces=(i==0?1:2)+(mode.equals("existing-forced")&&i==0?1:0);
+                int forces=2+(mode.equals("existing-forced")&&i==0?1:0);
                 verify(writer,times(forces)).force(true);
                 if(i<storage.writers.size()-1){var order=inOrder(writer);order.verify(writer,atLeastOnce()).force(true);order.verify(writer).close();}
             }
@@ -63,7 +66,7 @@ class SegmentedWalBatchTest {
             storage.setup=(channel,index)->{
                 if(index==0 && (point.equals("zero")||point.equals("negative"))) doReturn(point.equals("zero")?0:-1).when(channel).write(any(ByteBuffer.class));
                 if(index==1&&point.equals("partial"))doAnswer(call->{var buffer=(ByteBuffer)call.getArgument(0);buffer.limit(buffer.position()+3);call.callRealMethod();throw failure;}).when(channel).write(any(ByteBuffer.class));
-                if(index==0&&point.equals("first-force"))doThrow(failure).when(channel).force(true);
+                if(index==0&&point.equals("first-force"))doCallRealMethod().doThrow(failure).when(channel).force(true);
                 if(index==1&&point.equals("later-force"))doCallRealMethod().doThrow(failure).when(channel).force(true);
                 if(index==1&&point.equals("empty-force"))doThrow(failure).when(channel).force(true);
                 if(index==0&&point.equals("old-close"))doThrow(failure).when(channel).close();
@@ -84,7 +87,7 @@ class SegmentedWalBatchTest {
     @Test void wholeBatchValidationAndSerializationHappenBeforeAnyFileIoWithoutPoison() throws Exception {
         var codec=spy(CODEC);doThrow(new IllegalArgumentException("serialize")).when(codec).serializeLine(record(9));
         Path path=directory.resolve("wal");
-        try(var storage=spy(new SegmentedWalStorage(properties(path,1000),PARSER,codec,dev.cgt.pixelplace.measurement.Measurements.disabled()))) {
+        try(var storage=spy(new SegmentedWalStorage(properties(path,1000),PARSER,codec,dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability()))) {
             assertThrows(NullPointerException.class,()->storage.appendBatchAndFsync(null));
             assertThrows(IllegalArgumentException.class,()->storage.appendBatchAndFsync(List.of()));
             assertThrows(NullPointerException.class,()->storage.appendBatchAndFsync(Arrays.asList(record(2),null)));
@@ -99,7 +102,7 @@ class SegmentedWalBatchTest {
         try(var storage=new ControlledStorage(directory.resolve("wal"),10000)) {
             storage.setup=(channel,index)->doAnswer(call->{var b=(ByteBuffer)call.getArgument(0);int limit=b.limit();b.limit(Math.min(limit,b.position()+3));var count=call.callRealMethod();b.limit(limit);return count;}).when(channel).write(any(ByteBuffer.class));
             storage.appendBatchAndFsync(List.of(record(2),record(5),record(9)));
-            verify(storage.writers.getFirst(),times(1)).force(true);assertEquals(3,storage.readAfter(0).records().size());
+            verify(storage.writers.getFirst(),times(2)).force(true);assertEquals(3,storage.readAfter(0).records().size());
         }
     }
 

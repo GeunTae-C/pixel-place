@@ -55,7 +55,7 @@ class SegmentedWalRetentionConcurrencyTest {
         AtomicBoolean first = new AtomicBoolean(true), readerClosed = new AtomicBoolean();
         AtomicInteger deletes = new AtomicInteger();
         Path base = directory.resolve("wal");
-        try (var storage = new SegmentedWalStorage(properties(base, 10000), PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled()) {
+        try (var storage = new SegmentedWalStorage(properties(base, 10000), PARSER, CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability()) {
             @Override BufferedReader openReader(Path path) throws IOException {
                 var actual = super.openReader(path);
                 if (!first.getAndSet(false)) return actual;

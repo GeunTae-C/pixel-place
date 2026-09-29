@@ -21,6 +21,18 @@ class SegmentedWalFileSetTest {
 
     @Test
     void actualSymlinkInManagedNamespaceIsRejectedWithoutFollowingTarget() throws Exception {
+        String prepared=System.getProperty("pixelplace.test.symlink-fixture");
+        if(prepared!=null) {
+            // 운영자 생성 입력은 읽기 전용 검증. 실제 symlink/target 내용 확인을 대역으로 대체하지 않음
+            assertTrue(Path.of(prepared).isAbsolute());
+            Path fixture=Path.of(prepared).toRealPath();
+            Path link=fixture.resolve("wal"),target=fixture.resolve("unrelated-target");
+            assertTrue(Files.isSymbolicLink(link));assertEquals(target,Files.readSymbolicLink(link));
+            assertEquals("preserved",Files.readString(target));
+            assertThrows(IllegalStateException.class,()->storage(link).inspectFiles());
+            assertEquals("preserved",Files.readString(target));assertTrue(Files.isSymbolicLink(link));
+            return;
+        }
         Path target=directory.resolve("unrelated-target");
         Files.writeString(target,"preserved");
         Path link=directory.resolve("wal");
@@ -118,6 +130,6 @@ class SegmentedWalFileSetTest {
 
     private SegmentedWalStorage storage(Path path) {
         WalProperties properties = new WalProperties(); properties.setActiveFile(path);
-        return new SegmentedWalStorage(properties, mock(WalRecordParser.class), mock(WalRecordJsonCodec.class), dev.cgt.pixelplace.measurement.Measurements.disabled());
+        return new SegmentedWalStorage(properties, mock(WalRecordParser.class), mock(WalRecordJsonCodec.class), dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability());
     }
 }

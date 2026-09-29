@@ -47,6 +47,8 @@ class RecoveryAdapterProfileTest {
             assertSingleBean(context, CheckpointReader.class, JpaCheckpointReader.class);
             assertSingleBean(context, TileSnapshotLoader.class, JpaTileSnapshotLoader.class);
             assertSingleBean(context, WalReplaySource.class, FileWalReplaySource.class);
+            assertSingleBean(context, dev.cgt.pixelplace.wal.application.WalStoragePreparation.class, dev.cgt.pixelplace.wal.infra.FileWalStoragePreparation.class);
+            assertSame(context.getBean(SegmentedWalStorage.class),field(context.getBean(dev.cgt.pixelplace.wal.infra.FileWalStoragePreparation.class),"storage"));
             assertCommonCaptureAndRecoveryWiring(context);
         }
     }
@@ -57,7 +59,14 @@ class RecoveryAdapterProfileTest {
             assertSingleBean(context, CheckpointReader.class, StubCheckpointReader.class);
             assertSingleBean(context, TileSnapshotLoader.class, StubTileSnapshotLoader.class);
             assertSingleBean(context, WalReplaySource.class, StubWalReplaySource.class);
+            assertSingleBean(context, dev.cgt.pixelplace.wal.application.WalStoragePreparation.class, dev.cgt.pixelplace.wal.infra.StubWalStoragePreparation.class);
             assertCommonCaptureAndRecoveryWiring(context);
+            var durability=context.getBean(dev.cgt.pixelplace.wal.infra.WindowsWalFileDurability.class);
+            Object bridge=field(durability,"bridge");
+            assertTrue(field(bridge,"loaded")==null);
+            context.getBean(StartupRecoveryService.class).recover();
+            assertTrue(context.getBean(ServiceReadiness.class).isReady());
+            assertTrue(field(bridge,"loaded")==null);
             assertTrue(context.getBeansOfType(StartupRecoveryDbViewCaptureService.class).values().stream()
                     .noneMatch(bean -> bean.getClass().getSimpleName().contains("Stub")));
         }
@@ -109,6 +118,9 @@ class RecoveryAdapterProfileTest {
                 StubTileSnapshotLoader.class,
                 FileWalReplaySource.class,
                 SegmentedWalStorage.class,
+                dev.cgt.pixelplace.wal.infra.WindowsWalFileDurability.class,
+                dev.cgt.pixelplace.wal.infra.FileWalStoragePreparation.class,
+                dev.cgt.pixelplace.wal.infra.StubWalStoragePreparation.class,
                 StubWalReplaySource.class,
                 CanonicalZ0TileKeys.class,
                 DbBootstrapClassifier.class,

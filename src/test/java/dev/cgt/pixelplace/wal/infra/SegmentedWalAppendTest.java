@@ -106,7 +106,7 @@ class SegmentedWalAppendTest {
         try(var storage = new ControlledStorage(directory.resolve("wal"),1)) {
             storage.appendAndFsync(record(2));
             storage.appendAndFsync(record(5));
-            verify(storage.writers.get(0),times(1)).force(true);
+            verify(storage.writers.get(0),times(2)).force(true);
             verify(storage.writers.get(1),times(2)).force(true);
             for(var channel:storage.writers) verify(channel,never()).force(false);
         }
@@ -116,7 +116,7 @@ class SegmentedWalAppendTest {
     void configurationMutationCannotMoveOrResizeInitializedStore() throws Exception {
         Path base=directory.resolve("wal");
         var properties=properties(base,Long.MAX_VALUE);
-        try(var storage=new SegmentedWalStorage(properties,PARSER,CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled())) {
+        try(var storage=new SegmentedWalStorage(properties,PARSER,CODEC, dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability())) {
             properties.setActiveFile(directory.resolve("other")); properties.setMaxSegmentBytes(1);
             storage.appendAndFsync(record(2)); storage.appendAndFsync(record(5));
             assertEquals(1,storage.inspectFiles().size());

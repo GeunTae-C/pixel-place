@@ -204,7 +204,7 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
         walProperties.setActiveFile(walPath);
         ObjectMapper objectMapper = new ObjectMapper();
         SegmentedWalStorage storage = new SegmentedWalStorage(walProperties,
-                new WalRecordParser(objectMapper), new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled());
+                new WalRecordParser(objectMapper), new WalRecordJsonCodec(objectMapper), dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability());
         FileWalAppender fileWalAppender = new FileWalAppender(storage, dev.cgt.pixelplace.measurement.Measurements.disabled());
         FileWalReplaySource fileWalReplaySource = new FileWalReplaySource(storage);
         WalRecord eventTwo = new WalRecord(
@@ -231,7 +231,13 @@ class StartupRecoveryDbViewCaptureMySqlIntegrationTest {
                 board,
                 eventSeqManager,
                 readiness
-        , dev.cgt.pixelplace.measurement.Measurements.disabled());
+        , dev.cgt.pixelplace.measurement.Measurements.disabled(), batch -> {
+            // 실제 Spring capture transaction 종료 이후의 전체 파일 R/마지막 S 경계
+            assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+            assertFalse(readiness.isReady());
+            storage.prepareForRecovery(batch);
+            assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+        });
         ExecutorService executor = Executors.newSingleThreadExecutor();
         Future<?> writer = null;
 

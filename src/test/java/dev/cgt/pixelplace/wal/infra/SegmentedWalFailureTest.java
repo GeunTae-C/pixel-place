@@ -90,7 +90,7 @@ class SegmentedWalFailureTest {
         when(codec.serializeLine(any())).thenAnswer(inv->CODEC.serializeLine(inv.getArgument(0)));
         var bad=record(5);
         doThrow(new IllegalArgumentException("serialization")).when(codec).serializeLine(bad);
-        try(var storage=spy(new SegmentedWalStorage(properties(directory.resolve("wal"),1000),PARSER,codec, dev.cgt.pixelplace.measurement.Measurements.disabled()))) {
+        try(var storage=spy(new SegmentedWalStorage(properties(directory.resolve("wal"),1000),PARSER,codec, dev.cgt.pixelplace.measurement.Measurements.disabled(), new dev.cgt.pixelplace.wal.infra.TestWalFileDurability()))) {
             if(alreadyOpen) storage.appendAndFsync(record(2));
             clearInvocations(storage);
             assertThrows(NullPointerException.class,()->storage.appendAndFsync(null));
@@ -191,11 +191,16 @@ class SegmentedWalFailureTest {
     void completeRecordAfterFailedForceCanBeRecoveredByFreshStorage() throws Exception {
         Path base=directory.resolve("wal");
         try(var first=new ControlledStorage(base,1)) {
-            first.setup=(channel,index)->doThrow(new IOException("force")).when(channel).force(true);
+            first.beforeForce=(channel,kind)->{
+                // 완성 record 뒤 force만 실패. 최초 empty force 실패로 fixture를 바꾸면 안 됨
+                if(kind==dev.cgt.pixelplace.measurement.PixelMeasurement.Operation.record_force) throw new IOException("record force");
+            };
             assertThrows(IllegalStateException.class,()->first.appendAndFsync(record(2)));
         }
         try(var fresh=storage(base,1)) {
-            assertEquals(2,fresh.readAfter(0).walLastEventSeq());
+            var batch=fresh.readAfter(0);
+            assertEquals(2,batch.walLastEventSeq());
+            fresh.prepareForRecovery(batch);
             fresh.appendAndFsync(record(5));
             assertEquals(5,fresh.readAfter(0).walLastEventSeq());
         }
