@@ -25,12 +25,27 @@ public final class Phase18Process {
         return run(command, body, BenchmarkJson::write);
     }
 
+    /** 시험 JWT 키만 자식 환경에 주입. command/receipt/log에는 키 값을 보존하지 않음 */
+    static Receipt runWithKeys(Command command, BenchmarkEnvironment.Keys keys, Body body) throws Exception {
+        return run(command, body, BenchmarkJson::write, Map.of("PIXEL_PLACE_BENCH_JWT_KEY", keys.jwt(),
+                "PIXEL_PLACE_BENCH_COOKIE_KEY", keys.cookie()), null);
+    }
+
+    static Receipt runWithKeys(Command command, BenchmarkEnvironment.Keys keys, Phase18ParentControl control, Body body) throws Exception {
+        return run(command, body, BenchmarkJson::write, Map.of("PIXEL_PLACE_BENCH_JWT_KEY", keys.jwt(),
+                "PIXEL_PLACE_BENCH_COOKIE_KEY", keys.cookie()), control);
+    }
+
     static synchronized Receipt run(Command command, Body body, Sink sink) throws Exception {
+        return run(command, body, sink, Map.of(), null);
+    }
+    static synchronized Receipt run(Command command, Body body, Sink sink, Map<String, String> environment, Phase18ParentControl control) throws Exception {
         validate(command);
         Files.createDirectory(command.evidence);
-        Owned child = new Owned(command, sink);
+        Owned child = new Owned(command, sink, environment);
         Throwable failure = null;
         boolean interrupted = false;
+        boolean closeRequested = false;
         try {
             var inputHashes = new TreeMap<String, String>();
             for (String arg : command.arguments) if (arg.startsWith("@")) {
@@ -39,11 +54,30 @@ public final class Phase18Process {
             sink.write(command.evidence.resolve("command.json"), Map.of("arguments", command.arguments, "argumentFileHashes", inputHashes,
                     "cwd", command.cwd.toString(), "observationMillis", command.observationMillis,
                     "cleanupMillis", command.cleanupMillis, "logLimit", command.logLimit));
-            child.start();
+            if (control == null) child.start();
+            else control.start(child, () -> { child.start(); return null; });
             body.run(child);
-            child.awaitExit(command.observationMillis);
+            child.awaitExit(command.observationMillis, control == null ? () -> { } : control::check);
         } catch (Exception | Error problem) {
             failure = problem; interrupted = problem instanceof InterruptedException;
+            if (control == null && child.started() && child.isAlive()) {
+                // 최초 실패 직후 중단 통보. 진단 저장 지연 때문에 신규 실행 차단을 미루지 않음
+                closeRequested = true; long requested = System.nanoTime();
+                boolean sent = false;
+                try { child.send("CLOSE"); sent = true; }
+                catch (Exception | Error secondary) { failure = preserve(failure, secondary); }
+                try { sink.write(command.evidence.resolve("control-request.json"), Map.of("message", "CLOSE",
+                        "requestedNanos", requested, "sendSucceeded", sent, "cause", problem.getClass().getName(),
+                        "causeMessage", String.valueOf(problem.getMessage()), "nextTaskAllowed", false)); }
+                catch (Exception | Error secondary) { failure = preserve(failure, secondary); }
+            }
+            if (control != null && child.started()) {
+                try { control.settle(child, problem); }
+                catch (Exception | Error secondary) {
+                    // settle이 통합한 원인을 다시 붙여 순환시키지 않되, 관측 자체의 추가 실패도 보존
+                    failure = secondary == control.failure() ? secondary : preserve(failure, secondary);
+                }
+            }
         } finally {
             try {
             // interrupt는 정상 종료 관측을 취소하지 않음. 정리 후 원래 상태 복원
@@ -56,7 +90,7 @@ public final class Phase18Process {
             }
             if (child.process != null) {
                 if (child.process.isAlive()) {
-                    try { child.send("CLOSE"); } catch (Exception | Error secondary) { failure = preserve(failure, secondary); }
+                    if (!closeRequested && control == null) try { child.send("CLOSE"); } catch (Exception | Error secondary) { failure = preserve(failure, secondary); }
                     long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(command.cleanupMillis);
                     while (child.process.isAlive() && System.nanoTime() < deadline) {
                         try { child.process.waitFor(20, TimeUnit.MILLISECONDS); }
@@ -137,6 +171,14 @@ public final class Phase18Process {
         }
     }
 
+    /** 유한 관측 실패 이후에도 앱 서버가 실제 자식보다 먼저 닫히지 않도록 소유 완료 대기 */
+    static void awaitRemaining() throws Exception {
+        for (Owned child : List.copyOf(OWNED.values())) {
+            try { child.released.get(); }
+            catch (ExecutionException failed) { rethrow(failed.getCause()); }
+        }
+    }
+
     static Throwable preserve(Throwable first, Throwable later) {
         if (later == null || later == first) return first;
         if (first == null) return later;
@@ -154,6 +196,7 @@ public final class Phase18Process {
     public static final class Owned {
         private final Command command;
         private final Sink sink;
+        private final Map<String, String> environment;
         private Process process;
         private String startUtc = "unavailable";
         private Integer exit;
@@ -167,10 +210,11 @@ public final class Phase18Process {
         private volatile Throwable streamFailure;
         private long processDeadline;
 
-        private Owned(Command command, Sink sink) { this.command = command; this.sink = sink; }
+        private Owned(Command command, Sink sink, Map<String, String> environment) { this.command = command; this.sink = sink; this.environment = environment; }
         private void start() throws Exception {
             var builder = new ProcessBuilder(command.arguments).directory(command.cwd.toFile());
             for (String key : List.of("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS")) builder.environment().remove(key);
+            builder.environment().putAll(environment);
             // 시작 전에 생존 보장 설치. identity/reader 설치 실패에도 부모 종료로 Process를 유실하지 않음
             Thread owner = new Thread(this::retainUntilExit, "phase18-process-owner");
             owner.setDaemon(false); owner.start();
@@ -275,10 +319,22 @@ public final class Phase18Process {
 
         /** reader는 항상 동작. 정상 제어 응답을 기다려도 부모가 STOP을 보낼 수 있음 */
         public String receive(long millis) throws Exception {
+            return receive(millis, () -> { });
+        }
+        @FunctionalInterface interface Check { void run() throws Exception; }
+        String receive(long millis, Check check) throws Exception {
             long deadline = Math.min(processDeadline, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis));
+            return receiveUntil(deadline, check);
+        }
+        /** 실패 후 정리 전용 절대 기한. processDeadline 갱신이나 정상 실행 연장 없음 */
+        String receiveCleanup(long deadline) throws Exception {
+            return receiveUntil(deadline, () -> { });
+        }
+        private String receiveUntil(long deadline, Check check) throws Exception {
             while (System.nanoTime() < deadline) {
+                check.run();
                 rethrow(streamFailure);
-                String message = messages.poll(Math.min(20, Math.max(1, millis)), TimeUnit.MILLISECONDS);
+                String message = messages.poll(Math.min(20, Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))), TimeUnit.MILLISECONDS);
                 if (message != null) return message;
                 if (!process.isAlive() && pumpsDone()) throw new EOFException("Child ended before control response");
             }
@@ -286,17 +342,23 @@ public final class Phase18Process {
         }
 
         public void awaitExit(long millis) throws Exception {
+            awaitExit(millis, () -> { });
+        }
+        private void awaitExit(long millis, Check check) throws Exception {
             long deadline = Math.min(processDeadline, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis));
             while (process.isAlive()) {
+                check.run();
                 rethrow(streamFailure);
                 long remaining = deadline - System.nanoTime();
                 if (remaining <= 0) throw new TimeoutException("Process observation deadline");
                 process.waitFor(Math.min(20, Math.max(1, TimeUnit.NANOSECONDS.toMillis(remaining))), TimeUnit.MILLISECONDS);
             }
+            check.run();
             exit = process.exitValue();
             if (exit != 0) throw new IOException("Process exit " + exit);
         }
         public long pid() { return process.pid(); }
+        boolean started() { return process != null; }
         public boolean isAlive() { return process.isAlive(); }
         private boolean pumpsDone() { return (out == null || !out.isAlive()) && (err == null || !err.isAlive()); }
         private void joinPumps(long millis) throws Exception {

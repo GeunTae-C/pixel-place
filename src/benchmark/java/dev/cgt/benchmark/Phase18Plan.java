@@ -197,7 +197,9 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
         // 연결별 payload 복제 없이 canonical rows·bitset·유한 연결 요약의 계획상 출력 예약
         long wsDisk = Math.addExact(Math.multiplyExact(events, 256),
                 Math.addExact(bitsets, Math.multiplyExact(w.wsConnections, 1024)));
-        long memory = Math.addExact(16_777_216, Math.addExact(Math.multiplyExact(terminals, 512),
+        // A-2 실제 HTTP/Jackson/JWT 초기 heap 관측을 반영한 기본 예약과 수신~검증 전체 슬롯의 동시 body 예약
+        long processing = Math.addExact(Math.multiplyExact(w.readInFlight, 524_288), Math.multiplyExact(w.writeInFlight, 34_816));
+        long memory = Math.addExact(Math.addExact(134_217_728, processing), Math.addExact(Math.multiplyExact(terminals, 512),
                 Math.addExact(Math.multiplyExact(users, 256), Math.addExact(wsMemory, Math.multiplyExact(samples, 256)))));
         long disk = Math.addExact(1_048_576, Math.addExact(Math.multiplyExact(terminals, 2048),
                 Math.addExact(wsDisk, Math.multiplyExact(samples, 1024))));

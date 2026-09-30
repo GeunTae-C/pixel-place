@@ -11,10 +11,15 @@ public final class BenchmarkUsers {
     private int cursor;
 
     public BenchmarkUsers(int users, boolean once, long marginMillis) {
+        this(users, once, marginMillis, true);
+    }
+    /** bootstrap 없는 18 read/write case에서도 첫 실제 사용자를 누락하지 않는 pool 경계 */
+    public BenchmarkUsers(int users, boolean once, long marginMillis, boolean bootstrap) {
+        BenchmarkSpec.require(users >= 0 && marginMillis >= 1000, "user pool bounds");
         availableAt = new long[users]; attempts = new int[users]; busy = new boolean[users]; retired = new boolean[users];
         this.once = once; reuseNanos = Math.multiplyExact(Math.addExact(180_000, marginMillis), 1_000_000);
         // ordinal 0은 bootstrap 소유. steady 부하에서 재사용 금지
-        retired[0] = true;
+        if (bootstrap) { BenchmarkSpec.require(users > 0, "bootstrap user"); retired[0] = true; }
     }
     public synchronized Assignment acquire(long now) {
         for (int i = 0; i < busy.length; i++) {

@@ -17,7 +17,7 @@ class Phase18PlanTest {
         var inputs = Phase18Plan.inventory(Path.of(repo)).entrySet().stream()
                 .map(e -> new Phase18Plan.Frozen(e.getKey(), e.getValue())).toList();
         Path predecessor = Path.of(repo, "docs/review-protocol.md");
-        return new Phase18Plan(2, "A", "A-1", "ready", session, "0419ab25f463f576959ef891251ef53c55c7dfeb",
+        return new Phase18Plan(2, "A", "A-1", "ready", session, Phase18Plan.head(Path.of(repo)),
                 new Phase18Plan.Frozen(predecessor.toString(), BenchmarkJson.hash(predecessor)), inputs,
                 new Phase18Plan.Ownership(repo, Path.of(System.getProperty("java.home"), "bin/java.exe").toString(), root,
                         repo + "/build/agent-runs/" + session, root + "/build", root + "/cache", root + "/temp", root + "/jna", "", "", "", -1, System.getProperty("user.name")),

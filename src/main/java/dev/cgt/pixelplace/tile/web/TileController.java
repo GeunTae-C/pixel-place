@@ -2,6 +2,8 @@ package dev.cgt.pixelplace.tile.web;
 
 import dev.cgt.pixelplace.tile.application.TileReadResult;
 import dev.cgt.pixelplace.tile.application.TileReadService;
+import dev.cgt.pixelplace.measurement.PixelMeasurement;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -28,9 +30,16 @@ public class TileController {
     private static final String GZIP_ENCODING = "gzip";
 
     private final TileReadService tileReadService;
+    private final PixelMeasurement measurement;
 
     public TileController(TileReadService tileReadService) {
+        this(tileReadService, new PixelMeasurement(false, null));
+    }
+
+    @Autowired
+    public TileController(TileReadService tileReadService, PixelMeasurement measurement) {
         this.tileReadService = tileReadService;
+        this.measurement = measurement;
     }
 
     /*
@@ -39,8 +48,11 @@ public class TileController {
      */
     @GetMapping("/{z}/{tx}/{ty}")
     public ResponseEntity<byte[]> getTile(@PathVariable int z, @PathVariable int tx, @PathVariable int ty) {
-        TileReadResult result = tileReadService.readTile(z, tx, ty);
-        byte[] gzipped = gzip(result.rawBytes());
+        // snapshot 반환과 gzip 생성~close~배열 반환을 별도 관측. 기존 방어 복사와 HTTP 의미 보존
+        TileReadResult result = measurement.observe(PixelMeasurement.Operation.tile_read,
+                () -> tileReadService.readTile(z, tx, ty));
+        byte[] raw = result.rawBytes();
+        byte[] gzipped = measurement.observe(PixelMeasurement.Operation.tile_gzip, () -> gzip(raw));
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)

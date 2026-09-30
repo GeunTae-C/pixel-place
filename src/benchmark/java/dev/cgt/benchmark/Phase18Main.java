@@ -5,34 +5,40 @@ import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
 
-/** Plan/VerifyTools의 명시 진입점. 미구현 action은 파일 생성·프로세스 시작 전에 거부 */
+/** 읽기 전용 Plan, 제어 VerifyTools, 제한 production VerifyTransport 진입점. 후속 action은 부수 효과 전 거부 */
 public final class Phase18Main {
     private Phase18Main() { }
     public static void main(String[] args) throws Exception {
         if (args.length != 4 || !args[0].equals("--action") || !args[2].equals("--plan"))
-            throw new IllegalArgumentException("Usage: --action Plan|VerifyTools --plan <absolute.json>");
+            throw new IllegalArgumentException("Usage: --action Plan|VerifyTools|VerifyTransport --plan <absolute.json>");
         String action = args[1];
-        if (!Set.of("Plan", "VerifyTools").contains(action))
-            throw new IllegalArgumentException("Action unavailable in A-1: requires A-2/A-3/A-4 implementation");
+        if (!Set.of("Plan", "VerifyTools", "VerifyTransport").contains(action))
+            throw new IllegalArgumentException("Action unavailable: collector/analyzer/integrated PILOT require A-3/A-4");
         var loaded = Phase18Plan.read(Path.of(args[3])); var plan = loaded.plan();
         Phase18Runtime.verify(plan);
+        if (action.equals("VerifyTransport")) {
+            Phase18Transport.run(loaded, Phase18Paths.checked(args[3]), Phase18Paths.checked(System.getProperty("phase18.environment", "")));
+            System.out.println("A2_TRANSPORT_VERIFIED"); return;
+        }
         if (action.equals("Plan")) {
             var result = new LinkedHashMap<String, Object>();
             result.put("schemaVersion", Phase18Plan.VERSION); result.put("phase", plan.phase()); result.put("stage", plan.stage());
             result.put("planHash", loaded.planHash()); result.put("state", plan.state());
             boolean available;
             try {
-                plan.requireTools();
+                if(plan.stage().equals("A-2"))Phase18Transport.requireFixture(plan);else plan.requireTools();
                 Path root = Path.of(plan.ownership().evidenceRoot());
                 available = !Files.exists(root.resolve(plan.cases().getFirst().runId()), LinkOption.NOFOLLOW_LINKS)
                         && !Files.exists(root.resolve("a1.lock"), LinkOption.NOFOLLOW_LINKS)
+                        && !Files.exists(root.resolve("a2.lock"), LinkOption.NOFOLLOW_LINKS)
                         && plan.ownership().owner().equals(System.getProperty("user.name"))
                         && Runtime.version().feature() == 21
                         && Path.of(System.getProperty("java.home"), "bin", "java.exe").equals(Path.of(plan.ownership().java()));
             } catch (IllegalArgumentException unavailable) { available = false; }
             result.put("executionAvailable", available);
+            result.put("availableActions",List.of("Plan","VerifyTools","VerifyTransport"));
             result.put("runs", plan.cases().stream().map(c -> Map.of("caseId", c.caseId(), "runId", c.runId(), "counts", plan.counts(c))).toList());
-            result.put("unresolved", List.of("production ownership/live proof", "HTTP/WS producer", "collector/analyzer", "integrated PILOT"));
+            result.put("unresolved", List.of("fresh production ownership/live proof required for VerifyTransport", "collector/analyzer", "integrated PILOT"));
             System.out.println(Phase18Plan.JSON.writeValueAsString(result)); return;
         }
         plan.requireTools();

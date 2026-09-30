@@ -83,6 +83,8 @@ class PixelWebSocketEmbeddedTest {
     @EnableWebMvc
     @Import({PixelWebSocketConfig.class, PixelWebSocketHandler.class, PixelWebSocketSessionRegistry.class, TileController.class, TileReadService.class})
     static class Fixture {
+        // 실제 TileController의 공유 계측 의존을 가진 제한 embedded graph. 관측 off와 HTTP/WS 의미 유지
+        @Bean dev.cgt.pixelplace.measurement.PixelMeasurement measurement() { return dev.cgt.pixelplace.measurement.Measurements.disabled(); }
         @Bean OriginPolicy origins() { return new OriginPolicy("http://localhost:3000", "http://localhost:8080",
                 "http://localhost:3000/", "http://localhost:8080/login/oauth2/code/kakao", false); }
         @Bean InMemoryTileBoard board() { return new InMemoryTileBoard(); }

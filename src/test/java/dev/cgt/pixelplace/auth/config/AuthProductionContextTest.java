@@ -54,6 +54,8 @@ class AuthProductionContextTest {
     static class WebApplication { }
     @Test void productionConfigurationLoadsCompleteAuthenticationAndJwtPixelTogether() {
         new WebApplicationContextRunner().withInitializer(new ConfigDataApplicationContextInitializer()).withUserConfiguration(WebApplication.class)
+                // 제한 graph에도 production TileController의 공유 계측 의존 제공. 인증/HTTP 의미는 기존 그대로 검증
+                .withBean(dev.cgt.pixelplace.measurement.PixelMeasurement.class,dev.cgt.pixelplace.measurement.Measurements::disabled)
                 .withBean(UserJpaRepository.class,()->mock(UserJpaRepository.class)).withBean(PixelCommandService.class,()->mock(PixelCommandService.class))
                 .withBean(TileReadService.class,()->mock(TileReadService.class)).withBean(OverviewService.class,()->mock(OverviewService.class))
                 .withPropertyValues("spring.config.import=","KAKAO_CLIENT_ID=c-test-client","KAKAO_CLIENT_SECRET=c-test-secret",

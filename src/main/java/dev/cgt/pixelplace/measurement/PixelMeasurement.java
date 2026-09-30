@@ -22,7 +22,7 @@ public final class PixelMeasurement {
         write_wait, write_held, capture_wait, capture_held, retention_wait, retention_held,
         recovery_scan, capture_scan, retention_scan, first_write_scan, snapshot,
         checkpoint_read, metadata_read, transaction, reconciliation, flush_cycle, retention,
-        redis_check, redis_start, broadcast, overview
+        redis_check, redis_start, broadcast, overview, tile_read, tile_gzip
     }
     public record Scope(Operation operation, Phase phase, long startedNanos) { }
     public record Capture(long observedNanos, long checkpoint, long tail, int records) { }
