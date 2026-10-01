@@ -38,17 +38,27 @@ public final class Phase18LoadClient {
     private final ConcurrentMap<String, Map<String,Object>> unknownRequests = new ConcurrentHashMap<>();
     private final Map<String, Object> anchors = new LinkedHashMap<>();
     private volatile boolean closing, stopped;
-    private final long deadline;
+    private final Phase18Deadline execution;
+    private final InputStream controlInput;
+    private final java.util.function.Consumer<String> protocolOutput;
+    private Phase18JvmSampler sampler;
 
     private Phase18LoadClient(Phase18Plan.Loaded loaded, Path input) throws Exception {
+        this(loaded,input,System.in,new BenchmarkEnvironment.Keys(System.getenv("PIXEL_PLACE_BENCH_JWT_KEY"),System.getenv("PIXEL_PLACE_BENCH_COOKIE_KEY")),value->{System.out.println(value);System.out.flush();});
+    }
+    /** JVM 표준 입출력과 시험 파이프가 동일 수신·dispatch·소진 경로를 사용하도록 경계 주입 */
+    Phase18LoadClient(Phase18Plan.Loaded loaded,Path input,InputStream controlInput,BenchmarkEnvironment.Keys keys,
+            java.util.function.Consumer<String> protocolOutput) throws Exception {
+        this.controlInput=controlInput;this.protocolOutput=protocolOutput;
         this.loaded = loaded; c = loaded.plan().cases().getFirst(); var w = c.workload();
+        execution = Phase18Deadline.inherit(loaded.plan());
         var start = BenchmarkJson.read(input); output = Phase18Paths.checked(start.path("output").asText());
         Phase18Paths.child(output, Path.of(loaded.plan().ownership().evidenceRoot()));
         endpoint = start.path("endpoint").asText(); Phase18Plan.require(endpoint.matches("http://127\\.0\\.0\\.1:[0-9]{1,5}"), "loopback endpoint");
         var ids = new ArrayList<Long>(); for (var id : start.path("users")) ids.add(id.longValue()); users = List.copyOf(ids);
         Phase18Plan.require(users.size() == loaded.plan().counts(c).users(), "fixture users");
         pool = new BenchmarkUsers(users.size(), w.userMode().equals("once"), w.reuseMarginMillis(), w.bootstrap());
-        var auth = new AuthProperties(System.getenv("PIXEL_PLACE_BENCH_JWT_KEY"), System.getenv("PIXEL_PLACE_BENCH_COOKIE_KEY"), Duration.ofMinutes(15));
+        var auth = new AuthProperties(keys.jwt(), keys.cookie(), Duration.ofMinutes(15));
         tokens = new Phase18Tokens(new ServiceJwtTokens(auth, Clock.systemUTC()), Clock.systemUTC(), Math.max(1, (int) w.writeInFlight()));
         events = new Phase18Events((int) loaded.plan().counts(c).wsEvents(), (int) w.wsConnections());
         wsOpened=new long[(int)w.wsConnections()];wsClosedAt=new long[wsOpened.length];
@@ -56,7 +66,6 @@ public final class Phase18LoadClient {
         http = HttpClient.newBuilder().executor(callbacks).connectTimeout(Duration.ofMillis(w.requestMillis()))
                 .followRedirects(HttpClient.Redirect.NEVER).version(HttpClient.Version.HTTP_1_1).build();
         raw = Files.newBufferedWriter(output.resolve("raw.jsonl"), StandardOpenOption.CREATE_NEW);
-        deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(loaded.plan().bounds().totalSeconds());
         Thread.ofPlatform().daemon(true).name("phase18-load-control").start(this::readControl);
     }
     public static void main(String[] args) throws Exception {
@@ -69,7 +78,7 @@ public final class Phase18LoadClient {
     }
     private void readControl() {
         try {
-            var in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)); String message;
+            var in = new BufferedReader(new InputStreamReader(controlInput, StandardCharsets.UTF_8)); String message;
             while ((message = boundedControl(in)) != null) {
                 if (message.equals("STOP") || message.equals("CLOSE")) {
                     long received = System.nanoTime(); long applied = control.stop();
@@ -87,17 +96,26 @@ public final class Phase18LoadClient {
         return b == -1 && line.isEmpty() ? null : line.toString();
     }
     private void await(String expected) throws Exception {
-        long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(c.workload().controlMillis());
+        try {
+        check();
+        long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(execution.capMillis(Phase18Execution.responseWaitMillis(expected,c.workload())));
         while (!stopped && System.nanoTime() < until) {
             check(); String value = messages.poll(10, TimeUnit.MILLISECONDS);
+            check();
+            if(System.nanoTime()>=until)throw new TimeoutException("Control deadline: "+expected);
             if (value == null) continue;
             if (value.equals("STOP")) return;
             if (!value.equals(expected)) throw new IOException("Unexpected control transition");
             return;
         }
-        if (!stopped) throw new TimeoutException("Control deadline");
+        if (!stopped) throw new TimeoutException("Control deadline: "+expected);
+        } catch(Exception|Error problem) {
+            // poll/기한 검사와 경합한 callback 실패도 최초 원인 identity로 재전파
+            fail(problem);Phase18Process.rethrow(Phase18Process.preserve(failure.get(),problem));
+        }
     }
     private void run() throws Exception {
+        if(Phase18Execution.observed(loaded.plan()))sampler=new Phase18JvmSampler(loaded,output,this::fail);
         // 앱의 시작 인계가 확정되기 전 bootstrap을 포함한 신규 HTTP 차단
         await("START");
         if (c.workload().bootstrap()) {
@@ -121,7 +139,7 @@ public final class Phase18LoadClient {
         summary.put("wsReceiptEncoding",Map.of("schemaVersion",1,"canonicalOrdinal","JSONL zero-based row","wordsPerConnection",(loaded.plan().counts(c).wsEvents()+63)/64,"byteOrder","BIG_ENDIAN","file","ws-received.bin"));
         BenchmarkJson.write(output.resolve("producer.json"), summary);
         saveWs();
-        say("DONE " + rows.get());
+        check();say("DONE " + rows.get());
     }
     private void phase(String phase, long seconds, boolean bootstrap) throws Exception {
         long anchor = System.nanoTime(); anchors.put(phase, Map.of("nanos", anchor, "endNanos",anchor+TimeUnit.SECONDS.toNanos(seconds),"utc", Instant.now().toString()));
@@ -252,13 +270,15 @@ public final class Phase18LoadClient {
         catch(Exception failure){rawFailed=true;throw failure;}
     }
     private void drain() throws Exception {
-        long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(c.workload().drainMillis());
-        while (control.snapshot().active() != 0 && System.nanoTime() < until) Thread.sleep(5);
+        long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(execution.capMillis(c.workload().drainMillis()));
+        while (control.snapshot().active() != 0 && System.nanoTime() < until) {execution.check();Thread.sleep(5);}
         if (control.snapshot().active() != 0) throw new TimeoutException("Callback drain incomplete");
-        Phase18Process.rethrow(failure.get());
+        check();
     }
     private void connectWs() throws Exception {
+        long until=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(execution.capMillis(c.workload().readyMillis()));
         for (int i = 0; i < c.workload().wsConnections(); i++) {
+            if(stopped)return;check();
             int connection = i; var closed = new CompletableFuture<Void>(); socketClosed.add(closed);
             sockets.add(http.newWebSocketBuilder().header("Origin","http://localhost:3000").connectTimeout(Duration.ofMillis(c.workload().readyMillis()))
                 .buildAsync(URI.create(endpoint.replace("http:","ws:")+"/ws"), new WebSocket.Listener() {
@@ -275,21 +295,22 @@ public final class Phase18LoadClient {
                     }
                     public CompletionStage<?> onClose(WebSocket s,int status,String reason){if(!closing||!text.isEmpty())fail(new IOException("Unexpected WS close/partial message"));wsClosedAt[connection]=System.nanoTime();closed.complete(null);return null;}
                     public void onError(WebSocket s,Throwable problem){fail(problem);closed.completeExceptionally(problem);}
-                }).get(c.workload().readyMillis(),TimeUnit.MILLISECONDS));
+                }).get(remaining(until,true),TimeUnit.MILLISECONDS));
         }
     }
     private void awaitWs() throws Exception {
-        long until=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(c.workload().drainMillis());
+        long until=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(execution.capMillis(c.workload().drainMillis()));
         while(System.nanoTime()<until){check();var report=events.report();
             boolean missing=((List<?>)report.get("missing")).stream().anyMatch(n->!n.equals(0L));
             if(!missing){if(Arrays.stream((long[])report.get("duplicates")).sum()!=0||((List<?>)report.get("extra")).stream().anyMatch(n->!n.equals(0L)))throw new IOException("WS set mismatch");return;}Thread.sleep(5);}
         throw new TimeoutException("WS delivery incomplete");
     }
     private void fail(Throwable problem) { failure.compareAndSet(null,problem); stopped=true;control.stop(); }
-    private void check() throws Exception { Phase18Process.rethrow(failure.get());if(System.nanoTime()>deadline)throw new TimeoutException("Producer deadline"); }
+    private void check() throws Exception { Phase18Process.rethrow(failure.get());execution.check(); }
     private void close() throws Exception {
         closing=true;control.stop();Throwable problem=null;
-        try{if(failure.get()!=null)BenchmarkJson.write(output.resolve("producer-failure.json"),failureReport());}catch(Exception|Error e){problem=e;}
+        try{if(sampler!=null)sampler.close();}catch(Exception|Error e){problem=e;fail(e);}
+        try{if(failure.get()!=null)BenchmarkJson.write(output.resolve("producer-failure.json"),failureReport());}catch(Exception|Error e){problem=Phase18Process.preserve(problem,e);}
         try{finishSockets();}catch(Exception|Error e){problem=Phase18Process.preserve(problem,e);}
         try{Phase17CVerificationMain.bounded(()->{
             http.shutdown();while(!http.awaitTermination(Duration.ofSeconds(1))){/* 유한 기한 뒤에도 실제 I/O 소유 유지 */}
@@ -317,10 +338,19 @@ public final class Phase18LoadClient {
     }
     private void finishSockets()throws Exception {
         if(socketsFinished)return;closing=true;
+        boolean normal=!stopped&&failure.get()==null;
+        long millis=normal?execution.capMillis(c.workload().drainMillis()):c.workload().drainMillis();
+        long until=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(millis);
         Throwable problem=null;
-        for(int i=0;i<sockets.size();i++)try{sockets.get(i).sendClose(1000,"done").get(c.workload().drainMillis(),TimeUnit.MILLISECONDS);socketClosed.get(i).get(c.workload().drainMillis(),TimeUnit.MILLISECONDS);}
+        for(int i=0;i<sockets.size();i++)try{sockets.get(i).sendClose(1000,"done").get(remaining(until,normal),TimeUnit.MILLISECONDS);socketClosed.get(i).get(remaining(until,normal),TimeUnit.MILLISECONDS);}
         catch(Exception|Error e){problem=Phase18Process.preserve(problem,e);}
         socketsFinished=problem==null;Phase18Process.rethrow(Phase18Process.preserve(failure.get(),problem));
+    }
+    private long remaining(long until,boolean normal)throws Exception {
+        if(normal)check();
+        long millis=TimeUnit.NANOSECONDS.toMillis(until-System.nanoTime());
+        if(millis<=0)throw new TimeoutException("WS stage deadline");
+        return normal?execution.capMillis(millis):millis;
     }
     /** 실패 뒤 확인된 미시작 namespace만 채움. 송신/저장 불확실 ID는 unresolved에 남기고 NOT_SENT로 바꾸지 않음 */
     private void fillNotStarted()throws Exception {
@@ -334,10 +364,10 @@ public final class Phase18LoadClient {
     static int[] pixel(Phase18Plan.Case c,String phase,long ordinal) {
         long n=ordinal+(phase.equals("measurement")?c.workload().writeRate()*c.workload().warmupSeconds():0)+1;
         if(phase.equals("bootstrap"))n=0;
-        long mixed=(n*0x9e3779b97f4a7c15L)^c.workload().seed();
-        boolean same=c.workload().writePattern().equals("same-pixel");
-        return new int[]{same?0:(int)Math.floorMod(mixed,8192),same?0:(int)Math.floorMod(mixed>>>17,8192),(int)Math.floorMod(n+17,256)};
+        // 같은 seed/전역 ordinal이 기존 benchmark와 같은 좌표·색을 뜻하도록 원래 규칙에 위임
+        return BenchmarkResults.pixel(new BenchmarkSpec.Case("probe",c.workload().writeRate(),
+                Math.toIntExact(c.workload().wsConnections()),c.workload().writePattern()),c.workload().seed(),n);
     }
     private Map<String,Object> runtime(){return Map.of("pid",ProcessHandle.current().pid(),"startUtc",ProcessHandle.current().info().startInstant().orElseThrow().toString(),"java",System.getProperty("java.home"),"maxHeap",Runtime.getRuntime().maxMemory(),"usedHeap",Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),"temp",System.getProperty("java.io.tmpdir"),"jna",System.getProperty("jna.tmpdir"));}
-    private static synchronized void say(String value){System.out.println(value);System.out.flush();}
+    private void say(String value){synchronized(protocolOutput){protocolOutput.accept(value);}}
 }

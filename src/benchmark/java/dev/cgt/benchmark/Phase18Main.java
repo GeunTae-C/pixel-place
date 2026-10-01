@@ -10,15 +10,16 @@ public final class Phase18Main {
     private Phase18Main() { }
     public static void main(String[] args) throws Exception {
         if (args.length != 4 || !args[0].equals("--action") || !args[2].equals("--plan"))
-            throw new IllegalArgumentException("Usage: --action Plan|VerifyTools|VerifyTransport --plan <absolute.json>");
+            throw new IllegalArgumentException("Usage: --action Plan|VerifyTools|VerifyTransport|VerifyObservation|Pilot|Run --plan <absolute.json>");
         String action = args[1];
-        if (!Set.of("Plan", "VerifyTools", "VerifyTransport").contains(action))
-            throw new IllegalArgumentException("Action unavailable: collector/analyzer/integrated PILOT require A-3/A-4");
+        if (!Set.of("Plan", "VerifyTools", "VerifyTransport", "VerifyObservation", "Pilot", "Run").contains(action))
+            throw new IllegalArgumentException("Action unavailable");
         var loaded = Phase18Plan.read(Path.of(args[3])); var plan = loaded.plan();
         Phase18Runtime.verify(plan);
-        if (action.equals("VerifyTransport")) {
+        if (Set.of("VerifyTransport", "VerifyObservation", "Pilot", "Run").contains(action)) {
+            Phase18Execution.requireAction(action, plan);
             Phase18Transport.run(loaded, Phase18Paths.checked(args[3]), Phase18Paths.checked(System.getProperty("phase18.environment", "")));
-            System.out.println("A2_TRANSPORT_VERIFIED"); return;
+            System.out.println("PHASE18_COMPLETED action=" + action); return;
         }
         if (action.equals("Plan")) {
             var result = new LinkedHashMap<String, Object>();
@@ -26,7 +27,7 @@ public final class Phase18Main {
             result.put("planHash", loaded.planHash()); result.put("state", plan.state());
             boolean available;
             try {
-                if(plan.stage().equals("A-2"))Phase18Transport.requireFixture(plan);else plan.requireTools();
+                if(!plan.stage().equals("A-1"))Phase18Execution.requireService(plan);else plan.requireTools();
                 Path root = Path.of(plan.ownership().evidenceRoot());
                 available = !Files.exists(root.resolve(plan.cases().getFirst().runId()), LinkOption.NOFOLLOW_LINKS)
                         && !Files.exists(root.resolve("a1.lock"), LinkOption.NOFOLLOW_LINKS)
@@ -36,9 +37,9 @@ public final class Phase18Main {
                         && Path.of(System.getProperty("java.home"), "bin", "java.exe").equals(Path.of(plan.ownership().java()));
             } catch (IllegalArgumentException unavailable) { available = false; }
             result.put("executionAvailable", available);
-            result.put("availableActions",List.of("Plan","VerifyTools","VerifyTransport"));
+            result.put("availableActions",List.of("Plan","VerifyTools","VerifyTransport","VerifyObservation","Pilot","Run"));
             result.put("runs", plan.cases().stream().map(c -> Map.of("caseId", c.caseId(), "runId", c.runId(), "counts", plan.counts(c))).toList());
-            result.put("unresolved", List.of("fresh production ownership/live proof required for VerifyTransport", "collector/analyzer", "integrated PILOT"));
+            result.put("unresolved", List.of("service actions independently require fresh live ownership, observation policy and current resource reservation; Plan does not contact services"));
             System.out.println(Phase18Plan.JSON.writeValueAsString(result)); return;
         }
         plan.requireTools();

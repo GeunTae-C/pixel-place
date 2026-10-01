@@ -1,13 +1,13 @@
 # 18 실행 기반 계약 v2
 
-현재 제공 범위는 A-1 실행 기반과 A-2의 제한 production fixture·HTTP/read/gzip/WS 발생기·동일 initial 복구다. collector·정식 분석기·공식 PILOT은 후속 범위다. 기존 15/17 plan·guard를 우회하지 않으며 A-2 전용 adapter에서 같은 소유권 의미를 적용한다.
+현재 제공 범위는 A-1 실행 기반, A-2의 제한 production fixture·HTTP/read/gzip/WS 발생기·동일 initial 복구, A-3 유한 관측·안전 중단·정식 분석기, A-4의 공식 PILOT과 후속 단일 trial 실행 연결이다. 기존 15/17 plan·guard의 소유권 의미를 유지한다.
 
 ## 실행 인터페이스
 
-`dev.cgt.benchmark.Phase18Main --action Plan|VerifyTools|VerifyTransport --plan <절대 JSON 경로>`.
-JDK21과 이미 컴파일한 benchmark runtime classpath로 직접 실행한다. `Plan`은 파일 읽기·해시·경로·여유 검사와 stdout 출력만 수행한다. Gradle compilation 자체는 별도 준비 작업이다. `VerifyTransport`는 `-Dphase18.environment=<절대 현장 JSON>` 또는 script의 `-EnvironmentFile`이 필요하다. `Run`, `Analyze`, `Close` 및 알 수 없는 action은 입력 파일 읽기 전 거부한다. 이름/PID만 보고 다른 프로세스를 종료하지 않는다.
+`dev.cgt.benchmark.Phase18Main --action Plan|VerifyTools|VerifyTransport|VerifyObservation|Pilot|Run --plan <절대 JSON 경로>`.
+JDK21과 이미 컴파일한 benchmark runtime classpath로 직접 실행한다. `Plan`은 파일 읽기·해시·경로·여유 검사와 stdout 출력만 수행한다. Gradle compilation 자체는 별도 준비 작업이다. 서비스 action은 `-Dphase18.environment=<절대 현장 JSON>` 또는 script의 `-EnvironmentFile`이 필요하다. `Analyze`, `Close` 및 알 수 없는 action은 입력 파일 읽기 전 거부한다. 이름/PID만 보고 다른 프로세스를 종료하지 않는다.
 
-`phase18ToolsClasspath` Gradle task는 `phase18ClasspathFile`로 지정한 새 파일에 benchmark runtime classpath를 기록하고 `.json` sidecar에 source/compiled class/resources/JAR 해시를 연결한다. `scripts/measure-phase18.ps1 -Action Plan|VerifyTools|VerifyTransport -PlanPath ... -Java ... -ClasspathFile ...`은 해당 클래스 경로로 직접 JVM을 실행한다. 직접 Java 호출도 `-Dphase18.runtimeReceipt=<ClasspathFile>.json`이 필요하다. actual runtime bytes와 source receipt가 다르면 action을 거부한다. launcher는 실행 정책/서비스/Git 설정을 변경하지 않는다. 실제 동결 입력과 복사 가능한 호출은 `작업기록/phase-18-progress.md`에 기록한다.
+`phase18ToolsClasspath` Gradle task는 `phase18ClasspathFile`로 지정한 새 파일에 benchmark runtime classpath를 기록하고 `.json` sidecar에 source/compiled class/resources/JAR 해시를 연결한다. `scripts/measure-phase18.ps1 -Action Plan|VerifyTools|VerifyTransport|VerifyObservation|Pilot|Run -PlanPath ... -Java ... -ClasspathFile ...`은 해당 클래스 경로로 직접 JVM을 실행한다. 직접 Java 호출도 `-Dphase18.runtimeReceipt=<ClasspathFile>.json`이 필요하다. actual runtime bytes와 source receipt가 다르면 action을 거부한다. launcher는 실행 정책/서비스/Git 설정을 변경하지 않는다. 실제 동결 입력과 복사 가능한 호출은 `작업기록/phase-18-progress.md`에 기록한다.
 
 ## 계획 schema
 
@@ -24,7 +24,7 @@ JDK21과 이미 컴파일한 benchmark runtime classpath로 직접 실행한다.
 
 계산은 checked arithmetic만 사용한다. write/read 각 phase의 계획량은 rate×phase seconds, bootstrap은 별도0/1이다. once users는 bootstrap을 포함한 전체 write 수, reuse는 bootstrap+pool이다. 표본은 전체 예정 시간과 timeout 예약을 sample 간격으로 나눈 상한이다. case별 보유량과 순차 전체 출력/시간을 모두 검사한다.
 
-`bounds.wsEvents`와 `Counts.wsEvents`는 전역 **고유 이벤트** 상한/예약이다. WS 연결이 있으면 예열+측정 write 수이며 연결 전 bootstrap을 제외한다. 연결0이면 WS 고유 이벤트/수신량/bitset 예약은0이다. `wsDeliveries=wsEvents×wsConnections`는 연결 전체의 예상 수신 횟수이며 고유 이벤트 상한과 비교하지 않는다. `wsBitsetBytes=ceil(wsEvents/64)×8×wsConnections`는 연결별 수신 집합의 word 정렬 예약이다. 공통 eventSeq→ordinal/canonical 필드 저장소는 고유 이벤트당128bytes, 연결별 관리256bytes와 bitset을 메모리에 예약한다. WS 출력은 고유 이벤트당256bytes+bitset+연결별 요약1024bytes이며 payload를 연결마다 복제하지 않는다. A-2의 메모리 예약은128MiB+read 처리 슬롯당512KiB+write 처리 슬롯당34KiB+terminal당512bytes+user당256bytes+WS 예약+sample당256bytes다. 128MiB는 작은 실제 client의 초기 heap 관측을 반영한 보수적 예약이며 heap 실측값 자체가 아니다. 출력은1MiB+terminal당2048bytes+WS 예약+sample당1024bytes다. 실제 primitive WS 배열/bitset과 제한 fixture heap은 A-2, 대표 부하 실증은 A-4에서 확인한다. 과거 A-1 계획의 해시/예약값은 보존하며 재해석하지 않는다.
+`bounds.wsEvents`와 `Counts.wsEvents`는 전역 **고유 이벤트** 상한/예약이다. WS 연결이 있으면 예열+측정 write 수이며 연결 전 bootstrap을 제외한다. 연결0이면 WS 고유 이벤트/수신량/bitset 예약은0이다. `wsDeliveries=wsEvents×wsConnections`는 연결 전체의 예상 수신 횟수이며 고유 이벤트 상한과 비교하지 않는다. `wsBitsetBytes=ceil(wsEvents/64)×8×wsConnections`는 연결별 수신 집합의 word 정렬 예약이다. 공통 eventSeq→ordinal/canonical 필드 저장소는 고유 이벤트당128bytes, 연결별 관리256bytes와 bitset을 메모리에 예약한다. WS 출력은 고유 이벤트당256bytes+bitset+연결별 요약1024bytes이며 payload를 연결마다 복제하지 않는다. A-2의 메모리 예약은128MiB+read 처리 슬롯당512KiB+write 처리 슬롯당34KiB+terminal당512bytes+user당256bytes+WS 예약+sample당256bytes다. 128MiB는 작은 실제 client의 초기 heap 관측을 반영한 보수적 예약이며 heap 실측값 자체가 아니다. 출력은1MiB+terminal당2048bytes+WS 예약+sample당1024bytes다. 실제 primitive WS 배열/bitset과 제한 fixture heap은 A-2, A-4에서는 작은 PILOT의 실제 heap과 보유 구조를 확인하며 대표·SOAK peak 실측으로 확대하지 않는다. 과거 A-1 계획의 해시/예약값은 보존하며 재해석하지 않는다.
 
 대표 W105/s·30/120초·WS100은 고유15,750/수신1,575,000/bitset197,600bytes, SOAK W105/s·30/1800초·WS100은 고유192,150/수신19,215,000/bitset2,402,400bytes다. bootstrap은 write terminal/user에는 포함하고 WS 기대 집합에는 포함하지 않는다. 기존 고유200,000·연결100·512MiB 상한은 유지한다.
 
@@ -56,13 +56,13 @@ fixture protocol: READY→START→DISPATCH(write/read)→WAITING_MEASURE. STOP/C
 
 ## A-2 production 연결과 제한 검증
 
-`VerifyTransport`는 ready/A-2/diagnostic 한 case, write/read 각각 최대64개·WS 최대4개·예열5초/측정10초 이내·기본32MiB segment를 허용한다. `Plan.executionAvailable`은 파일·구조상의 실행 후보이며 live 환경 확인을 대신하지 않는다. 일반 group16/outstanding128/queue1초/shutdown10초·flush1초와 실제 보안/180초 cooldown을 유지한다. initial/recovery는 bounds.totalSeconds의 단일 누적 기한을 공유하고 마지막 receipt 전에 실제 출력 한도도 확인한다. 대표/장기 workload 실행 action은 아직 제공하지 않는다.
+`VerifyTransport`는 ready/A-2/diagnostic 한 case, write/read 각각 최대64개·WS 최대4개·예열5초/측정10초 이내·기본32MiB segment를 허용한다. `Plan.executionAvailable`은 파일·구조상의 실행 후보이며 live 환경 확인을 대신하지 않는다. 일반 group16/outstanding128/queue1초/shutdown10초·flush1초와 실제 보안/180초 cooldown을 유지한다. initial/recovery는 bounds.totalSeconds의 단일 누적 기한을 공유하고 마지막 receipt 전에 실제 출력 한도도 확인한다. A-2 당시의 제한 action 이후 A-4에서 공식 `Pilot`과 후속 단일 trial `Run`을 제공한다. 실제 B/C/D·장기 부하는 별도 실행 요청과 새 현장 입력이 필요하다.
 
 환경 JSON의 정확한 필드는 `Phase18Environment` record다. plan의 dbInstance는 MySQL UUID와 환경 파일 SHA-256을 함께 고정한다. 현재 소유 MySQL3307의 PID/start/실행 파일·설정 hash/live SQL data path·durability, JDK21/계정/C: NTFS 비-reparse WAL, temp/JNA와 예산을 검사한다. SYSTEM Redis는 Java ProcessHandle 조회가 불가능한 환경이므로 사전 CIM PID/start 증거와 live INFO process_id/run_id로 연결하며 매 fixture guard에서 재대조한다. standalone·미사용2~15 index 검사는 기존 fixture guard를 사용한다. E18 기록은 실행 전 다시 수집하며 이전 PID나 빈 index를 현재 사실로 승계하지 않는다.
 
 새 catalog는 live identity·허용 namespace·부재·생성 intent 이후 CREATE, 실제 선택 catalog·빈 상태 확인 이후 DDL로 진행한다. 현재 run 소유의 precreated-empty 채택도 같은 빈 상태 검사 대상이다. 각 DDL/user batch 직전에 live guard가 호출된다. recovery는 initial의 정상 종료·실제 process exit·동일 plan/input/runtime/DB/WAL/segment/mode/raw/hash를 검사하고 users/DDL/seed를 재생성하지 않는다. DB/WAL은 증거로 보존하며 Redis key를 지우지 않는다.
 
-`Phase18LoadClient`의 두 pacing thread는 write/read 예정 시각을 독립적으로 지킨다. 종류별 유한 슬롯은 수신, gzip/hash 검증, 필수 raw flush까지 소유한다. body 완료 시각은 Subscriber에서 callback 검증보다 앞에 고정한다. `Phase18Raw`의 추가 필드는 userOrdinal/userAttempt, 좌표/색, rawSha256/wireBytes/validationNanos다. token은 최대128개 cache·15분 TTL·만료90초 전 갱신을 사용하고 값은 기록하지 않는다. read 표본은 실행 전 예정 ordinal로 최대1000개를 고정하며, 종료 후 accepted 이벤트를 tile/version 순서로 replay해 응답 version의 snapshot과 대조한다. `Phase18Consistency`는 작은 fixture의 알려진 기대값만 검증하며 정식 분포/SLO 분석기가 아니다.
+`Phase18LoadClient`의 두 pacing thread는 write/read 예정 시각을 독립적으로 지킨다. 종류별 유한 슬롯은 수신, gzip/hash 검증, 필수 raw flush까지 소유한다. body 완료 시각은 Subscriber에서 callback 검증보다 앞에 고정한다. `Phase18Raw`의 추가 필드는 userOrdinal/userAttempt, 좌표/색, rawSha256/wireBytes/validationNanos다. token은 최대128개 cache·15분 TTL·만료90초 전 갱신을 사용하고 값은 기록하지 않는다. read 표본은 실행 전 예정 ordinal로 최대1000개를 고정하며, 종료 후 accepted 이벤트를 tile/version 순서로 replay해 응답 version의 snapshot과 대조한다. `Phase18Consistency`는 동결 terminal·DB 전수와 잔존 WAL 구간·memory를 대조하며 정식 분포/SLO 분석기가 아니다.
 
 WS canonical은 공유 primitive 배열과 seq→ordinal 표 하나에 저장한다. `ws-canonical.jsonl`의 0-based 행 번호가 ordinal이며, `ws-received.bin`은 연결 순서 × ceil(planned unique events/64)개의 BIG_ENDIAN long word다. 같은 word의 bit0은 낮은 ordinal이다. 실제 unique 수와 계획 예약 수를 혼동하지 않는다. producer.json에 연결 시작/close callback 시각·중복/누락/extra·전달 횟수·primitive 배열 bytes·heap snapshot을 남긴다. bootstrap은 연결 전이라 제외한다. 모든 close callback 소진 뒤 최종 집합을 대조한다.
 
@@ -76,4 +76,50 @@ STOP은 정상 메시지 대기와 송신 중 모두 처리한다. APPLIED는 �
 
 caseId `stop`/`stop-active`는 각각 제어 대기/실제 read handler 진행 중의 사전 정의된 중단 검증이다. 실행 상태는 FAILED이고 stop-verification의 verificationPassed만 별도 판정한다. `timeout`은 실제 read 요청의 timeout/producer 필수 실패를 유발하는 음성 fixture이며 action exit1·recovery 미진입이 기대값이다. 이 ID들을 정상 성능 실행에 사용하지 않는다. producer-failure(-final).json은 원래 planned, clock/anchor, 최초 실패, callback/raw 불확실 ID 및 저장 결과 UNKNOWN을 보존한다. WS 원시 집합도 실패 뒤 유지한다. 앱/producer 종료 기한 초과는 실패로 고정하고 실제 I/O/자식 종료까지 소유하며 강제 kill하지 않는다.
 
-`server-closed.json`은 앱 context close 뒤 실제 flush scheduler 종료와 handler 완료 자료다. initial/recovery manifest의 complete는 제한 기능 검증·정상 자원 종료의 receipt이며 공식 PILOT/성능 성공이나 중단 case의 정상 실행 상태를 뜻하지 않는다. A-3는 이 raw/schema를 소비해 collector 원인 연결·정식 완전성/상태/분모 분석을 구현해야 한다.
+`server-closed.json`은 앱 context close 뒤 실제 flush scheduler 종료와 handler 완료 자료다. initial/recovery manifest의 complete는 제한 기능 검증·정상 자원 종료의 receipt이며 공식 PILOT/성능 성공이나 중단 case의 정상 실행 상태를 뜻하지 않는다.
+
+## A-3 유한 관측·안전 중단
+
+`VerifyObservation`은 stage=A-3의 동일한 소규모 diagnostic gate를 사용한다. launcher에 `-EnvironmentFile`과 `-ObservationPolicy`를 함께 전달한다. 직접 JVM 호출에서는 `-Dphase18.observationPolicy=<절대 JSON>`을 지정한다. policy schema1은 `Phase18ObservationPolicy` record로 정의하며 원본 planHash/caseId, 서버 heap·실제 backlog·outstanding·WAL 파일 수·trace entry/bytes·sample bytes 상한을 고정한다. policy hash는 initial/recovery 관측/manifest에 남기며 recovery에서 재대조한다. 일반 계획 schema2, raw/producer schema1은 유지하고 과거 A-2 결과를 새 collector 결과로 해석하지 않는다.
+
+계획 observation.required는 heap/outstanding/backlog/disk/deadline/metrics/wal-metadata, auxiliary는 after-gc/process-io/host-disk 중 필요한 항목이다. fallback=`planned-writes-upper-bound`, stopRule=`stop-new-dispatch`만 실제 구현된 정책으로 수용한다. 필수 수집은 READY 이후 prepare/warmup/measurement/drain에 적용한다. sampleMillis/maxAgeMillis/maxMissingMillis/stopAckMillis는 기존 계획 필드로 동결한다. backlog는 capture 시점의 실제 records와 계획 전체 쓰기 상한을 따로 보존한다. pending·초기 미관측에서는 최신 backlog를 null로 두고, 계획 상한이 안전 한도 내이며 유한 공백 시간 안일 때만 계속한다. stale는 직전 capture와 같다는 뜻이며 maxAge를 넘기면 중단한다. metadata의 NoSuchFileException은 삭제 경합 결측으로 유한 허용하고 다른 collector 오류는 즉시 실패다.
+
+`Phase18Collector`는 원래 collector 예외/안전 실패를 `Phase18ParentControl.stop`에 연결한다. 이는 앱의 정상 응답 대기와 독립적으로 발생기에 STOP을 전달한다. 실행 실패, APPLIED 기한, callback 소진, raw 저장, 서버 소진·실제 프로세스 종료를 구분하며 실패 뒤 recovery/성공 manifest를 차단한다. 정책 fixture=`collector-failure`는 실제 measurement handler 진입 뒤 필수 collector 예외를 주입하고, `safety-heap`은 같은 구간의 실제 heap을 사전 고정된 작은 한도와 비교한다. 이 두 음성 fixture는 prepare/warmup의 작은 heap 한도를 적용하지 않는다. 일반 fixture=`none`에는 전 구간 한도가 적용된다.
+
+관측 자료는 resource-samples.jsonl, collector.json, observation.json, client-resources.jsonl, client-collector.json, phase-clocks.json이다. sample은 디스크에 유한 출력하고 전체 표본을 메모리에 보유하지 않는다. 서버·발생기의 완료 요약은 실제 sample 수·bytes·SHA-256과 연결하며 initial/recovery 관측·발생기 출력 예약을 합쳐 plan 출력 한도를 검사한다. trace는 startup/steady phase, 파일별 force 집계와 제한된 R/S/Q/native close·파일 생성/채택/삭제 journal을 보유한다. record force와 반복 identity 조회는 집계만 하고 R/S 안의 native open/close에는 parent call을 남긴다. 실제 capturePlan/transaction 결과에서 event/tile/dirty/expected checkpoint/target/outcome을 관측하며 retention 결과와 이미 확정된 DB outcome을 분리한다. transaction·capture·retention·cycle 시간은 중첩되므로 합산하지 않는다. trace loss/overflow는 필수 관측 실패다. 마감 WAL hash는 파일 수·총 bytes 제한을 적용한 streaming 방식이며 종료 뒤 한 번만 수집한다.
+
+PixelMeasurement off에서는 timer/cycle/broadcast 실패/배치 분포를 disabled/null로 표현한다. 내구성 counter와 benchmark 파일 수명 관측은 계속하며 추가 비용이 같아야 비교 가능하다. timer count/total은 누적, windowMaxMillis는 60초×3 rolling 값이다. 전체 p99/최대값이나 각 구간 p95의 합으로 해석하지 않는다. GC MXBean의 마지막 실제 GC별 after heap과 시점을 보존하며 sampler heap을 after-GC로 바꾸지 않는다. process I/O는 네트워크·증거까지 포함한 전체 프로세스 값이다.
+
+별도 `scripts/observe-phase18-host.ps1 -Output <새 JSONL> -Samples <유한 수> -IntervalMillis <간격>`은 Windows 물리 장치 전체 raw counter를 수집한다. counter 차분의 bytes/operation/latency와 장치 매핑은 WAL·DB data/redo/binlog·증거의 실제 물리 장치와 함께 해석한다. 미지원 counter는 missing이며 WAL 단독 비용으로 귀속하지 않는다. 수집 실패가 보조 원인 분해를 막는 것과 필수 heap/disk 안전 근거 상실을 구분한다. JFR·세부 SQL lock/commit·정확한 WAL durable→commit/WS 지연은 이 수집기의 확정값이 아니다.
+
+서버와 발생기는 자기 clockId의 duration만 직접 계산한다. phase-clocks의 control 송수신 구간과 producer anchor UTC로 보수적인 정렬 범위를 남기며 프로세스 간 nanoTime 차이는 지연으로 보고하지 않는다. UTC 정밀도/동기화 오차가 보정되지 않았다면 원인 분해도 그 한계를 유지한다.
+
+## A-3 정식 분석 CLI
+
+설치된 Python으로 `scripts/analyze-phase18.py --plan <원본 계획> --run-dir <initial 폴더> --output <새 분석 JSON>`을 실행한다. 여러 case 계획에는 `--case <caseId>`를 추가한다. Java `Analyze`는 별도 집계기를 만들지 않고 계속 미제공이며 이 Python CLI가 유일한 정식 집계 경로다. 원본 계획/raw/producer·검증 증거는 읽기만 하고 새 결과를 CREATE_NEW로 기록한다. 분석 exit0은 분석 완료이며 원시 실행 성공을 뜻하지 않는다. 입력 형식 거부는 INPUT_REJECTED와 exit2로 구분한다.
+
+보조 host 자료가 있으면 `--host-disk <JSONL> --devices <실제 장치 매핑 JSON>`을 함께 지정한다. 물리 장치별 raw counter 차분의 bytes/operation/latency를 전체 수집 구간 값으로 표시하며 idle 구간 latency는 null, counter reset/wrap은 계산 불가다. `_Total`은 개별 장치와 합산하지 않는다. 서버 collector·trace·발생기 sampler 원시 자료, manifest hash, 실제 child/runner exit와 서버 요청 소진을 교차 확인하며 요약 complete 플래그만으로 성공 판정하지 않는다.
+
+분석 schema1은 원래 planned 집합, 예정 kind/phase별 terminal·중복/누락/계획 밖 ID, UNKNOWN/unresolved와 최초 미송신 결정 시각을 보존한다. 완료창 [start,end)의 accepted/s와 송신집합 accepted RTT·보조 처리량을 별도로 계산한다. send delay·scheduled-to-response·nearest-rank, 오류율의 분자/sent 분모·not_sent/planned 분모와 sent0의 null을 출력한다. 독립적인 고정 입력창마다 write/read 충족과 연속 동시 충족 시간을 확인한다. 입력 부족으로 쓰기 하위 지표를 폐기하지 않으며 mixed 전체 목표 달성과 구분한다. processing_capacity만으로 서버 포화 원인을 확정하지 않는다.
+
+종료 상태는 INPUT_REJECTED/EXECUTION_FAILED/MEASUREMENT_INVALID/VALID_TARGET_MISSED/VALID_TARGET_MET/VALID_NO_TARGET다. 정합성 complete/mismatch/missing/unresolved·drain/recovery·WS raw canonical/연결 bitset 판정은 성능과 별도다. A-2에는 collector가 없었다는 한계를 유지하며 A-3 이후 필수 collector 누락은 정상 합격이 아니다. 원래 timeout을 늦은 완료로 바꾸거나 과거 계획을 현재 코드의 재실행 승인으로 사용하지 않는다. read hash 표본 수를 전수 version/content 검증으로 확대하지 않는다.
+
+initial/recovery 각각 manifest·runner·실제 process identity/exit, runtime identity, consistency·drain·server 종료와 연결된 원시 파일의 선언 해시를 대조한다. initial은 별도 producer identity/exit·clock도 필요하다. A-3 관측은 양쪽 서버 collector·sample·trace·phase clock을 검증하고, initial에만 client collector/sample과 부하 phase envelope를 요구한다. recovery에는 새 발생기나 client 부하 시계를 요구하지 않는다. 모든 필수 검사 뒤 complete를 확정하며 누락·손상·해시/식별자 모순은 MEASUREMENT_INVALID, 실제 nonzero exit·미해결 종료·최초 실패 증거는 EXECUTION_FAILED로 보존한다. 유효한 하위 지표와 역할별 실패 근거는 결과에 남으며, 의도한 중단의 성공 manifest/recovery 부재가 최초 실행 실패를 바꾸지 않는다. 과거 입력의 source/class/WAL 원본 재검증 효력은 해당 실행 receipt와 작업기록의 해시 대응으로 별도 확인한다.
+
+trace 종료의 관측 Error는 일반 작업 예외보다 우선 전파하되 그 작업 예외를 suppressed로 보존한다. 원래 작업이 Error이면 원래 객체를 유지하고 뒤따른 관측 Error를 중복 없이 보존한다. 정상 호출의 관측 Error도 전파하며 자기 자신을 suppressed로 추가하지 않는다.
+
+## 공식 PILOT과 단일 trial
+
+`Pilot`은 ready/A-4/role=pilot의 작은 group mixed 한 건만 받는다. `Run`은 ready/B·C·D의 단일 case를 받으며 다른 case나 단계로 자동 진행하지 않는다. 두 action 모두 `-EnvironmentFile`·`-ObservationPolicy`가 필수이고 정상 initial 후 같은 DB/WAL·입력·policy의 새 JVM recovery까지 한 실행이다. 분석은 기존 Python CLI로 별도 수행한다. 정상 process receipt만으로 측정/정합성 분석 완료를 주장하지 않는다. Plan의 executionAvailable은 구조·경로상 준비 상태이며 live DB/Redis 소유권 검사를 대신하지 않는다.
+
+A-2/A-3의 작은 진단 제한과 실패 주입은 보존한다. 공식 trial은 fixture=none만 허용하고 중단 주입용 case ID를 거부한다. 공식 PILOT은 별도 deliberate read timeout 진단을 반복하지 않으며 bootstrap 뒤의 cooldown 거절은 측정 집합 밖에 남긴다. 실행 중 collector는 DB/redo/binlog 전체 증가·증거/build/WAL과 최소 여유도 확인하여 한도 실패를 신규 송신 STOP에 연결한다. A 현장 증거는64MiB/DB 증가2GiB의 제한을 유지하고, 후속 현장 증거는 plan의 명시 출력·DB/binlog 예약 내에서만 받는다.
+
+서버 활동 보유 상한은 write/read 예정 수와 준비 진단4건으로 계산한다. 예열 완료에서는 저장된 bootstrap/예열 terminal을 대조하고 실제 송신 집합·accepted tail로 서버 소진을 확인한다. arrival_late/processing_capacity/user_pool 미송신은 원래 planned에 남겨 입력 미충족으로 분석하며 UNKNOWN은 정상화하지 않는다. 정합성 검증은 삭제된 WAL prefix를 DB 전수로 확인하고 잔존 구간 내부의 누락·순서·payload를 대조한다. 긴 실행의 서버 활동 JSON도 예정 요청량에 비례하는 유한 byte 예약을 사용한다.
+
+`Phase18Deadline`은 검증된 계획의 실행 예산으로 runner가 한 번 정한 UTC 만료를 앱·발생기·recovery에 전달한다. JVM별로 남은 시간만 monotonic 기한에 고정하며 자식 시작·복구에서 전체 예산을 재부여하지 않는다. 계획 없는 Process fixture는 기존600초 상한, 계획 있는 실행은 검증된 totalSeconds 상한을 적용한다. STOP 적용 확인과 실패 후 cleanup 관측의 기존 상한은 별도이며 늦은 응답·exit0으로 최초 실패를 복원하지 않는다.
+
+제어 대기는 `Phase18Execution.responseWaitMillis`의 선행 작업 예약과 전체 실행 잔여 시간 중 작은 값으로 제한한다. CONNECT는 서버 소진·5초 cooldown 검사·control, MEASURE는 예열 raw 준비/control·서버 소진, WARMUP_DONE은 예열·callback 소진·control을 포함한다. BOOTSTRAP은 자식 준비·callback 소진, READY는 자식 준비(bootstrap 없는 경우)·WS 전체 연결, SEND_DONE은 측정 기간, DRAINED는 callback→WS 전달→전체 socket close→최종 WS 집합 확인을 포함한다. WS 연결/close는 각 단계의 하나의 기한을 공유한다. START/WARMUP의 짧은 handoff, DONE의 raw 저장, STOP ACK와 실패 정리는 각 기존 기한을 유지한다. 정상 대기를 늘려도 독립 stdin 수신과 dispatch gate는 계속 STOP을 즉시 적용한다.
+
+현재 계획/actual runtime hash·실행 명령·대표 반복 순서·예산 산정과 장기 미확정 항목은 phase-18 작업기록의 A-4 인계에 둔다. live PID/start/UUID·Redis 비사용·공간은 매 새 세션에서 확인하고 새 plan과 receipt로 동결하며, 소비한 PILOT plan을 다시 실행하지 않는다.
+
+write의 same/spread 좌표·색은 `BenchmarkResults.pixel`의 기존 규칙을 사용한다. bootstrap ordinal0 뒤 예열과 측정의 전역 ordinal을 이어 붙이며 동일 seed의 비교 의미를 유지한다. A-2/A-3와 A-4 첫 검토 전의 별도 생성식 결과는 당시 receipt에 한한 기능 증거이며 새 대표 분포 결과로 합산하지 않는다.

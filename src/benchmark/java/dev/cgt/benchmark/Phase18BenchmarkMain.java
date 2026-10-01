@@ -16,7 +16,7 @@ import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 
-/** 한 A-2 initial 또는 recovery JVM만 소유. 정상 shutdown과 실제 동일 DB/WAL 대응 없이는 성공 manifest 미게시 */
+/** 한 trial의 initial 또는 recovery JVM만 소유. 정상 shutdown과 실제 동일 DB/WAL 대응 없이는 성공 manifest 미게시 */
 public final class Phase18BenchmarkMain {
     private final Phase18Plan.Loaded loaded;
     private final Phase18Environment environment;
@@ -32,11 +32,23 @@ public final class Phase18BenchmarkMain {
     private Map<String,Object> consistency=Map.of();
     private boolean normalShutdown;
     private final Phase18ParentControl upstream;
+    private final Phase18Deadline execution;
     private tools.jackson.databind.JsonNode initial;
+    private Phase18ObservationPolicy observationPolicy;
+    private Phase18Trace observationTrace;
+    private Phase18Collector collector;
+    private String observationHash;
+    private final List<Object> phaseClocks=new ArrayList<>();
     private Phase18BenchmarkMain(Path planFile,Path envFile,boolean recovery) throws Exception {
         this.planFile=planFile;this.envFile=envFile;this.recovery=recovery;loaded=Phase18Plan.read(planFile);Phase18Runtime.verify(loaded.plan());
         Phase18Transport.requireFixture(loaded.plan());environment=Phase18Environment.read(envFile,loaded.plan());c=loaded.plan().cases().getFirst();
-        upstream=new Phase18ParentControl(c.observation().stopAckMillis(),c.workload().drainMillis());
+        if(Phase18Execution.observed(loaded.plan())){
+            var policyFile=Phase18Paths.checked(System.getProperty("phase18.observationPolicy",""));
+            observationPolicy=Phase18ObservationPolicy.read(policyFile,loaded);observationHash=BenchmarkJson.hash(policyFile);
+            observationTrace=new Phase18Trace(observationPolicy.maxTraceEntries(),observationPolicy.maxTraceBytes());
+        }
+        execution=Phase18Deadline.inherit(loaded.plan());
+        upstream=new Phase18ParentControl(c.observation().stopAckMillis(),c.workload().drainMillis(),execution);
         output=Path.of(loaded.plan().ownership().evidenceRoot(),c.runId(),recovery?"recovery":"initial");
         Phase18Paths.checked(output.toString());Phase18Plan.require(!Files.exists(output),"new app output");
     }
@@ -47,6 +59,7 @@ public final class Phase18BenchmarkMain {
         try{app.execute();}catch(Exception|Error problem){failure=problem;}
         finally{try{app.finishStopped();}catch(Exception|Error problem){failure=Phase18Process.preserve(failure,problem);}
             try{app.close();}catch(Exception|Error problem){failure=Phase18Process.preserve(failure,problem);}}
+        try{app.upstream.check();}catch(Exception|Error problem){failure=Phase18Process.preserve(failure,problem);}
         failure=Phase18Process.preserve(failure,app.upstream.failure());
         try{app.save(failure);}catch(Exception|Error problem){failure=Phase18Process.preserve(failure,problem);}
         Phase18Process.rethrow(failure);
@@ -66,14 +79,19 @@ public final class Phase18BenchmarkMain {
         properties.put("pixel-place.write.mode",c.runtime().mode());properties.put("pixel-place.write.group.max-batch-size",16);properties.put("pixel-place.write.group.max-outstanding",128);
         properties.put("pixel-place.write.group.queue-timeout","1s");properties.put("pixel-place.write.group.shutdown-grace","10s");properties.put("pixel-place.wal.max-segment-bytes",c.runtime().segmentBytes());
         var app=BenchmarkEnvironment.application(properties);app.addPrimarySources(List.of(Phase18Activity.class));
-        app.addInitializers(ctx->ctx.getBeanFactory().registerSingleton("phase18Tracker",new Phase18Activity.Tracker(160)));
+        app.addInitializers(ctx->ctx.getBeanFactory().registerSingleton("phase18Tracker",new Phase18Activity.Tracker(Phase18Execution.requestCapacity(p))));
+        if(observationTrace!=null)app.addInitializers(ctx->new Phase18Observation(observationTrace).install(ctx));
         System.out.println("APP_PREPARING");System.out.flush();
-        bounded(()->{context=app.run();return true;},c.workload().readyMillis(),"ready");
+        bounded(()->{context=app.run();return true;},execution.capMillis(c.workload().readyMillis()),"ready");
         BenchmarkJson.write(output.resolve("ready-returned.json"),Map.of("stopped",upstream.stopped(),"observedNanos",System.nanoTime()));
         upstream.check();verifyRuntime();
+        if(observationTrace!=null){
+            observationTrace.phase("prepare");
+            collector=new Phase18Collector(loaded,observationPolicy,environment,context,observationTrace,upstream,output);
+        }
         if(recovery){rows=Phase18Consistency.read(output.getParent().resolve("initial/raw.jsonl"),loaded);drain(initial.path("checkpoint").longValue());}
         else {
-            upstream.check();diagnostics(keys);upstream.check();startProducer(keys);upstream.check();
+            upstream.check();if(Phase18Execution.fixture(p))diagnostics(keys);upstream.check();startProducer(keys);upstream.check();
             rows=Phase18Consistency.read(output.resolve("raw.jsonl"),loaded);for(var row:rows)if(row.sendState().equals("sent"))expected.add(row.requestId());
             drain(rows.stream().filter(r->r.eventSeq()!=null).mapToLong(Phase18Raw::eventSeq).max().orElse(0));
         }
@@ -89,22 +107,26 @@ public final class Phase18BenchmarkMain {
     private void startProducer(BenchmarkEnvironment.Keys keys)throws Exception {
         BenchmarkJson.write(output.resolve("start.json"),Map.of("endpoint",endpoint(),"users",users,"output",output.toString()));
         var command=Phase18Transport.command(loaded.plan(),output.resolve("producer-process"),output.resolve("producer.args"),"512m",
-                "dev.cgt.benchmark.Phase18LoadClient",List.of(planFile.toString(),output.resolve("start.json").toString()));
+                "dev.cgt.benchmark.Phase18LoadClient",List.of(planFile.toString(),output.resolve("start.json").toString()),execution);
         Phase18Process.runWithKeys(command,keys,upstream,child->{
             send(child,"START");
             if(c.workload().bootstrap()){
-                String boot=receive(child,c.workload().readyMillis());Phase18Plan.require(boot.equals("BOOTSTRAP 1"),"bootstrap HTTP");
+                String boot=receive(child,Phase18Execution.responseWaitMillis("BOOTSTRAP",c.workload()));Phase18Plan.require(boot.equals("BOOTSTRAP 1"),"bootstrap HTTP");
                 expected.add(Phase18Plan.requestId(c,"write","bootstrap",0));drain(1);cooldown(keys);send(child,"CONNECT");
             }
-            Phase18Plan.require(receive(child,c.workload().readyMillis()).equals("READY"),"producer/WS ready");
-            context.getBean(PixelMeasurement.class).phase(PixelMeasurement.Phase.warmup);send(child,"WARMUP");
-            String warm=receive(child,c.workload().controlMillis());Phase18Plan.require(warm.startsWith("WARMUP_DONE "),"warmup done");
-            addPhase("warmup");drain(c.workload().bootstrap()?1+c.workload().writeRate()*c.workload().warmupSeconds():c.workload().writeRate()*c.workload().warmupSeconds());
+            Phase18Plan.require(receive(child,Phase18Execution.responseWaitMillis("READY",c.workload())).equals("READY"),"producer/WS ready");
+            phase(PixelMeasurement.Phase.warmup);send(child,"WARMUP");
+            String warm=receive(child,Phase18Execution.responseWaitMillis("WARMUP_DONE",c.workload()));Phase18Plan.require(warm.startsWith("WARMUP_DONE "),"warmup done");
+            // 미송신도 원래 예정 집합에 남기되 서버 소진은 실제 송신 집합과 accepted tail로 확인
+            var warmRows=Phase18Consistency.readWarmup(output.resolve("raw.jsonl"),loaded);
+            for(var row:warmRows)if(row.sendState().equals("sent"))expected.add(row.requestId());
+            drain(warmRows.stream().filter(r->r.eventSeq()!=null).mapToLong(Phase18Raw::eventSeq).max().orElse(0));
             long appliedCount=-1;
             var entered=new CountDownLatch(1);var release=new CountDownLatch(1);
             boolean stopActive=c.caseId().equals("stop-active"), timeout=c.caseId().equals("timeout"), upstreamTimeout=c.caseId().equals("upstream-timeout");
+            boolean observeFailure=observationPolicy!=null&&!observationPolicy.fixture().equals("none");
             try {
-            if(stopActive||timeout||upstreamTimeout){
+            if(stopActive||timeout||upstreamTimeout||observeFailure){
                 context.getBean(Phase18Activity.Tracker.class).delay(Phase18Plan.requestId(c,"read","measurement",0),entered,release);
                 send(child,"MEASURE");Phase18Plan.require(entered.await(5,TimeUnit.SECONDS),"measurement read handler entered");
             }
@@ -117,11 +139,13 @@ public final class Phase18BenchmarkMain {
                         "receivedChildNanos",Long.parseLong(fields[2]),"appliedChildNanos",Long.parseLong(fields[3]),"appliedDispatches",appliedCount));
             }
             if(!timeout&&!upstreamTimeout)release.countDown();
-            context.getBean(PixelMeasurement.class).phase(PixelMeasurement.Phase.measurement);if(!stopActive&&!timeout&&!upstreamTimeout)send(child,"MEASURE");
-            Phase18Plan.require(receive(child,c.workload().controlMillis()).startsWith("SEND_DONE "),"send done");
-            String drained=receive(child,c.workload().drainMillis());Phase18Plan.require(drained.startsWith("DRAINED "),"producer drained");
+            phase(PixelMeasurement.Phase.measurement);if(collector!=null&&observeFailure)collector.armFixture();
+            if(!stopActive&&!timeout&&!upstreamTimeout&&!observeFailure)send(child,"MEASURE");
+            Phase18Plan.require(receive(child,Phase18Execution.responseWaitMillis("SEND_DONE",c.workload())).startsWith("SEND_DONE "),"send done");
+            String drained=receive(child,Phase18Execution.responseWaitMillis("DRAINED",c.workload()));Phase18Plan.require(drained.startsWith("DRAINED "),"producer drained");
             if(appliedCount>=0)Phase18Plan.require(drained.equals("DRAINED "+appliedCount),"no dispatch after STOP / callbacks drained");
-            Phase18Plan.require(receive(child,c.workload().drainMillis()).startsWith("DONE "),"producer raw saved");
+            Phase18Plan.require(receive(child,Phase18Execution.responseWaitMillis("DONE",c.workload())).startsWith("DONE "),"producer raw saved");
+            phase(PixelMeasurement.Phase.drain);
             } finally {release.countDown();}
         });
         if(c.caseId().startsWith("stop")){
@@ -134,8 +158,16 @@ public final class Phase18BenchmarkMain {
             BenchmarkJson.write(output.resolve("stop-verification.json"),Map.of("verificationPassed",true,"runStatus","FAILED","newDispatchAfterApplied",0,"callbackActive",0,"originalPlanned",loaded.plan().counts(c)));
         }
     }
-    private String receive(Phase18Process.Owned child,long millis)throws Exception {return upstream.receive(child,millis);}
-    private void send(Phase18Process.Owned child,String message)throws Exception {upstream.handoff(()->{child.send(message);return null;});}
+    private String receive(Phase18Process.Owned child,long millis)throws Exception {
+        long before=System.nanoTime();String message=upstream.receive(child,millis);
+        phaseClocks.add(Map.of("direction","receive","clockId",Phase18Raw.clock(),"message",message,"beforeNanos",before,"afterNanos",System.nanoTime(),"utc",Instant.now().toString()));
+        return message;
+    }
+    private void send(Phase18Process.Owned child,String message)throws Exception {
+        long before=System.nanoTime();upstream.handoff(()->{child.send(message);return null;});
+        phaseClocks.add(Map.of("direction","send","clockId",Phase18Raw.clock(),"message",message,"beforeNanos",before,"afterNanos",System.nanoTime(),"utc",Instant.now().toString()));
+    }
+    private void phase(PixelMeasurement.Phase value){context.getBean(PixelMeasurement.class).phase(value);if(observationTrace!=null)observationTrace.phase(value.name());}
     /** 실패 실행의 소진 증거 수집. 실제 자식 종료 전 서버 close 금지, 정상 실행으로 복귀 금지 */
     private void finishStopped()throws Exception {
         bounded(()->{Phase18Process.awaitRemaining();return true;},c.workload().drainMillis(),"producer-exit");
@@ -145,11 +177,12 @@ public final class Phase18BenchmarkMain {
         drain(rows.stream().filter(r->r.eventSeq()!=null).mapToLong(Phase18Raw::eventSeq).max().orElse(0));
     }
     private long diagnosticCount(){return expected.stream().filter(id->id.contains("/diagnostic/")).count();}
-    private void addPhase(String phase){for(String kind:List.of("write","read")){long n=(kind.equals("write")?c.workload().writeRate():c.workload().readRate())*(phase.equals("warmup")?c.workload().warmupSeconds():c.workload().measurementSeconds());for(long i=0;i<n;i++)expected.add(Phase18Plan.requestId(c,kind,phase,i));}}
     private void drain(long tail)throws Exception {
         var measurement=context.getBean(PixelMeasurement.class);var tracker=context.getBean(Phase18Activity.Tracker.class);
-        long until=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(c.workload().drainMillis()),idle=0;
+        boolean cleanup=upstream.stopped();
+        long until=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(cleanup?c.workload().drainMillis():execution.capMillis(c.workload().drainMillis())),idle=0;
         while(System.nanoTime()<until){
+            if(!cleanup)upstream.check();
             var executor=context.getBean(PixelWriteExecutor.class).snapshot();boolean pending=context.getBean(PendingAmbiguousFlushStore.class).current().isPresent();
             if(tracker.idle(expected)&&measurement.activeCommands()==0&&!pending&&Phase15BenchmarkMain.executorIdle(executor)&&context.getBean(ServiceReadiness.class).isReady()){
                 if(idle==0)idle=System.nanoTime();var capture=measurement.lastCapture();
@@ -187,7 +220,7 @@ public final class Phase18BenchmarkMain {
         String token=new ServiceJwtTokens(context.getBean(AuthProperties.class),Clock.systemUTC()).issueAccess(users.getFirst()).getTokenValue();
         try(var http=HttpClient.newBuilder().build()){
             var request=HttpRequest.newBuilder(URI.create(endpoint()+"/api/pixels")).header("X-Phase18-Request",id).header("Authorization","Bearer "+token)
-                    .header("Origin","http://localhost:3000").header("Content-Type","application/json").timeout(Duration.ofSeconds(5))
+                    .header("Origin","http://localhost:3000").header("Content-Type","application/json").timeout(Duration.ofMillis(execution.capMillis(Phase18Execution.COOLDOWN_MILLIS)))
                     .POST(HttpRequest.BodyPublishers.ofString("{\"x\":0,\"y\":0,\"color\":17}")).build();
             var response=upstream.handoff(()->http.sendAsync(request,info->new Phase18TileBody.Subscriber(8192))).get();var json=Phase18Plan.JSON.readTree(response.body());
             Phase18Plan.require(response.statusCode()==429&&json.path("remainingMillis").isIntegralNumber()&&json.path("remainingMillis").longValue()>0&&json.path("remainingMillis").longValue()<=180000,"actual cooldown response");
@@ -220,7 +253,8 @@ public final class Phase18BenchmarkMain {
     private tools.jackson.databind.JsonNode recoverInput()throws Exception {
         Path file=output.getParent().resolve("initial/manifest.json");var m=BenchmarkJson.read(file);var runner=BenchmarkJson.read(output.getParent().resolve("initial/runner-result.json"));
         requireInitial(m,runner,loaded,BenchmarkJson.hash(file));
-        Phase18Plan.require(m.path("walFiles").equals(Phase18Plan.JSON.valueToTree(Phase17CObservation.snapshot(Path.of(loaded.plan().ownership().wal())))),"initial WAL file hashes");
+        Phase18Plan.require(m.path("walFiles").equals(Phase18Plan.JSON.valueToTree(walSnapshot())),"initial WAL file hashes");
+        if(observationHash!=null)Phase18Plan.require(m.path("observationPolicyHash").asText().equals(observationHash),"same observation policy");
         Phase18Plan.require(m.path("rawHash").asText().equals(BenchmarkJson.hash(file.getParent().resolve("raw.jsonl")))
                 &&m.path("runtimeReceiptHash").asText().equals(BenchmarkJson.hash(Path.of(System.getProperty("phase18.runtimeReceipt")))),"initial raw/runtime hash");
         return m;
@@ -237,13 +271,15 @@ public final class Phase18BenchmarkMain {
         Phase18Plan.require(prior.isEmpty()||!prior.get().isAlive()||!prior.get().info().startInstant().orElseThrow().equals(Instant.parse(m.path("startUtc").asText())),"previous writer stopped");
     }
     private void close()throws Exception {
-        Throwable failure=null;try{if(context!=null){
+        Throwable failure=null;
+        try{if(collector!=null)collector.close();}catch(Exception|Error problem){failure=problem;}
+        try{if(context!=null){
             var scheduler=context.getBean("flushTaskScheduler",org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler.class).getScheduledThreadPoolExecutor();
             var tracker=context.getBean(Phase18Activity.Tracker.class);
             bounded(()->{context.close();while(!scheduler.awaitTermination(1,TimeUnit.SECONDS)){/* 실제 producer 종료까지 소유 */}return true;},c.workload().drainMillis(),"context-close");
             var activity=tracker.snapshot();Phase18Plan.require(activity.values().stream().allMatch(s->s.completed()!=0),"closed server handlers");
             BenchmarkJson.write(output.resolve("server-closed.json"),Map.of("schedulerTerminated",scheduler.isTerminated(),"requests",activity));
-        }}catch(Exception|Error e){failure=e;}
+        }}catch(Exception|Error e){failure=Phase18Process.preserve(failure,e);}
         try{if(fixture!=null)bounded(()->{fixture.close();return true;},c.workload().drainMillis(),"fixture-close");}catch(Exception|Error e){failure=Phase18Process.preserve(failure,e);}
         normalShutdown=failure==null&&Phase18Process.unresolved().isEmpty();Phase18Process.rethrow(failure);
     }
@@ -252,12 +288,27 @@ public final class Phase18BenchmarkMain {
     }
     private void save(Throwable failure)throws Exception {
         BenchmarkJson.write(output.resolve("drain.json"),drains);
+        BenchmarkJson.write(output.resolve("phase-clocks.json"),Map.of("schemaVersion",1,"clockId",Phase18Raw.clock(),"messages",phaseClocks,
+                "alignment","client anchor is after parent send-before and before phase-DONE receipt; UTC precision uncalibrated, never subtract cross-JVM nanoTime"));
+        if(observationTrace!=null){
+            BenchmarkJson.write(output.resolve("observation.json"),Map.of("schemaVersion",1,"policyHash",observationHash,"policy",observationPolicy,"trace",observationTrace.report()));
+            if(collector!=null)collector.write();
+            if(!observationTrace.complete())failure=Phase18Process.preserve(failure,new IllegalStateException("Observation loss/overflow"));
+        }
         if(upstream.stopped())BenchmarkJson.write(output.resolve("upstream-stop.json"),upstream.report());
         failure=Phase18Process.preserve(failure,upstream.failure());
-        if(failure!=null||!normalShutdown){BenchmarkJson.write(output.resolve("failure.json"),Map.of("kind",failure==null?"shutdown":failure.getClass().getName(),"normalShutdown",normalShutdown,"nextTaskAllowed",false,"failures",failure==null?List.of():Phase18ParentControl.failures(failure)));return;}
+        if(failure!=null||!normalShutdown){BenchmarkJson.write(output.resolve("failure.json"),Map.of("kind",failure==null?"shutdown":failure.getClass().getName(),"normalShutdown",normalShutdown,"nextTaskAllowed",false,"failures",failure==null?List.of():Phase18ParentControl.failures(failure)));Phase18Process.rethrow(failure);throw new IllegalStateException("Shutdown incomplete");}
         BenchmarkJson.write(output.resolve("consistency.json"),consistency);var p=loaded.plan();
         var m=new LinkedHashMap<String,Object>();m.put("schemaVersion",1);m.put("complete",true);m.put("normalShutdown",true);m.put("initialAction",recovery?"recovery":"initial");m.put("planHash",loaded.planHash());m.put("inputHash",Phase18TileBody.hash(Phase18Plan.JSON.writeValueAsBytes(p.inputs())));
-        m.put("runtimeReceiptHash",BenchmarkJson.hash(Path.of(System.getProperty("phase18.runtimeReceipt"))));m.put("environmentIdentity",p.ownership().dbInstance());m.put("catalog",p.ownership().catalog());m.put("wal",p.ownership().wal());m.put("mode",c.runtime().mode());m.put("segmentBytes",c.runtime().segmentBytes());m.put("walFiles",Phase17CObservation.snapshot(Path.of(p.ownership().wal())));
+        m.put("runtimeReceiptHash",BenchmarkJson.hash(Path.of(System.getProperty("phase18.runtimeReceipt"))));m.put("environmentIdentity",p.ownership().dbInstance());m.put("catalog",p.ownership().catalog());m.put("wal",p.ownership().wal());m.put("mode",c.runtime().mode());m.put("segmentBytes",c.runtime().segmentBytes());m.put("walFiles",walSnapshot());
+        if(observationHash!=null){
+            Phase18Plan.require(observationHash.equals(BenchmarkJson.hash(Path.of(System.getProperty("phase18.observationPolicy")))),"unchanged observation policy");
+            m.put("observationPolicyHash",observationHash);m.put("observationHash",BenchmarkJson.hash(output.resolve("observation.json")));
+            m.put("collectorHash",BenchmarkJson.hash(output.resolve("collector.json")));
+            if(!recovery)m.put("clientCollectorHash",BenchmarkJson.hash(output.resolve("client-collector.json")));
+        }
         m.put("users",users);m.put("pid",ProcessHandle.current().pid());m.put("startUtc",ProcessHandle.current().info().startInstant().orElseThrow().toString());m.put("checkpoint",consistency.get("checkpoint"));m.put("rawHash",BenchmarkJson.hash(recovery?output.getParent().resolve("initial/raw.jsonl"):output.resolve("raw.jsonl")));m.put("drainHash",BenchmarkJson.hash(output.resolve("drain.json")));m.put("consistencyHash",BenchmarkJson.hash(output.resolve("consistency.json")));BenchmarkJson.write(output.resolve("manifest.json"),m);
     }
+    private Map<String,String> walSnapshot()throws Exception{return observationPolicy==null?Phase17CObservation.snapshot(Path.of(loaded.plan().ownership().wal()))
+            :Phase18Observation.snapshot(Path.of(loaded.plan().ownership().wal()),loaded.plan().bounds().walBytes(),observationPolicy.maxWalFiles());}
 }

@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
 final class Phase18ParentControl {
     private final Phase18Control gate = new Phase18Control();
     private final long ackMillis, cleanupMillis;
+    private final Phase18Deadline execution;
     private volatile Throwable failure;
     private record Notice(String message, Throwable cause, long receivedNanos) { }
     private final AtomicReference<Notice> notice = new AtomicReference<>();
@@ -21,7 +22,10 @@ final class Phase18ParentControl {
     private final List<String> observed = new ArrayList<>();
 
     Phase18ParentControl(long ackMillis, long cleanupMillis) {
-        this.ackMillis = ackMillis; this.cleanupMillis = cleanupMillis;
+        this(ackMillis,cleanupMillis,null);
+    }
+    Phase18ParentControl(long ackMillis,long cleanupMillis,Phase18Deadline execution) {
+        this.ackMillis = ackMillis; this.cleanupMillis = cleanupMillis;this.execution=execution;
     }
 
     /** stdin만 소비. 준비/정상 응답/발생기 결과 대기의 lock을 획득하지 않음 */
@@ -64,6 +68,7 @@ final class Phase18ParentControl {
     void check() throws Exception {
         // 수신과 lock 획득 순서가 뒤집혀도 최초 통보 원인/identity 보존
         Phase18Process.rethrow(failure());
+        if(execution!=null)execution.check();
     }
 
     /** start/등록만 직렬화. body/receive/ready/exit 대기는 이 lock 밖에서 수행 */

@@ -8,7 +8,7 @@ import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 
-/** 작은 기능 fixture의 알려진 입력/원시 결과와 DB·잔존 WAL·memory 직접 대조. 분포/SLO 분석기 책임 없음 */
+/** 동결 입력/원시 결과와 DB·잔존 WAL·memory 직접 대조. 분포/SLO 분석기 책임 없음 */
 final class Phase18Consistency {
     private Phase18Consistency() { }
     static List<Phase18Raw> read(Path file,Phase18Plan.Loaded loaded) throws Exception {
@@ -19,18 +19,28 @@ final class Phase18Consistency {
         return read(file,loaded,true);
     }
     private static List<Phase18Raw> read(Path file,Phase18Plan.Loaded loaded,boolean allowStopped) throws Exception {
-        var c=loaded.plan().cases().getFirst();long planned=loaded.plan().counts(c).writes()+loaded.plan().counts(c).reads();
-        Phase18Plan.require(planned<=128&&Files.size(file)<=planned*2048,"small raw fixture bound");
+        return read(file,loaded,allowStopped,false);
+    }
+    /** 예열 handshake 직전 flush된 bootstrap/예열 terminal만 대조. 미래 측정 ID를 누락으로 오판하지 않음 */
+    static List<Phase18Raw> readWarmup(Path file,Phase18Plan.Loaded loaded) throws Exception {
+        return read(file,loaded,false,true);
+    }
+    private static List<Phase18Raw> read(Path file,Phase18Plan.Loaded loaded,boolean allowStopped,boolean warmup) throws Exception {
+        var c=loaded.plan().cases().getFirst();var counts=loaded.plan().counts(c);
+        long planned=warmup?counts.bootstrap()+counts.warmupWrites()+counts.warmupReads():counts.writes()+counts.reads();
+        Phase18Plan.require(planned<=2*Phase18Plan.TERMINALS&&Files.size(file)<=planned*2048,"bounded planned raw");
         var rows=new ArrayList<Phase18Raw>();var seen=new HashSet<String>();
         try(var input=Files.newBufferedReader(file)) {
             String line;while((line=input.readLine())!=null){
                 Phase18Plan.require(rows.size()<planned&&line.length()<=2048,"raw row bound");
                 var r=Phase18Plan.JSON.readValue(line,Phase18Raw.class);
-                Phase18Plan.require(r.schemaVersion()==1&&r.planHash().equals(loaded.planHash())&&r.runId().equals(c.runId())&&r.caseId().equals(c.caseId())
+                Phase18Plan.require((!warmup||!r.scheduledPhase().equals("measurement"))&&r.schemaVersion()==1&&r.planHash().equals(loaded.planHash())&&r.runId().equals(c.runId())&&r.caseId().equals(c.caseId())
                         &&r.requestId().equals(Phase18Plan.requestId(c,r.kind(),r.scheduledPhase(),r.ordinal()))&&seen.add(r.requestId()),"raw identity");
                 boolean stopped=allowStopped&&r.status().equals("client_not_sent")&&r.sendState().equals("not_sent")&&r.outcome().equals("NOT_SENT")
                         &&r.reason().equals("stopped")&&r.sentNanos()==null&&r.completedNanos()==null;
-                Phase18Plan.require(stopped||r.status().equals("accepted")&&r.sendState().equals("sent")&&r.outcome().equals("ACCEPTED")&&r.httpStatus()==200
+                boolean notSent=!Phase18Execution.fixture(loaded.plan())&&r.status().equals("client_not_sent")&&r.sendState().equals("not_sent")
+                        &&r.outcome().equals("NOT_SENT")&&Set.of("arrival_late","processing_capacity","user_pool").contains(r.reason())&&r.sentNanos()==null&&r.completedNanos()==null;
+                Phase18Plan.require(stopped||notSent||r.status().equals("accepted")&&r.sendState().equals("sent")&&r.outcome().equals("ACCEPTED")&&r.httpStatus()==200
                         &&r.completedNanos()>=r.sentNanos()&&r.decidedNanos()<=r.completedNanos(),"normal fixture HTTP result");
                 rows.add(r);
             }
@@ -75,8 +85,11 @@ final class Phase18Consistency {
                     &&record.z()==0&&record.tx()==row.x()/256&&record.ty()==row.y()/256&&record.x()==row.x()&&record.y()==row.y()&&record.color()==row.color(),"retained WAL payload");
             Phase18Plan.require(record.createdAt().truncatedTo(ChronoUnit.MILLIS).equals(timestamps.get(record.eventSeq())),"WAL original/DB millisecond createdAt");
         }
-        // 제한 fixture는 기본 segment 안에 전량 잔존. 삭제된 이력을 복원했다고 주장하지 않음
-        Phase18Plan.require(retained.equals(accepted.keySet())&&fixture.checkpoint()==last&&batch.walLastEventSeq()==last,"DB/WAL exact interval/checkpoint");
+        // 적격 삭제된 prefix는 DB 전수 대조로 보존. 잔존 구간 내부 누락/순서/합법적 seq gap은 기존 검증기로 확인
+        if(!accepted.isEmpty())Phase17CAnalyzer.retained(accepted.values().stream().map(row->new dev.cgt.pixelplace.wal.domain.WalRecord(
+                row.eventSeq(),users.get(row.userOrdinal()),0,row.x()/256,row.y()/256,row.x(),row.y(),row.color(),null)).toList(),batch.records(),last,batch.walLastEventSeq());
+        else Phase18Plan.require(batch.records().isEmpty(),"empty DB requires empty WAL");
+        Phase18Plan.require(fixture.checkpoint()==last&&batch.walLastEventSeq()==last,"DB/WAL checkpoint/tail");
         Phase18ReadReplay.verify(samples,events);
         return Map.of("complete",true,"accepted",accepted.size(),"reads",rows.stream().filter(r->r.kind().equals("read")&&r.status().equals("accepted")).count(),"readSamples",samples.size(),"checkpoint",last,
                 "retainedWalRecords",retained.size(),"canonicalMemory",1024,"databaseTiles",accepted.isEmpty()?0:1024,"createdAt","WAL original -> DB milliseconds");

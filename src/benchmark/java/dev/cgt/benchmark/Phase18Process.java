@@ -10,7 +10,10 @@ import java.util.concurrent.*;
 /** 시작된 자식의 실제 identity·pipe·종료를 한 소유자에 묶음. 기한 초과는 성공으로 복원 불가 */
 public final class Phase18Process {
     public record Command(List<String> arguments, Path cwd, Path evidence, long observationMillis,
-            long cleanupMillis, long logLimit) {
+            long cleanupMillis, long logLimit, Phase18Deadline execution) {
+        public Command(List<String> arguments, Path cwd, Path evidence, long observationMillis, long cleanupMillis, long logLimit) {
+            this(arguments,cwd,evidence,observationMillis,cleanupMillis,logLimit,null);
+        }
         public Command { arguments = List.copyOf(arguments); }
     }
     public record Receipt(long pid, String startUtc, Integer exit, boolean evidenceSaved,
@@ -53,7 +56,8 @@ public final class Phase18Process {
             }
             sink.write(command.evidence.resolve("command.json"), Map.of("arguments", command.arguments, "argumentFileHashes", inputHashes,
                     "cwd", command.cwd.toString(), "observationMillis", command.observationMillis,
-                    "cleanupMillis", command.cleanupMillis, "logLimit", command.logLimit));
+                    "cleanupMillis", command.cleanupMillis, "logLimit", command.logLimit,
+                    "executionDeadlineEpochMillis", command.execution == null ? 0 : command.execution.expiresEpochMillis()));
             if (control == null) child.start();
             else control.start(child, () -> { child.start(); return null; });
             body.run(child);
@@ -138,13 +142,14 @@ public final class Phase18Process {
         return new Receipt(child.process.pid(), child.startUtc, child.exit, true, false, "");
     }
 
-    private static void validate(Command c) throws Exception {
+    static void validate(Command c) throws Exception {
+        if(c.execution != null)c.execution.check();
         if (!OWNED.isEmpty()) throw new IllegalStateException("Prior process/stream ownership unresolved");
         Phase18Paths.checked(c.cwd.toString()); Phase18Paths.checked(c.evidence.toString());
         Phase18Paths.checked(c.arguments.getFirst());
         Phase18Plan.require(c.arguments.size() <= 32 && c.arguments.stream().allMatch(a -> a != null
                 && a.length() <= 32_000 && a.indexOf('\0') < 0 && !a.contains("\n") && !a.contains("\r")), "command arguments");
-        Phase18Plan.require(c.observationMillis > 0 && c.observationMillis <= 600_000
+        Phase18Plan.require(c.observationMillis > 0 && c.observationMillis <= (c.execution == null ? 600_000 : c.execution.limitMillis())
                 && c.cleanupMillis > 0 && c.cleanupMillis <= 600_000 && c.logLimit > 0 && c.logLimit <= 1_048_576, "process bounds");
         Phase18Plan.require(!Files.exists(c.evidence, LinkOption.NOFOLLOW_LINKS) && Files.isDirectory(c.evidence.getParent()), "new process evidence");
     }
@@ -218,8 +223,10 @@ public final class Phase18Process {
             // 시작 전에 생존 보장 설치. identity/reader 설치 실패에도 부모 종료로 Process를 유실하지 않음
             Thread owner = new Thread(this::retainUntilExit, "phase18-process-owner");
             owner.setDaemon(false); owner.start();
-            process = builder.start();
+            if(command.execution != null)command.execution.check();
             processDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(command.observationMillis);
+            if(command.execution != null)processDeadline=Math.min(processDeadline,command.execution.deadlineNanos());
+            process = builder.start();
             OWNED.put(process.pid(), this);
             stdin = process.outputWriter(StandardCharsets.UTF_8);
             out = pump(process.getInputStream(), "stdout.log", true);
@@ -335,7 +342,11 @@ public final class Phase18Process {
                 check.run();
                 rethrow(streamFailure);
                 String message = messages.poll(Math.min(20, Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))), TimeUnit.MILLISECONDS);
-                if (message != null) return message;
+                if (message != null) {
+                    check.run();
+                    if(System.nanoTime()>=deadline)throw new TimeoutException("Control observation deadline");
+                    return message;
+                }
                 if (!process.isAlive() && pumpsDone()) throw new EOFException("Child ended before control response");
             }
             throw new TimeoutException("Control observation deadline");
@@ -354,6 +365,8 @@ public final class Phase18Process {
                 process.waitFor(Math.min(20, Math.max(1, TimeUnit.NANOSECONDS.toMillis(remaining))), TimeUnit.MILLISECONDS);
             }
             check.run();
+            if(System.nanoTime()>=deadline)throw new TimeoutException("Process observation deadline");
+            if(command.execution != null)command.execution.check();
             exit = process.exitValue();
             if (exit != 0) throw new IOException("Process exit " + exit);
         }

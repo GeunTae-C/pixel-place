@@ -15,8 +15,10 @@ record Phase18Environment(int schemaVersion, String sessionId, String owner, Str
         Phase18Plan.require(e.schemaVersion == 1 && e.sessionId.equals(plan.sessionId()) && e.owner.equals(plan.ownership().owner())
                 && plan.ownership().dbInstance().equals(e.mysqlUuid + "@" + BenchmarkJson.hash(file)), "frozen environment identity");
         Phase18Plan.require(Instant.parse(e.observedUtc).plusSeconds(86400).isAfter(Instant.now()), "environment evidence age");
-        Phase18Plan.require(e.mysqlGrowthBytes > 0 && e.mysqlGrowthBytes <= 2L*1024*1024*1024 && e.evidenceBytes > 0
-                && e.evidenceBytes <= 64L*1024*1024 && e.minimumFreeBytes >= 10L*1024*1024*1024, "fixture environment budget");
+        long storageReservation=Math.addExact(plan.bounds().databaseBytes(),plan.bounds().binlogBytes());
+        Phase18Plan.require(e.mysqlGrowthBytes > 0 && e.mysqlGrowthBytes <= (plan.phase().equals("A")?2L*1024*1024*1024:storageReservation)
+                && e.evidenceBytes > 0 && e.evidenceBytes <= (plan.phase().equals("A")?64L*1024*1024:Math.addExact(plan.bounds().outputBytes(),64L*1024*1024))
+                && e.minimumFreeBytes >= Math.max(10L*1024*1024*1024,plan.bounds().minimumFreeBytes()), "environment budget within frozen reservation");
         Phase18Plan.require(Set.of("create-new","precreated-empty").contains(e.catalogMode), "catalog creation mode");
         e.current(plan); return e;
     }

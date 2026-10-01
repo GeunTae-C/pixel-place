@@ -143,7 +143,7 @@ class Phase18PlanTest {
     }
 
     @Test void unavailableActionsRejectEvenBeforeReadingNonexistentPlan() {
-        for (String action : List.of("Run", "Analyze", "Close", "Pilot")) {
+        for (String action : List.of("Analyze", "Close", "Unknown")) {
             var e = assertThrows(IllegalArgumentException.class, () -> Phase18Main.main(new String[]{"--action", action, "--plan", "C:/missing.json"}));
             assertTrue(e.getMessage().startsWith("Action unavailable"));
         }
