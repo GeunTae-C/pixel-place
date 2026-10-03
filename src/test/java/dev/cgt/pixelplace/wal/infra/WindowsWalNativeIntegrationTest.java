@@ -9,7 +9,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** N17: 실제 production bridge/경로/Q/R 조합. 명시된 새 C: fixture만 소유하며 환경 부재는 실패 */
+/** N17: 실제 production bridge/경로/Q/R 조합. 명시된 새 로컬 NTFS fixture만 소유하며 환경 부재는 실패 */
 @Tag("windows-wal-integration")
 class WindowsWalNativeIntegrationTest {
     static Path root() throws Exception {

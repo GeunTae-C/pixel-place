@@ -81,12 +81,14 @@ final class Phase18Collector implements AutoCloseable {
             environment.budget(p);
             var state=executor.snapshot();var capture=measurement.lastCapture();boolean hasPending=pending.current().isPresent();
             var metadata=walMetadata(wal,policy.maxWalFiles());
-            long free=Math.min(Phase18Paths.usable(output),Phase18Paths.usable(Path.of(p.ownership().sessionRoot())));
+            long walFree=Phase18Paths.usable(wal);
+            long free=Math.min(walFree,Math.min(Phase18Paths.usable(output),Phase18Paths.usable(Path.of(p.ownership().sessionRoot()))));
             var decision=safety.evaluate(new Input(System.nanoTime(),measurement.phase().name(),((Number)row.get("heapUsed")).longValue(),state.outstanding(),
                     state.accepting(),readiness.isReady(),capture,hasPending,metadata,free,measurement.observerFailures()+(trace.complete()?0:1)));
             row.put("schemaVersion",1);row.put("planHash",loaded.planHash());row.put("clockId",Phase18Raw.clock());
             row.put("phase",measurement.phase().name());row.put("executor",state);row.put("commandActive",measurement.activeCommands());
             row.put("capture",capture);row.put("pending",hasPending);row.put("safety",decision);row.put("walMetadata",metadata);row.put("minimumDiskFreeBytes",free);
+            row.put("walPath",wal.toString());row.put("walVolumeFreeBytes",walFree);
             row.put("walCounts",measurement.walCounts());row.put("lastCycle",measurement.lastCycle());row.put("afterGc",afterGc());
             row.put("processIo",Phase18ProcessIo.sample());row.put("collectionNanos",System.nanoTime()-start);
             String line=Phase18Plan.JSON.writeValueAsString(row)+"\n";long size=line.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;

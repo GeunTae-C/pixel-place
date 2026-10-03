@@ -74,7 +74,8 @@ public final class Phase18BenchmarkMain {
         upstream.check();var storageBefore=fixture.storageSnapshot();
         BenchmarkJson.write(output.resolve("storage-before.json"),storageBefore);
         if(recovery){var list=new ArrayList<Long>();for(var id:initial.path("users"))list.add(id.longValue());users=List.copyOf(list);fixture.fixtureFiles();}
-        else{users=Phase18Fixtures.prepare(fixture,environment,p,output);Files.createDirectories(wal.getParent());}
+        // 중첩 WAL 폴더의 생성·각 부모 이름 동기화는 startup의 production storage 준비 경계가 소유
+        else users=Phase18Fixtures.prepare(fixture,environment,p,output);
         upstream.check();var keys=BenchmarkEnvironment.keys();var properties=BenchmarkEnvironment.properties(credentials,p.ownership().catalog(),wal,keys,c.runtime().measurement());
         properties.put("pixel-place.write.mode",c.runtime().mode());properties.put("pixel-place.write.group.max-batch-size",16);properties.put("pixel-place.write.group.max-outstanding",128);
         properties.put("pixel-place.write.group.queue-timeout","1s");properties.put("pixel-place.write.group.shutdown-grace","10s");properties.put("pixel-place.wal.max-segment-bytes",c.runtime().segmentBytes());

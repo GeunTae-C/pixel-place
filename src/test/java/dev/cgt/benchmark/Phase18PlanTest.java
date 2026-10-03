@@ -13,14 +13,14 @@ class Phase18PlanTest {
 
     static Phase18Plan valid() throws Exception {
         String repo = Path.of("").toAbsolutePath().toString();
-        String session = "phase18-contract-fixture", root = "E:/pixel-place-phase15/" + session;
+        String session = "phase18-contract-fixture", root = "F:/pixel-place-work/sessions/" + session;
         var inputs = Phase18Plan.inventory(Path.of(repo)).entrySet().stream()
                 .map(e -> new Phase18Plan.Frozen(e.getKey(), e.getValue())).toList();
         Path predecessor = Path.of(repo, "docs/review-protocol.md");
         return new Phase18Plan(2, "A", "A-1", "ready", session, Phase18Plan.head(Path.of(repo)),
                 new Phase18Plan.Frozen(predecessor.toString(), BenchmarkJson.hash(predecessor)), inputs,
                 new Phase18Plan.Ownership(repo, Path.of(System.getProperty("java.home"), "bin/java.exe").toString(), root,
-                        repo + "/build/agent-runs/" + session, root + "/build", root + "/cache", root + "/temp", root + "/jna", "", "", "", -1, System.getProperty("user.name")),
+                        repo + "/build/agent-runs/" + session, root + "/build", root + "/project-cache", root + "/temp", root + "/jna", "", "", "", -1, System.getProperty("user.name")),
                 new Phase18Plan.Bounds(200_000, 200_000, 200_000, 200_000, 10_000, 536_870_912,
                         1_073_741_824, 0, 0, 0, 134_217_728, 1, 86_400, 65536),
                 List.of(new Phase18Plan.Case("tools", "run01", 1, "diagnostic", "tools", "2026-09-30T00:00:00Z",

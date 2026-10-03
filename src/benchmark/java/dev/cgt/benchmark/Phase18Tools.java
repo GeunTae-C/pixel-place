@@ -263,7 +263,9 @@ public final class Phase18Tools {
         for (ClassLoader loader = Phase18Tools.class.getClassLoader(); loader != null; loader = loader.getParent())
             if (loader instanceof java.net.URLClassLoader urls) for (var u : urls.getURLs()) cp.add(Path.of(u.toURI()).toString());
         if (cp.isEmpty()) cp.addAll(Arrays.asList(System.getProperty("java.class.path").split(File.pathSeparator)));
-        var args = new ArrayList<>(List.of("-Xmx128m", "-Djava.io.tmpdir=" + evidence.getParent(), "-cp", String.join(File.pathSeparator, cp),
+        // 제어 fixture도 호출 JVM에 고정한 F temp/JNA를 계승. 증거 부모를 임시 공간으로 사용하지 않음
+        var args = new ArrayList<>(List.of("-Xmx128m", "-Djava.io.tmpdir=" + System.getProperty("java.io.tmpdir"),
+                "-Djna.tmpdir=" + System.getProperty("jna.tmpdir", System.getProperty("java.io.tmpdir")), "-cp", String.join(File.pathSeparator, cp),
                 Phase18FixtureChild.class.getName(), mode)); args.addAll(List.of(extra));
         Files.write(argfile, args.stream().map(Phase18Tools::quoteJavaArgument).toList(), StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
         return new Phase18Process.Command(List.of(java.toString(), "@" + argfile), Path.of("").toAbsolutePath(), evidence, 10_000, cleanupMillis, logLimit);

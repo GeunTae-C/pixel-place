@@ -111,7 +111,7 @@ tasks.register('mysqlIntegrationTest', Test) {
     // 두 task를 함께 요청한 경우 일반 테스트 이후 실행
     shouldRunAfter tasks.named('test')
     shouldRunAfter tasks.named('redisIntegrationTest')
-    // 이번 최종 회귀에만 사용자 지정 E: 인스턴스 연결 주입. 기본 profile과 catalog guard 보존
+    // 명시한 회귀에만 소유 3307 연결 주입. DB 저장 위치는 외부 runtime.ini 책임, 기본 profile·catalog guard 보존
     if (providers.gradleProperty('phase15MySqlRegression').isPresent()) {
         if (providers.gradleProperty('phase15MySqlRegression').get() != '3307') {
             throw new GradleException('Prepared phase15 MySQL port must be 3307')
@@ -128,7 +128,7 @@ if (providers.gradleProperty('phase15BuildRoot').isPresent()) {
 if (providers.gradleProperty('phase15TempRoot').isPresent()) {
     tasks.withType(Test).configureEach {
         systemProperty 'java.io.tmpdir', providers.gradleProperty('phase15TempRoot').get()
-        systemProperty 'jna.tmpdir', providers.gradleProperty('phase15TempRoot').get()
+        systemProperty 'jna.tmpdir', providers.gradleProperty('phase18JnaRoot').orElse(providers.gradleProperty('phase15TempRoot')).get()
     }
 }
 // 비상승 Windows 검증에서 운영자가 준비한 작은 symbolic-link 입력만 명시 재사용

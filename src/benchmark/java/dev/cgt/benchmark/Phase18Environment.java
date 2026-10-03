@@ -10,7 +10,7 @@ record Phase18Environment(int schemaVersion, String sessionId, String owner, Str
         long redisPid, String redisStartUtc, String redisRunId, String catalogMode, String precreatedOwner, long mysqlBaselineBytes,
         long mysqlGrowthBytes, long evidenceBytes, long minimumFreeBytes, String observedUtc) {
     static Phase18Environment read(Path file, Phase18Plan plan) throws Exception {
-        Phase18Paths.checked(file.toString()); Phase18Plan.require(Files.size(file) <= 32768, "environment bytes");
+        Phase18Paths.execution(file.toString()); Phase18Plan.require(Files.size(file) <= 32768, "environment bytes");
         var e = Phase18Plan.JSON.readValue(Files.readString(file), Phase18Environment.class);
         Phase18Plan.require(e.schemaVersion == 1 && e.sessionId.equals(plan.sessionId()) && e.owner.equals(plan.ownership().owner())
                 && plan.ownership().dbInstance().equals(e.mysqlUuid + "@" + BenchmarkJson.hash(file)), "frozen environment identity");
@@ -28,8 +28,8 @@ record Phase18Environment(int schemaVersion, String sessionId, String owner, Str
         process(mysqlPid,mysqlStartUtc,mysqlBinary);
         // Windows 서비스 계정 Redis는 ProcessHandle 접근 불가. 실제 연결의 INFO run_id/process_id를 live guard에서 exact 확인
         Phase18Plan.require(redisRunId.matches("[0-9a-f]{40}")&&redisPid>0,"Redis instance identity");
-        Path root=Phase18Paths.checked(mysqlRoot);
-        Phase18Plan.require(BenchmarkJson.hash(Phase18Paths.checked(mysqlBinary)).equals(mysqlBinaryHash)
+        Path root=Phase18Paths.execution(mysqlRoot);
+        Phase18Plan.require(BenchmarkJson.hash(Phase18Paths.execution(mysqlBinary)).equals(mysqlBinaryHash)
                 && BenchmarkJson.hash(root.resolve("runtime.ini")).equals(mysqlConfigHash), "MySQL binary/config changed");
         budget(plan);
     }
@@ -44,9 +44,13 @@ record Phase18Environment(int schemaVersion, String sessionId, String owner, Str
         Phase18Plan.require(BenchmarkPaths.bytes(Path.of(mysqlRoot))-mysqlBaselineBytes<=mysqlGrowthBytes,"MySQL growth bound");
         Phase18Plan.require(BenchmarkPaths.bytes(Path.of(plan.ownership().evidenceRoot()))<=evidenceBytes
                 && BenchmarkPaths.bytes(Path.of(plan.ownership().sessionRoot()))<=plan.bounds().buildBytes(),"evidence/build budget");
-        Path wal=Phase18Paths.checked(plan.ownership().wal());
-        Phase18Plan.require(wal.toString().substring(0,2).equalsIgnoreCase("C:")
-                && Files.getFileStore(Path.of(plan.ownership().repo())).type().equalsIgnoreCase("NTFS"),"supported C NTFS WAL");
-        Phase18Plan.require(!Files.exists(wal.getParent())||BenchmarkPaths.bytes(wal.getParent())<=plan.bounds().walBytes(),"WAL bound");
+        walBudget(plan);
+    }
+    /** 실제 WAL session 전체 사용량과 해당 volume 여유를 매번 확인. DB/build 볼륨 확인으로 대체 금지 */
+    static void walBudget(Phase18Plan plan) throws Exception {
+        Path root=Phase18Paths.walRoot(plan.ownership().wal(),Path.of(plan.ownership().repo()),plan.sessionId());
+        Phase18Plan.require(Phase18Paths.store(root).type().equalsIgnoreCase("NTFS"),"supported WAL NTFS");
+        Phase18Plan.require(Phase18Paths.usable(root)>=plan.bounds().minimumFreeBytes(),"live WAL free space");
+        Phase18Plan.require(!Files.exists(root)||BenchmarkPaths.bytes(root)<=plan.bounds().walBytes(),"WAL session bound");
     }
 }

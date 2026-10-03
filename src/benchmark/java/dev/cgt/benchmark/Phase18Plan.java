@@ -56,7 +56,7 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
 
     /** 읽기 전용 검사. 파일 생성·서비스 접속 없이 입력 전체와 해시 집합 대조 */
     public static Loaded read(Path path) throws Exception {
-        Phase18Paths.checked(path.toString());
+        Phase18Paths.execution(path.toString());
         require(Files.size(path) <= 1_048_576, "plan bytes");
         byte[] bytes;
         try (var in = Files.newInputStream(path)) { bytes = in.readNBytes(1_048_577); }
@@ -89,8 +89,9 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
         require(Set.of("draft", "ready").contains(state), "state"); id(sessionId);
         require(sourceBaseline.matches("[0-9a-f]{40}"), "baseline");
         require(!inputs.isEmpty() && inputs.size() <= 4096 && !cases.isEmpty() && cases.size() <= 100, "input/case count");
-        Path repo = Phase18Paths.checked(ownership.repo), root = Phase18Paths.checked(ownership.sessionRoot);
-        Path evidence = Phase18Paths.checked(ownership.evidenceRoot), java = Phase18Paths.checked(ownership.java);
+        Path repo = Phase18Paths.execution(ownership.repo), root = Phase18Paths.execution(ownership.sessionRoot);
+        Path evidence = Phase18Paths.execution(ownership.evidenceRoot), java = Phase18Paths.execution(ownership.java);
+        require(root.equals(Phase18Paths.execution("F:/pixel-place-work/sessions/" + sessionId)), "current F session root");
         require(Files.isDirectory(repo) && Files.isRegularFile(java) && java.getFileName().toString().equalsIgnoreCase("java.exe"), "repo/JDK");
         require(repo.equals(Path.of("").toAbsolutePath()), "actual repository");
         require(root.getFileName().toString().equals(sessionId) && evidence.getFileName().toString().equals(sessionId), "session ownership");
@@ -101,12 +102,19 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
         for (String p : List.of(ownership.build, ownership.cache, ownership.temp, ownership.jna)) {
             Path area = Phase18Paths.checked(p); Phase18Paths.child(area, root); areas.add(area);
         }
+        require(Path.of(ownership.build).equals(root.resolve("build")) && Path.of(ownership.cache).equals(root.resolve("project-cache"))
+                && Path.of(ownership.temp).equals(root.resolve("temp")) && Path.of(ownership.jna).equals(root.resolve("jna")), "current F work areas");
         areas.add(evidence); Phase18Paths.disjoint(areas);
         require(!ownership.owner.isBlank() && !ownership.owner.contains("TODO"), "owner");
         if (!ownership.wal.isEmpty()) {
             Path wal = Phase18Paths.checked(ownership.wal);
-            Phase18Paths.child(wal, repo.resolve("data").resolve(sessionId));
-            require(!wal.startsWith(repo.resolve("data/wal")), "original WAL");
+            Path walRoot = Phase18Paths.walRoot(ownership.wal, repo, sessionId);
+            // F 새 배치는 run별 파일군만 허용. session/build/evidence와 정리 경계 중첩 금지
+            if (wal.getRoot().toString().equalsIgnoreCase("F:\\"))
+                require(cases.stream().anyMatch(c -> wal.equals(walRoot.resolve(c.runId).resolve("pixel-place.wal"))), "F WAL run ownership");
+            Phase18Paths.disjoint(List.of(root, evidence, walRoot));
+            Phase18Paths.disjoint(List.of(root, repo.resolve("data/wal"), Path.of("F:/pixel-place-wal/runtime")));
+            require(Phase18Paths.store(wal).type().equalsIgnoreCase("NTFS"), "actual WAL NTFS volume");
         }
         if (!ownership.catalog.isEmpty()) {
             require(ownership.catalog.startsWith("pixel_place_bench_"), "catalog");
@@ -125,6 +133,8 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
         require(totalDisk <= 32L * 1024 * 1024 * 1024, "total disk reservation");
         for (Path p : List.of(root, evidence))
             require(Phase18Paths.usable(p) >= Math.addExact(bounds.minimumFreeBytes, totalDisk), "free space reservation");
+        if (!ownership.wal.isEmpty())
+            require(Phase18Paths.usable(Path.of(ownership.wal)) >= Math.addExact(bounds.minimumFreeBytes, totalDisk), "WAL volume free space reservation");
         var caseIds = new HashSet<String>(); var runIds = new HashSet<String>(); long seconds = 0, disk = 0;
         for (Case c : cases) {
             id(c.caseId); id(c.runId); require(caseIds.add(c.caseId) && runIds.add(c.runId), "duplicate case/run");
@@ -229,7 +239,7 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
             require(f.sha256.matches("[0-9a-f]{64}") && expected.put(f.path, f.sha256) == null, "input hash/duplicate");
         }
         require(actual.equals(expected), "frozen input mismatch");
-        Path previous = Phase18Paths.checked(predecessor.path);
+        Path previous = Phase18Paths.execution(predecessor.path);
         require(predecessor.sha256.matches("[0-9a-f]{64}") && BenchmarkJson.hash(previous).equals(predecessor.sha256), "predecessor receipt");
     }
 

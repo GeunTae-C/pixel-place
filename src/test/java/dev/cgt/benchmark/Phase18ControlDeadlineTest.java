@@ -27,10 +27,12 @@ class Phase18ControlDeadlineTest {
         Input(boolean fullFlow)throws Exception {
             var j=(ObjectNode)Phase18Plan.JSON.valueToTree(base);String session="phase18-boundary-"+UUID.randomUUID();
             j.put("sessionId",session);j.put("phase","A");j.put("stage","A-2");
-            var o=(ObjectNode)j.path("ownership");String large="E:/pixel-place-phase15/"+session;
-            root=Path.of(o.path("repo").asText(),"build/agent-runs/phase18-a4-rev-20261001-01/control-raw",session);
+            var o=(ObjectNode)j.path("ownership");String large="F:/pixel-place-work/sessions/"+session;
+            // 과거 실행 증거 아래에 새 raw를 섞지 않고 현재 검증 session에 귀속
+            String evidenceSession=System.getenv().getOrDefault("PIXEL_PLACE_WORK_SESSION","phase18-control-tests-"+UUID.randomUUID());
+            root=Path.of(o.path("repo").asText(),"build/agent-runs",evidenceSession,"control-raw",session);
             o.put("sessionRoot",large);o.put("evidenceRoot",root.toString());
-            for(String area:List.of("build","cache","temp","jna"))o.put(area,large+"/"+area);
+            for(String area:List.of("build","cache","temp","jna"))o.put(area,large+"/"+(area.equals("cache")?"project-cache":area));
             o.put("wal",Path.of(o.path("repo").asText(),"data",session,"trial/pixel-place.wal").toString());
             o.put("catalog","pixel_place_bench_boundary");o.put("dbInstance","unopened-test");o.put("redisIndex",2);
             ((ObjectNode)j.path("bounds")).put("totalSeconds",300);

@@ -8,6 +8,7 @@ public record Phase18ObservationPolicy(int schemaVersion, String planHash, Strin
         long maxHeapBytes, long maxBacklogRecords, int maxOutstanding, int maxWalFiles,
         int maxTraceEntries, long maxTraceBytes, long maxSampleBytes, String fixture) {
     static Phase18ObservationPolicy read(Path file, Phase18Plan.Loaded loaded) throws Exception {
+        Phase18Paths.execution(file.toString());
         Phase18Plan.require(Files.size(file) <= 8192, "observation policy bytes");
         Phase18ObservationPolicy value;
         try(var in=Files.newInputStream(file)){

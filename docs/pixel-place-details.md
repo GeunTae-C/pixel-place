@@ -822,7 +822,7 @@ GET /api/tiles/**
 
 ### Windows WAL 내용·이름 내구성 경계
 
-일반 runtime은 JNA core의 lazy Windows adapter를 공유 storage에 연결한다. 생성자·설정 검증에서는 native 로딩이나 파일 I/O를 하지 않는다. 확인한 지원 범위는 Windows 10 Pro 22H2 build 19045.6466, Oracle JDK 21.0.10 x64, cgt 비상승 계정과 C: 로컬 NTFS다. 다른 환경의 우연한 호출 성공이나 no-op fallback으로 지원 범위를 확대하지 않는다. 정확한 API 값·검증 사례는 현재 017-B 명령문과 코드·테스트, 실제 지원 증거는 작업기록을 기준으로 한다.
+일반 runtime은 JNA core의 lazy Windows adapter를 공유 storage에 연결한다. 생성자·설정 검증에서는 native 로딩이나 파일 I/O를 하지 않는다. 확인한 지원 범위는 Windows 10 Pro 22H2 build 19045.6466, Oracle JDK 21.0.10 x64, cgt 비상승 계정과 C: 로컬 NTFS 및 별도 native 검증을 통과한 F: 전용 WAL 경로다. 일반 앱은 application.yml의 `pixel-place.wal.active-file`로 F:/pixel-place-wal/runtime/pixel-place.wal을 사용하며 `PIXEL_PLACE_WAL_ACTIVE_FILE`로 명시 설정할 수 있다. 기존 DB와 필요한 전체 WAL 파일군을 대조·복사하고 새 JVM 복구를 확인한 뒤 전환하며, 빈 경로 지정으로 기존 WAL을 대체하지 않는다. 18단계 측정은 별도 F:/pixel-place-wal/phase18 session만 소유한다. 다른 환경의 우연한 호출 성공이나 no-op fallback으로 지원 범위를 확대하지 않는다. 정확한 API 값·검증 사례는 현재 017-B 명령문과 코드·테스트, F 지원 및 전환 증거는 작업기록/phase-18-progress.md를 기준으로 한다.
 
 `WindowsWalFileDurability`는 전체 경로 구성요소의 비-reparse directory, Win32 file identity와 로컬 NTFS volume을 확인한다. 존재하는 기준 부모를 동기화한 뒤, 없는 폴더는 하나씩 생성하고 그 이름을 담은 부모와 새 자식을 차례로 동기화한다. 부분 실패가 남긴 폴더를 자동 삭제하지 않으며 새 storage는 준비를 다시 수행한다. storage별 준비 증명은 이후에도 경로 identity/volume 확인을 거치고 복구 파일 내용 동기화를 대신하지 않는다.
 

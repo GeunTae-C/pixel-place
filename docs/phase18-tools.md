@@ -1,5 +1,7 @@
 # 18 실행 기반 계약 v2
 
+2026-10-03 C/F 실행 전환 이후의 3307 기동·종료·새 환경/계획 생성은 [현재 로컬 DB 실행](db-test-runtime.md)을 따른다. MySQL·Redis·WAL의 F 배치는 유지하고 캐시는 `F:/pixel-place-work/gradle-home`, session 작업 영역은 `F:/pixel-place-work/sessions/<sessionId>/{build,project-cache,temp,jna}`다. C 프로젝트와 `build/agent-runs` 증거는 이동하지 않는다. 일반 앱 WAL은 `F:/pixel-place-wal/runtime/pixel-place.wal`, 새 측정은 `F:/pixel-place-wal/phase18/<sessionId>/<runId>/pixel-place.wal`로 분리한다. 현재 실행에 E를 허용하지 않으며 F 준비 실패를 E로 fallback하지 않는다. 과거 실행별 환경 생성 스크립트와 PID/hash는 재사용하지 않는다.
+
 현재 제공 범위는 A-1 실행 기반, A-2의 제한 production fixture·HTTP/read/gzip/WS 발생기·동일 initial 복구, A-3 유한 관측·안전 중단·정식 분석기, A-4의 공식 PILOT과 후속 단일 trial 실행 연결이다. 기존 15/17 plan·guard의 소유권 의미를 유지한다.
 
 ## 실행 인터페이스
@@ -11,11 +13,13 @@ JDK21과 이미 컴파일한 benchmark runtime classpath로 직접 실행한다.
 
 ## 계획 schema
 
+새 실행의 sessionRoot는 위 F sessions의 해당 sessionId와 정확히 같아야 하며 build/project-cache/temp/jna 이름도 고정한다. Java runner·앱·발생기는 source/runtime receipt와 함께 실제 classpath가 해당 F build 또는 F Gradle cache인지, JVM temp/JNA·TEMP/TMP가 계획과 일치하는지 검사한다. 상속 경로 환경과 JVM 경로에 E가 섞이면 실행을 거부한다. 과거 계획/receipt를 읽는 Python 분석은 이 실행 gate와 별개이며 과거 bytes/해시를 변경하지 않는다.
+
 정확한 필드·자료형은 `Phase18Plan`의 불변 record가 정의한다. 모든 key 필수, 중첩 unknown/duplicate key·null·숫자 문자열·소수·지수형 수·NaN·무한대·overflow 거부. 속도는 정수 requests/second만 지원한다. byte/millisecond/second/ppm 단위는 필드 접미사에 고정한다. 리스트도 방어 복사한다.
 
 - 루트: `schemaVersion=2`, `phase=A|B|C|D`, `stage=A-1|A-2|A-3|A-4|B|C|D`, `state=draft|ready`, `sessionId`, `sourceBaseline`(40 hex), `predecessor`(path/sha256), `inputs`, `ownership`, `bounds`, `cases`. WS 예약 의미를 교정한 v2만 수용하며 이전 v1 계획·증거는 재해석하지 않는다. raw v1과 source/runtime receipt v1은 독립 version이다.
 - planHash는 자기참조 필드가 아니라 읽은 JSON 원본 bytes SHA-256이다. `Loaded.planHash`·Plan 출력·runtime/결과 receipt에 저장한다. source 입력 집합은 src/scripts의 비 ZIP·비 pyc 파일, build.gradle/settings.gradle/gradlew.bat/DDL/이 계약 문서다. 상대 path+SHA256 집합을 현재 파일의 추가·삭제까지 비교한다. 선행 인계는 별도 파일 hash다.
-- ownership: repo/JDK·session/evidence/build/cache/temp/JNA/WAL의 정확한 local absolute 경로. evidence는 repo/build/agent-runs/sessionId, sessionRoot는 repo 밖의 해당 sessionId. root 안의 build/cache/temp/JNA는 상호 비중첩. Windows reparse/별칭/상대 경로/ADS/예약 이름/끝 공백·점 거부. WAL은 repo/data/sessionId 아래만 후보로 허용하며 실제 지원 검증은 A-2 책임이다. dbInstance/catalog/redisIndex/owner는 실제 서비스 실행의 재확인 입력이다. tools에서는 WAL/DB/catalog 빈 문자열·Redis -1 사용.
+- ownership: repo/JDK·session/evidence/build/cache/temp/JNA/WAL의 정확한 local absolute 경로. evidence는 repo/build/agent-runs/sessionId, sessionRoot는 repo 밖의 해당 sessionId. root 안의 build/cache/temp/JNA는 상호 비중첩. Windows reparse/별칭/상대 경로/ADS/예약 이름/끝 공백·점 거부. WAL은 기존 C repo/data/sessionId 아래 또는 검증한 F:/pixel-place-wal/phase18/sessionId/runId/pixel-place.wal만 허용한다. F runId는 해당 plan case에 속해야 하며 앱 runtime·다른 session·build/evidence와 겹칠 수 없다. dbInstance/catalog/redisIndex/owner는 실제 서비스 실행의 재확인 입력이다. tools에서는 WAL/DB/catalog 빈 문자열·Redis -1 사용.
 - bounds: write/read terminal 각각 최대200,000, users200,000, WS event200,000, sampler10,000, 연결100. 메모리 최대512MiB와 입력별 보수적 예약 산식을 별도 검사한다. output/WAL/DB/binlog/build·볼륨 최소 여유·누적 시간·stream log 상한을 체크한다. 메모리 산식은 pilot 측정값이 아니며 A-2 실제 구조/A-4 실측으로 확인해야 한다.
 - case: 유일 caseId/runId·repeatIndex·role(pilot/target/diagnostic/soak)·kind(tools/prepare/write/read/mixed/soak)·plannedStartUtc, workload/runtime/observation. 반복은 서로 다른 ID의 명시 case로 표현하며 caseId도 중복 금지다.
 - workload: write/read rate/pattern, seed, WS 연결, 예열/측정초, 독립 in-flight, request/ready/control/drain millis, once/reuse·userPool·reuseMarginMillis, 입력 허용 ppm·판정 창·동시 구간, bootstrap 여부. write0/read만 허용하며 write target으로 승격하지 않는다. user reuse/UNKNOWN retire는 A-2 producer의 실제 pool에 연결된다.
@@ -23,6 +27,8 @@ JDK21과 이미 컴파일한 benchmark runtime classpath로 직접 실행한다.
 - observation: sample/maxAge/maxMissing/stopAck millis, required/auxiliary 지표 목록, fallback와 stopRule. 활성 수집기/안전 확인은 A-3다. draft는 서비스 현장 공백을 남길 수 있으나 VerifyTools는 ready/A-1/tools 1개만 허용한다. 미구현 실행은 ready 표시만으로 해제되지 않는다.
 
 계산은 checked arithmetic만 사용한다. write/read 각 phase의 계획량은 rate×phase seconds, bootstrap은 별도0/1이다. once users는 bootstrap을 포함한 전체 write 수, reuse는 bootstrap+pool이다. 표본은 전체 예정 시간과 timeout 예약을 sample 간격으로 나눈 상한이다. case별 보유량과 순차 전체 출력/시간을 모두 검사한다.
+
+WAL 용량은 소유 session 전체를 합산하고 여유 공간은 WAL이 실제 놓인 volume에서 검사한다. collector는 `walPath`·`walVolumeFreeBytes`를 남기며 안전 판정의 최소 여유에도 포함한다. F는 현재 MySQL·Redis와 같은 물리 장치를 공유하므로 host disk 관측은 공유 I/O이고 WAL 전용 비용이 아니다. F 결과를 기존 C WAL 결과와 같은 저장 조건의 반복으로 합산하지 않는다. 지원 범위 밖 경로는 기존 native 검증 없이 사용 가능으로 판정하지 않는다.
 
 `bounds.wsEvents`와 `Counts.wsEvents`는 전역 **고유 이벤트** 상한/예약이다. WS 연결이 있으면 예열+측정 write 수이며 연결 전 bootstrap을 제외한다. 연결0이면 WS 고유 이벤트/수신량/bitset 예약은0이다. `wsDeliveries=wsEvents×wsConnections`는 연결 전체의 예상 수신 횟수이며 고유 이벤트 상한과 비교하지 않는다. `wsBitsetBytes=ceil(wsEvents/64)×8×wsConnections`는 연결별 수신 집합의 word 정렬 예약이다. 공통 eventSeq→ordinal/canonical 필드 저장소는 고유 이벤트당128bytes, 연결별 관리256bytes와 bitset을 메모리에 예약한다. WS 출력은 고유 이벤트당256bytes+bitset+연결별 요약1024bytes이며 payload를 연결마다 복제하지 않는다. A-2의 메모리 예약은128MiB+read 처리 슬롯당512KiB+write 처리 슬롯당34KiB+terminal당512bytes+user당256bytes+WS 예약+sample당256bytes다. 128MiB는 작은 실제 client의 초기 heap 관측을 반영한 보수적 예약이며 heap 실측값 자체가 아니다. 출력은1MiB+terminal당2048bytes+WS 예약+sample당1024bytes다. 실제 primitive WS 배열/bitset과 제한 fixture heap은 A-2, A-4에서는 작은 PILOT의 실제 heap과 보유 구조를 확인하며 대표·SOAK peak 실측으로 확대하지 않는다. 과거 A-1 계획의 해시/예약값은 보존하며 재해석하지 않는다.
 
@@ -58,7 +64,7 @@ fixture protocol: READY→START→DISPATCH(write/read)→WAITING_MEASURE. STOP/C
 
 `VerifyTransport`는 ready/A-2/diagnostic 한 case, write/read 각각 최대64개·WS 최대4개·예열5초/측정10초 이내·기본32MiB segment를 허용한다. `Plan.executionAvailable`은 파일·구조상의 실행 후보이며 live 환경 확인을 대신하지 않는다. 일반 group16/outstanding128/queue1초/shutdown10초·flush1초와 실제 보안/180초 cooldown을 유지한다. initial/recovery는 bounds.totalSeconds의 단일 누적 기한을 공유하고 마지막 receipt 전에 실제 출력 한도도 확인한다. A-2 당시의 제한 action 이후 A-4에서 공식 `Pilot`과 후속 단일 trial `Run`을 제공한다. 실제 B/C/D·장기 부하는 별도 실행 요청과 새 현장 입력이 필요하다.
 
-환경 JSON의 정확한 필드는 `Phase18Environment` record다. plan의 dbInstance는 MySQL UUID와 환경 파일 SHA-256을 함께 고정한다. 현재 소유 MySQL3307의 PID/start/실행 파일·설정 hash/live SQL data path·durability, JDK21/계정/C: NTFS 비-reparse WAL, temp/JNA와 예산을 검사한다. SYSTEM Redis는 Java ProcessHandle 조회가 불가능한 환경이므로 사전 CIM PID/start 증거와 live INFO process_id/run_id로 연결하며 매 fixture guard에서 재대조한다. standalone·미사용2~15 index 검사는 기존 fixture guard를 사용한다. E18 기록은 실행 전 다시 수집하며 이전 PID나 빈 index를 현재 사실로 승계하지 않는다.
+환경 JSON의 정확한 필드는 `Phase18Environment` record다. plan의 dbInstance는 MySQL UUID와 환경 파일 SHA-256을 함께 고정한다. 현재 소유 MySQL3307의 PID/start/실행 파일·설정 hash/live SQL data path·durability, JDK21/계정/실제 NTFS 비-reparse WAL, temp/JNA와 예산을 검사한다. SYSTEM Redis는 Java ProcessHandle 조회가 불가능한 환경이므로 사전 CIM PID/start 증거와 live INFO process_id/run_id로 연결하며 매 fixture guard에서 재대조한다. standalone·미사용2~15 index 검사는 기존 fixture guard를 사용한다. E18 기록은 실행 전 다시 수집하며 이전 PID나 빈 index를 현재 사실로 승계하지 않는다.
 
 새 catalog는 live identity·허용 namespace·부재·생성 intent 이후 CREATE, 실제 선택 catalog·빈 상태 확인 이후 DDL로 진행한다. 현재 run 소유의 precreated-empty 채택도 같은 빈 상태 검사 대상이다. 각 DDL/user batch 직전에 live guard가 호출된다. recovery는 initial의 정상 종료·실제 process exit·동일 plan/input/runtime/DB/WAL/segment/mode/raw/hash를 검사하고 users/DDL/seed를 재생성하지 않는다. DB/WAL은 증거로 보존하며 Redis key를 지우지 않는다.
 
