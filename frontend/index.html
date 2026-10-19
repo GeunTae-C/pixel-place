@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="pixel-place 픽셀 보드 조회·이동·색상 선택 데모">
+  <title>pixel-place · 픽셀 보드</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" type="module"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>pixel-place</h1>
+      <span class="stage-label">보드 탐색</span>
+    </div>
+    <div class="top-notice">
+      <p id="connection-notice" role="status" aria-live="polite">보드 정보를 불러오는 중입니다.</p>
+      <button id="reload" type="button" aria-describedby="connection-notice">다시 불러오기</button>
+    </div>
+    <div class="connection" aria-label="연결 및 동기화 상태">
+      <span id="connection-state" class="connection-state">조회 준비</span>
+      <span class="muted">실시간 미연결</span>
+    </div>
+    <div class="login-area">
+      <span class="muted">로그인 전</span>
+      <button type="button" disabled title="로그인은 다음 구간에서 연결됩니다.">로그인</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="board-panel" aria-labelledby="board-title">
+      <div class="board-heading">
+        <div>
+          <h2 id="board-title">픽셀 보드</h2>
+          <p id="board-description" class="muted">서버 메타데이터를 기다리는 중입니다.</p>
+        </div>
+        <div class="zoom-controls" role="group" aria-label="보드 확대·축소">
+          <button id="zoom-out" type="button" disabled aria-label="축소">−</button>
+          <output id="zoom-level" aria-label="현재 배율">8배</output>
+          <button id="zoom-in" type="button" disabled aria-label="확대">＋</button>
+        </div>
+      </div>
+      <div class="canvas-viewport">
+        <canvas id="board" tabindex="0" role="img" aria-label="픽셀 보드. 방향키로 이동, 마우스 드래그로 이동, 클릭으로 좌표 선택" aria-describedby="movement-notice">
+          보드 표시에는 Canvas를 지원하는 브라우저가 필요합니다.
+        </canvas>
+      </div>
+      <div class="board-toolbar">
+        <p id="movement-notice" class="muted">드래그·방향키로 이동 · 휠로 확대 · 클릭으로 선택</p>
+        <div class="movement-controls" role="group" aria-label="보드 이동" aria-describedby="movement-notice">
+          <button type="button" data-move="left" disabled aria-label="왼쪽으로 이동">←</button>
+          <button type="button" data-move="up" disabled aria-label="위로 이동">↑</button>
+          <button type="button" data-move="down" disabled aria-label="아래로 이동">↓</button>
+          <button type="button" data-move="right" disabled aria-label="오른쪽으로 이동">→</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="tools-panel" aria-labelledby="tools-title">
+      <h2 id="tools-title">픽셀 배치</h2>
+      <section class="tool-section" aria-labelledby="palette-title">
+        <h3 id="palette-title">팔레트</h3>
+        <div id="palette" class="palette-placeholder" role="group" aria-label="배치 색상">보드 연결 후 표시</div>
+      </section>
+      <section class="tool-section" aria-labelledby="selection-title">
+        <h3 id="selection-title">선택 정보</h3>
+        <dl class="selection-info">
+          <div><dt>좌표</dt><dd id="selected-coordinate">선택 전</dd></div>
+          <div><dt>색상</dt><dd id="selected-color">선택 전</dd></div>
+        </dl>
+        <p class="muted">좌표와 색상을 골라도 아직 배치되지 않습니다. 정밀한 선택은 확대 후 진행하세요.</p>
+      </section>
+      <section class="tool-section placement-section" aria-label="배치 및 쿨다운">
+        <button class="place-button" type="button" disabled aria-describedby="placement-notice">픽셀 배치</button>
+        <p id="placement-notice" class="muted">배치 기능은 후속 구간에서 연결됩니다.</p>
+        <div class="cooldown">
+          <h3>쿨다운</h3>
+          <p class="muted">배치 기능 연결 후 표시</p>
+        </div>
+      </section>
+    </aside>
+  </main>
+</body>
+</html>
