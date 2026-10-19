@@ -121,15 +121,41 @@ tasks.register('mysqlIntegrationTest', Test) {
 }
 
 // 실제 앱과 별도 발생기 JVM만 포함. devtools·JUnit·Mockito 역의존 금지
-// 명시한 측정/검증 실행에서만 build output 이동. 기존 앱·회귀 DB 연결 설정은 유지
-if (providers.gradleProperty('phase15BuildRoot').isPresent()) {
-    layout.buildDirectory = file(providers.gradleProperty('phase15BuildRoot').get())
-}
-if (providers.gradleProperty('phase15TempRoot').isPresent()) {
-    tasks.withType(Test).configureEach {
-        systemProperty 'java.io.tmpdir', providers.gradleProperty('phase15TempRoot').get()
-        systemProperty 'jna.tmpdir', providers.gradleProperty('phase18JnaRoot').orElse(providers.gradleProperty('phase15TempRoot')).get()
+// 일반 개발 기본값과 기존 소유 session override 분리. 경로 누락 시 C fallback 금지
+def phase18WorkRoot = providers.environmentVariable('PIXEL_PLACE_WORK_ROOT').orElse('F:/pixel-place-work/projects/pixel-place').get()
+def phase18BuildRoot = providers.gradleProperty('phase15BuildRoot').orElse(phase18WorkRoot + '/build').get()
+def phase18TempRoot = providers.gradleProperty('phase15TempRoot').orElse(phase18WorkRoot + '/temp').get()
+def phase18JnaRoot = providers.gradleProperty('phase18JnaRoot').orElse(phase18WorkRoot + '/jna').get()
+def requireFOutput = { String value ->
+    if (!(value ==~ /(?i)^F:[\\\/]pixel-place-work[\\\/](sessions[\\\/][a-z0-9][a-z0-9-]{5,79}|projects[\\\/]pixel-place)[\\\/].+/)) {
+        throw new GradleException('Dedicated F work output required')
     }
+    def path = java.nio.file.Path.of(value)
+    if (path != path.normalize()) throw new GradleException('Normalized F output required')
+    path.each { part ->
+        if (part.toString() ==~ /(?i).*[. ]$|(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?/) throw new GradleException('Output path alias forbidden')
+    }
+    for (def node = path; node != null; node = node.parent) {
+        if (java.nio.file.Files.exists(node, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            def attrs = java.nio.file.Files.readAttributes(node, java.nio.file.attribute.BasicFileAttributes, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            if (attrs.isSymbolicLink() || attrs.isOther() || node.toRealPath() != node) throw new GradleException('Output reparse/alias forbidden')
+        }
+    }
+}
+if (System.getProperty('os.name').startsWith('Windows')) {
+    [phase18BuildRoot, phase18TempRoot, phase18JnaRoot].each { requireFOutput(it) }
+    layout.buildDirectory = file(phase18BuildRoot)
+    [phase18TempRoot, phase18JnaRoot].each { file(it).mkdirs() }
+    tasks.withType(Test).configureEach {
+        systemProperty 'java.io.tmpdir', phase18TempRoot
+        systemProperty 'jna.tmpdir', phase18JnaRoot
+    }
+    tasks.withType(JavaExec).configureEach {
+        systemProperty 'java.io.tmpdir', phase18TempRoot
+        systemProperty 'jna.tmpdir', phase18JnaRoot
+    }
+} else if (providers.gradleProperty('phase15BuildRoot').isPresent()) {
+    layout.buildDirectory = file(phase18BuildRoot)
 }
 // 비상승 Windows 검증에서 운영자가 준비한 작은 symbolic-link 입력만 명시 재사용
 if (providers.gradleProperty('phase17SymlinkFixture').isPresent()) {
@@ -216,6 +242,14 @@ tasks.register('phase18ToolsClasspath') {
         def target = providers.gradleProperty('phase18ClasspathFile').orNull
         if (target == null || !new File(target).isAbsolute()) throw new GradleException('Absolute phase18ClasspathFile required')
         def output = new File(target)
+        if (System.getProperty('os.name').startsWith('Windows')) {
+            def path = output.toPath()
+            def evidenceRoot = java.nio.file.Path.of('F:/pixel-place-work/evidence')
+            if (path != path.normalize() || !path.startsWith(evidenceRoot) || path == evidenceRoot) throw new GradleException('New classpath receipt requires F evidence root')
+            for (def node = path; node != null; node = node.parent) {
+                if (java.nio.file.Files.exists(node, java.nio.file.LinkOption.NOFOLLOW_LINKS) && node.toRealPath() != node) throw new GradleException('Classpath receipt reparse/alias forbidden')
+            }
+        }
         if (output.exists()) throw new GradleException('New classpath file required')
         def hash = { f -> java.security.MessageDigest.getInstance('SHA-256').digest(f.bytes).encodeHex().toString() }
         def sources = (fileTree('src').files + fileTree('scripts').files).findAll { !it.name.toLowerCase().endsWith('.zip') && !it.name.endsWith('.pyc') }

@@ -1,4 +1,4 @@
-# 현재 C/F 로컬 실행 (2026-10-03)
+# 현재 C 소스/F 생성물 로컬 실행 (2026-10-14)
 
 3307은 `F:/MySQL/test`, 설정은 `F:/MySQL/test/runtime.ini`다. 3306의 MYSQL84와 Redis 서비스는 기존 주소·포트·계정을 유지하며 외부 서비스 설정이 각각 F를 사용한다. 앱·Gradle JDBC 설정에서 데이터 디스크를 선택하지 않는다. 실행 파일/JDK는 C Program Files에 유지한다.
 
@@ -21,11 +21,19 @@ try {
 
 Start는 초기화/DDL 없이 기존 instance만 기동한다. UUID·runtime hash·loopback·내구성·data/redo/undo/tmp/binlog/log/imports 경로와 현재 launcher/server PID/start/parent/pid-file을 확인한다. SQL probe는 기존 `pixel_place_test`에 읽기 전용 접속한다. Stop은 같은 identity와 다른 DB client 부재를 다시 확인하고 SQL SHUTDOWN 뒤 launcher/child/listener 소멸까지 관측한다. 기동 후 실패하면 새로 남은 start intent/identity를 확인하고 동일 RunId의 Stop을 사용한다. start.json조차 없는 중간 장애는 자동 재시작/채택하지 말고 현장 process 확인이 필요하다. 강제 kill이나 새 PID 대입 금지.
 
-증거는 `build/agent-runs/$run`에 CREATE_NEW로 저장한다. 재검사는 `-Receipt verify02` 같은 새 이름을 사용한다. 같은 RunId로 다시 시작하지 않는다. MySQL 사용량과 증가량은 F root, 여유는 실제 사용하는 C/F 각각 검사한다. 기본 DB 증가 예약 2GiB·증거 64MiB·최소 여유 10GiB이며 Start 시 `-MySqlGrowthBytes`/`-EvidenceBytes`로 실행에 맞는 유한 예약을 정하고 이후에는 저장된 예약을 사용한다. 과거 15단계 누적 장부를 새 실행의 예산으로 승계하지 않는다.
+증거는 `F:/pixel-place-work/evidence/$run`에 CREATE_NEW로 저장한다. 재검사는 `-Receipt verify02` 같은 새 이름을 사용한다. 같은 RunId로 다시 시작하지 않는다. MySQL 사용량과 증가량은 F root, 여유는 실제 사용하는 C/F 각각 검사한다. 기본 DB 증가 예약 2GiB·증거 64MiB·최소 여유 10GiB이며 Start 시 `-MySqlGrowthBytes`/`-EvidenceBytes`로 실행에 맞는 유한 예약을 정하고 이후에는 저장된 예약을 사용한다. 과거 15단계 누적 장부를 새 실행의 예산으로 승계하지 않는다.
 
 Start/Verify/Environment는 기존 용량·최소 여유·서비스 검사를 계속 통과해야 한다. Stop은 용량/최소 여유 위반이나 3306·Redis identity 변경을 실패로 보존하면서, 소유권이 검증된 3307의 정상 종료를 시도한다. 잘못된 3307 identity는 계속 종료를 차단한다. Stop의 `Failures`에는 종료 전/후 검사, 소유권, SQL probe, 종료 관측, 증거 쓰기의 실패 지점과 원인을 구분한다. 위반이 하나라도 있으면 명령은 예외/nonzero이며 `MYSQL_TEST_STOP_OK`를 출력하지 않는다.
 
 Stop 결과의 `ProbeInvoked`는 검증 probe 호출 여부이며 SQL 전송 보장이 아니다. `SqlExit=0`은 probe 성공, null은 성공 미확인이다. `ShutdownObserved`는 launcher/child/listener 소멸 관측, `NormalShutdown`은 probe 성공과 소멸 관측을 모두 충족한 결과다. 종료 후 검사나 증거 쓰기 실패도 이 결과를 덮어쓰지 않는다. CREATE_NEW receipt를 쓸 수 없으면 `ReceiptWrite=failed`와 원래 실패·종료 상태를 `MYSQL_TEST_STOP_RESULT` 출력 및 예외의 `Data['StopResult']`로 남긴다. 명령 실패 시 이 결과로 실제 종료 여부를 먼저 확인한다. Stop 실패 경로 회귀는 `scripts/test-mysql-stop.ps1 -EvidenceRoot <새 증거 폴더>`로 실행하며, DB/서비스를 변경하지 않는 대역을 사용한다.
+
+## k6 전환에서 유지할 환경
+
+2026-10-10 수정 1은 문서 정책만 정리했다. 위 C/F 배치·MySQL 소유권·Redis0/1 보존·정상 종료 계약을 유지하며 현재 PID/서비스 상태를 새로 확인했다는 뜻이 아니다. k6의 HTTP/WS는 수정 2의 외부 부하용 앱 연결을 사용하고, 아래 Java Plan/Run 예시는 현 구현용이지 k6 실행 명령이 아니다. native k6에 JVM -Xmx/JNA 속성을 적용하지 않으며 실제 VU·프로세스 메모리/출력·temp를 유한 예약한다.
+
+동일 최종 source/config/runtime의 검증된 F build/classpath는 새 실행에서 실제 해시를 참조해 재사용할 수 있다. 아래의 '새 F build'는 입력이 달라 재빌드가 필요한 경우의 절차이며 매 trial의 필수 재컴파일을 뜻하지 않는다. 과거 plan/receipt를 수정하거나 사용한 run/session을 재사용하지 않는다. 현재 guard에 필요한 연결은 수정 2·3에서 검증한다.
+
+예산은 현재 C/F 여유·새 시험 최대 증가/임시 peak allowance·다음 예약·중단선을 CAP/D 상세문에 따라 기록한다. 알려진 과거 소비/미확정을 보존하되 소멸 임시 쓰기의 전량 복원을 필수로 하지 않는다. 기존 default 예약이나 서비스 Stop의 소유권 검사를 삭제하지 않는다. 실제 새 전환·장부/잠금 마감·서비스/부하는 수정 4의 범위이며 문서 변경으로 수행됐다고 주장하지 않는다.
 
 ## 새 18단계 환경·계획
 
@@ -35,7 +43,7 @@ Stop 결과의 `ProbeInvoked`는 검증 probe 호출 여부이며 SQL 전송 보
 .\scripts\mysql-test-instance.ps1 -Action Environment -RunId $run -RedisDatabase 2
 $python = 'C:/Users/cgt/AppData/Roaming/uv/tools/graphifyy/Scripts/python.exe'
 & $python .\scripts\new-phase18-plan.py --template <기존-workload-plan-절대경로> `
-  --environment "$PWD/build/agent-runs/$run/environment-environment.json" `
+  --environment "F:/pixel-place-work/evidence/$run/environment-environment.json" `
   --predecessor <현재-인계문서-절대경로> --run-id <새-trial-id> --label check `
   --policy-template <해당-workload-policy-절대경로>
 ```
@@ -45,12 +53,12 @@ $python = 'C:/Users/cgt/AppData/Roaming/uv/tools/graphifyy/Scripts/python.exe'
 ```powershell
 . .\scripts\pixel-place-work.ps1
 $work = Set-PixelPlaceWorkEnvironment $run
-# 새 F build에서 현재 source 컴파일. C evidence는 별도 보존
+# 새 F build에서 현재 source 컴파일. F evidence와 작업 영역 분리
 $buildArguments = $work.GradleArguments
 .\gradlew.bat phase18ToolsClasspath bootJar @buildArguments `
-  -Pphase18ClasspathFile="$PWD/build/agent-runs/$run/classpath.txt"
-.\scripts\measure-phase18.ps1 -Action Plan -PlanPath "$PWD/build/agent-runs/$run/plan-check.json" `
-  -Java "$env:JAVA_HOME/bin/java.exe" -ClasspathFile "$PWD/build/agent-runs/$run/classpath.txt"
+  -Pphase18ClasspathFile="F:/pixel-place-work/evidence/$run/classpath.txt"
+.\scripts\measure-phase18.ps1 -Action Plan -PlanPath "F:/pixel-place-work/evidence/$run/plan-check.json" `
+  -Java "$env:JAVA_HOME/bin/java.exe" -ClasspathFile "F:/pixel-place-work/evidence/$run/classpath.txt"
 ```
 
 환경·도구 guard 회귀는 `test-mysql-test-tools.ps1 -EvidenceRoot <새 증거 폴더>`와 `python scripts/test-new-phase18-plan.py`를 사용한다. 실제 MySQL 통합 회귀가 필요한 작업에서는 위 Start/Verify를 거친 뒤 기존 전용 `pixel_place_test` 초기화 가능·동시 사용 부재를 확인하고, 기존 비밀 주입과 `mysqlIntegrationTest -Pphase15MySqlRegression=3307`을 사용한다. 새 build/test XML·실행 exit를 남기고 finally에서 Stop한다. 이 task는 테스트 스키마를 변경하므로 이번 read-only 경로 검증에서는 실행하지 않았다. 일반 `test`와 Redis DB1 회귀에는 접속 변경이 없다.
@@ -76,4 +84,17 @@ $buildArguments = $work.GradleArguments
 
 일반 앱은 같은 새 build의 `build/libs/pixel-place-0.0.1-SNAPSHOT.jar`를 `& $work.Java "-Djava.io.tmpdir=$($work.Temp)" "-Djna.tmpdir=$($work.Jna)" -jar <F의 실제 새 JAR>`로 실행한다. 비밀정보는 기존 helper로 해당 프로세스에만 주입한다. `application.yml`의 production DB3306·F runtime WAL·group 정책을 유지한다. 같은 DB/WAL의 다른 앱/writer 부재를 확인한 뒤 실행하고 Ctrl+C/Spring 정상 종료 완료를 확인한다. 검증에서는 `--server.address=127.0.0.1 --server.port=0 --spring.data.redis.database=<현재 미사용·소유 확인한 2~15>`만 프로세스에 지정한다. Redis0/1·영구 설정·사용자 데이터에 검증 쓰기를 하지 않는다.
 
-MySQL 종료는 환경·예산 위반을 먼저 실패로 기록한 뒤 검증된 대상의 SQL 종료를 시도한다. 종료 probe의 경로 환경은 알려진 C/F로 격리하며, 종료 성공으로 원래 환경 위반을 성공 처리하지 않는다. 실행·검토·복구 자료는 C의 새 session 증거 폴더에 보존한다.
+MySQL 종료는 환경·예산 위반을 먼저 실패로 기록한 뒤 검증된 대상의 SQL 종료를 시도한다. 종료 probe의 경로 환경은 알려진 C/F로 격리하며, 종료 성공으로 원래 환경 위반을 성공 처리하지 않는다. 실행·검토·복구 자료는 F의 새 session 증거 폴더에 보존한다.
+
+
+TestDatabaseProbe 실패 출력은 고정된 stage와 예외 type만 기록한다. before_db/after_db의 pid_lookup, process_alive, start_lookup, pid_file, start_match 및 db_connect/variables/paths/clients, sql_shutdown을 구분하며 예외 메시지·인증/접속 비밀은 출력하지 않는다. PID/start·DB UUID/경로/내구성·다른 client 부재 검사는 그대로 유지한다. 준비 probe/인계 실패 뒤 MySQL만 살아 있으면 controller가 확인한 정상 Stop 전용 소유 증거를 사용하며, Stop 자체의 UUID/hash/경로/PID/start 재검증과 SQL 정상 종료 조건은 완화하지 않는다.
+
+DB probe 실행은 기존 Phase17C native collector로 양쪽 stream 완료와 실제 Process.ExitCode를 함께 확보하고, 같은 prefix의 .exit.json에 ActualExit·StreamsCompleted를 남긴다. Start-Process의 사후 ExitCode 조회는 사용하지 않는다. probe 종료코드가 없었던 과거 receipt를 이 변경으로 소급 성공 처리하지 않는다.
+
+## 일반 개발 기본값과 과거 자료 읽기
+
+`gradlew.bat --offline --no-daemon build` 및 `test`/`bootJar`는 별도 경로 인수가 없어도 `F:/pixel-place-work/projects/pixel-place/{build,project-cache,temp,jna}`와 `F:/pixel-place-work/gradle-home`을 사용한다. `Set-PixelPlaceWorkEnvironment <새 session>`을 먼저 호출하면 기존 session별 F override를 계속 사용한다. wrapper와 공통 helper는 현재 프로세스/자식만 설정한다. 일반 개발 출력과 소유 session 출력은 겹치지 않는다.
+
+IDE가 wrapper 배치 파일을 거치지 않는 Tooling API로 Gradle을 시작하면 IDE의 Gradle user home, project cache, Gradle JVM temp/JNA 및 직접 앱 실행의 temp/JNA를 별도로 F로 지정해야 한다. build.gradle의 F buildDirectory만으로 IDE 시작 전 캐시/임시 경로까지 설정됐다고 해석하지 않는다. 전역/IDE 영구 설정을 이번 작업에서 자동 변경하지 않는다.
+
+과거 `build/agent-runs` 절대 경로의 원문은 그대로 보존하며 `scripts/pixel_place_paths.py --resolve <옛 절대 경로>` 또는 `Resolve-PixelPlaceHistoricalPath`로 검증된 새 archive 위치를 찾는다. archive Plan은 당시 기록이며 현재 실행 Plan으로 승인하지 않는다. 새 실행의 Plan/receipt/output은 F evidence 소유 경계를 다시 검사한다. 신규 증거와 MySQL/WAL/build는 같은 F의 동시 추가 peak로 합산한다.

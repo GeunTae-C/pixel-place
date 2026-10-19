@@ -13,21 +13,32 @@ import java.util.List;
 public final class ServiceJwtTokens {
     private final AuthProperties properties;
     private final Clock clock;
+    private final Duration accessTtl;
     private final JwtEncoder encoder;
     private final JwtDecoder accessDecoder;
     private final JwtDecoder handoffDecoder;
 
     public ServiceJwtTokens(AuthProperties properties, Clock clock) {
+        this(properties, clock, properties.accessTokenTtl());
+    }
+
+    /** 명시적 benchmark 조립에서만 사용하는 고정 6시간 경계. production 생성자·설정은 15분 유지 */
+    public static ServiceJwtTokens benchmarkAccess(AuthProperties properties, Clock clock) {
+        return new ServiceJwtTokens(properties, clock, Duration.ofHours(6));
+    }
+
+    private ServiceJwtTokens(AuthProperties properties, Clock clock, Duration accessTtl) {
+        this.accessTtl = accessTtl;
         this.properties = properties;
         this.clock = clock;
         this.encoder = NimbusJwtEncoder.withSecretKey(properties.jwtSigningKey()).algorithm(MacAlgorithm.HS256).build();
-        accessDecoder = decoder(properties.accessAudience(), properties.accessTokenUse(), properties.accessTokenTtl(), false);
+        accessDecoder = decoder(properties.accessAudience(), properties.accessTokenUse(), accessTtl, false);
         handoffDecoder = decoder(properties.handoffAudience(), properties.handoffTokenUse(), properties.handoffTokenTtl(), true);
     }
 
     /** 내부 users.id만 subject로 발급, 외부 식별자나 caller 지정 audience 사용 금지 */
     public Jwt issueAccess(long userId) {
-        return issue(userId, properties.accessAudience(), properties.accessTokenUse(), properties.accessTokenTtl());
+        return issue(userId, properties.accessAudience(), properties.accessTokenUse(), accessTtl);
     }
 
     /** 교환 전용 목적·수명 고정. Access 인증에서 수용하면 안 됨 */
@@ -37,7 +48,7 @@ public final class ServiceJwtTokens {
 
     public JwtDecoder accessDecoder() { return accessDecoder; }
     public JwtDecoder handoffDecoder() { return handoffDecoder; }
-    public long expiresInSeconds() { return properties.expiresInSeconds(); }
+    public long expiresInSeconds() { return accessTtl.toSeconds(); }
 
     private Jwt issue(long userId, String audience, String use, Duration ttl) {
         if (userId <= 0) {

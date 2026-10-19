@@ -32,6 +32,17 @@ public final class BenchmarkUsers {
         }
         return null;
     }
+    /** CAP 원래 예정 due의 자격으로 논리 사용자 선택. 늦은 dispatch에서 보충 송신 금지 */
+    synchronized Assignment acquire(int ordinal,long due) {
+        java.util.Objects.checkIndex(ordinal,busy.length);
+        if(busy[ordinal]||retired[ordinal]||(attempts[ordinal]>0&&due<availableAt[ordinal]))return null;
+        busy[ordinal]=true;return new Assignment(ordinal,++attempts[ordinal]);
+    }
+    /** 실제 전송 미개시가 dispatch gate에서 확정된 예약만 반환 */
+    synchronized void cancel(Assignment user) {
+        BenchmarkSpec.require(busy[user.ordinal]&&attempts[user.ordinal]==user.attemptOrdinal,"pool cancel");
+        busy[user.ordinal]=false;attempts[user.ordinal]--;
+    }
     public synchronized void complete(Assignment user, long now, boolean uncertain) {
         BenchmarkSpec.require(busy[user.ordinal], "pool completion");
         busy[user.ordinal] = false;

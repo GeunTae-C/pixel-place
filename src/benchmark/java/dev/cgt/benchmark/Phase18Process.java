@@ -39,10 +39,20 @@ public final class Phase18Process {
                 "PIXEL_PLACE_BENCH_COOKIE_KEY", keys.cookie()), control);
     }
 
+    /** 외부 발생기의 제어 채널을 관측. 실패 직후 bridge를 중단하고 기존 소유/exit/저장 경계 유지 */
+    static Receipt runExternalWithKeys(Command command, BenchmarkEnvironment.Keys keys, Owned.Check check, Owned.Check stop) throws Exception {
+        return run(command, child->{}, BenchmarkJson::write, Map.of("PIXEL_PLACE_BENCH_JWT_KEY",keys.jwt(),
+                "PIXEL_PLACE_BENCH_COOKIE_KEY",keys.cookie()),null,check,stop);
+    }
+
     static synchronized Receipt run(Command command, Body body, Sink sink) throws Exception {
         return run(command, body, sink, Map.of(), null);
     }
     static synchronized Receipt run(Command command, Body body, Sink sink, Map<String, String> environment, Phase18ParentControl control) throws Exception {
+        return run(command,body,sink,environment,control,()->{},()->{});
+    }
+    private static synchronized Receipt run(Command command, Body body, Sink sink, Map<String,String> environment,
+            Phase18ParentControl control, Owned.Check externalCheck, Owned.Check externalStop) throws Exception {
         validate(command);
         Files.createDirectory(command.evidence);
         Owned child = new Owned(command, sink, environment);
@@ -58,12 +68,14 @@ public final class Phase18Process {
                     "cwd", command.cwd.toString(), "observationMillis", command.observationMillis,
                     "cleanupMillis", command.cleanupMillis, "logLimit", command.logLimit,
                     "executionDeadlineEpochMillis", command.execution == null ? 0 : command.execution.expiresEpochMillis()));
+            externalCheck.run();
             if (control == null) child.start();
             else control.start(child, () -> { child.start(); return null; });
             body.run(child);
-            child.awaitExit(command.observationMillis, control == null ? () -> { } : control::check);
+            child.awaitExit(command.observationMillis, ()->{externalCheck.run();if(control!=null)control.check();});
         } catch (Exception | Error problem) {
             failure = problem; interrupted = problem instanceof InterruptedException;
+            try { externalStop.run(); } catch (Exception | Error secondary) { failure=preserve(failure,secondary); }
             if (control == null && child.started() && child.isAlive()) {
                 // 최초 실패 직후 중단 통보. 진단 저장 지연 때문에 신규 실행 차단을 미루지 않음
                 closeRequested = true; long requested = System.nanoTime();

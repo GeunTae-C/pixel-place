@@ -30,7 +30,7 @@ class Phase18ControlDeadlineTest {
             var o=(ObjectNode)j.path("ownership");String large="F:/pixel-place-work/sessions/"+session;
             // 과거 실행 증거 아래에 새 raw를 섞지 않고 현재 검증 session에 귀속
             String evidenceSession=System.getenv().getOrDefault("PIXEL_PLACE_WORK_SESSION","phase18-control-tests-"+UUID.randomUUID());
-            root=Path.of(o.path("repo").asText(),"build/agent-runs",evidenceSession,"control-raw",session);
+            root=Path.of("F:/pixel-place-work/evidence",evidenceSession,"control-raw",session);
             o.put("sessionRoot",large);o.put("evidenceRoot",root.toString());
             for(String area:List.of("build","cache","temp","jna"))o.put(area,large+"/"+(area.equals("cache")?"project-cache":area));
             o.put("wal",Path.of(o.path("repo").asText(),"data",session,"trial/pixel-place.wal").toString());

@@ -43,14 +43,23 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
             long wsConnections, long warmupSeconds, long measurementSeconds, long writeInFlight,
             long readInFlight, long requestMillis, long readyMillis, long controlMillis, long drainMillis,
             String userMode, long userPool, long reuseMarginMillis, long inputTolerancePpm,
-            long inputWindowSeconds, long simultaneousSeconds, boolean bootstrap) { }
+            long inputWindowSeconds, long simultaneousSeconds, boolean bootstrap, Phase18Cap.Schedule schedule) {
+        public Workload(long writeRate,long readRate,String writePattern,String readPattern,long seed,long wsConnections,
+                long warmupSeconds,long measurementSeconds,long writeInFlight,long readInFlight,long requestMillis,long readyMillis,
+                long controlMillis,long drainMillis,String userMode,long userPool,long reuseMarginMillis,long inputTolerancePpm,
+                long inputWindowSeconds,long simultaneousSeconds,boolean bootstrap) {
+            this(writeRate,readRate,writePattern,readPattern,seed,wsConnections,warmupSeconds,measurementSeconds,writeInFlight,
+                readInFlight,requestMillis,readyMillis,controlMillis,drainMillis,userMode,userPool,reuseMarginMillis,inputTolerancePpm,
+                inputWindowSeconds,simultaneousSeconds,bootstrap,Phase18Cap.Schedule.legacy());
+        }
+    }
     public record Case(String caseId, String runId, int repeatIndex, String role, String kind,
             String plannedStartUtc, Workload workload, Runtime runtime, Observation observation) { }
     public record Counts(long warmupWrites, long measurementWrites, long warmupReads, long measurementReads,
-            long bootstrap, long users, long samples, long wsEvents, long wsDeliveries, long wsBitsetBytes,
+            long bootstrap, long initialReads, long users, long samples, long wsEvents, long wsDeliveries, long wsBitsetBytes,
             long memoryBytes, long diskBytes, long seconds) {
         public long writes() { return Math.addExact(bootstrap, Math.addExact(warmupWrites, measurementWrites)); }
-        public long reads() { return Math.addExact(warmupReads, measurementReads); }
+        public long reads() { return Math.addExact(initialReads,Math.addExact(warmupReads, measurementReads)); }
     }
     public record Loaded(Phase18Plan plan, String planHash) { }
 
@@ -65,6 +74,10 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
         try {
             JsonNode tree = JSON.readTree(bytes);
             exactNumbers(tree);
+            if(tree.path("schemaVersion").asInt()==2)for(JsonNode item:tree.path("cases")) {
+                var workload=(tools.jackson.databind.node.ObjectNode)item.path("workload");
+                if(!workload.has("schedule"))workload.set("schedule",JSON.valueToTree(Phase18Cap.Schedule.legacy()));
+            }
             plan = JSON.treeToValue(tree, Phase18Plan.class);
         } catch (RuntimeException invalid) {
             // parser 원문/비밀 입력을 오류 로그에 복제하지 않음
@@ -83,9 +96,9 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
 
     /** 40,000을 넘는 18 입력도 유한한 자체 상한 안에서만 수용 */
     public void validate() throws Exception {
-        require(schemaVersion == VERSION && Set.of("A", "B", "C", "D").contains(phase), "version/phase");
-        require(Set.of("A-1", "A-2", "A-3", "A-4", "B", "C", "D").contains(stage), "stage");
-        require(stage.startsWith(phase), "phase/stage");
+        require(schemaVersion == VERSION && Set.of("A", "B", "C", "D").contains(phase) || Phase18Cap.enabled(this), "version/phase");
+        require(Set.of("A-1", "A-2", "A-3", "A-4", "B", "C", "D", "CAP-0", "CAP-1", "CAP-2", "CAP-3").contains(stage), "stage");
+        require(stage.startsWith(phase)&&stage.startsWith("CAP-")==Phase18Cap.enabled(this), "phase/stage");
         require(Set.of("draft", "ready").contains(state), "state"); id(sessionId);
         require(sourceBaseline.matches("[0-9a-f]{40}"), "baseline");
         require(!inputs.isEmpty() && inputs.size() <= 4096 && !cases.isEmpty() && cases.size() <= 100, "input/case count");
@@ -96,7 +109,7 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
         require(repo.equals(Path.of("").toAbsolutePath()), "actual repository");
         require(root.getFileName().toString().equals(sessionId) && evidence.getFileName().toString().equals(sessionId), "session ownership");
         require(sessionId.startsWith("phase18-"), "session prefix");
-        Phase18Paths.child(evidence, repo.resolve("build/agent-runs"));
+        require(evidence.equals(Phase18Paths.execution("F:/pixel-place-work/evidence/" + sessionId)), "current F evidence ownership");
         require(!root.startsWith(repo) && !repo.startsWith(root), "separate working output root");
         var areas = new ArrayList<Path>();
         for (String p : List.of(ownership.build, ownership.cache, ownership.temp, ownership.jna)) {
@@ -125,9 +138,24 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
                 bounds.memoryBytes, bounds.outputBytes, bounds.buildBytes, bounds.minimumFreeBytes, bounds.totalSeconds, bounds.logBytesPerStream})
             require(n > 0, "positive budget");
         require(bounds.walBytes >= 0 && bounds.databaseBytes >= 0 && bounds.binlogBytes >= 0, "storage budget");
-        require(bounds.writeTerminals <= TERMINALS && bounds.readTerminals <= TERMINALS && bounds.users <= TERMINALS
-                && bounds.wsEvents <= WS_EVENTS && bounds.samples <= SAMPLES, "allocation ceiling");
+        require(bounds.writeTerminals <= (Phase18Cap1.enabled(this)?Phase18Cap1.MAX_TERMINALS:TERMINALS) && bounds.readTerminals <= TERMINALS && bounds.users <= TERMINALS
+                && bounds.wsEvents <= (Phase18Cap1.enabled(this)?Phase18Cap1.MAX_EVENTS:WS_EVENTS) && bounds.samples <= (Phase18Cap1.enabled(this)?Phase18Cap1.limit(SAMPLES,Phase18Cap1.output(this).samples()):Phase18K6Session.expandedS2(this)?50_000:SAMPLES), "allocation ceiling");
+        if(Phase18K6Session.expandedS2(this)){
+            var usage=Phase18K6Session.s2Output(this);
+            require(bounds.samples==Phase18K6Session.expandLimit(SAMPLES,usage.samples())
+                    &&bounds.outputBytes==Phase18K6Session.expandLimit(268435456,usage.runBytes()),"expanded S2 plan limits");
+        }
         require(bounds.memoryBytes <= 536_870_912L && bounds.totalSeconds <= 86_400 && bounds.logBytesPerStream <= 1_048_576, "hard ceiling");
+        if(Phase18Cap1.enabled(this)){
+            // 자식 hard limit의 합을 실제 추가 점유로 대입하지 않는다. 각 hard guard는 유지한다.
+            Path walArea=ownership.wal.isEmpty()?null:Phase18Paths.walRoot(ownership.wal,repo,sessionId);
+            // Plan에는 DB baseline이 없으므로 DB U는 보수적으로 전량 예약. live Environment는 실제 증가분을 뺀다.
+            long remaining=Phase18Cap1.remainingPhysicalF(this,Files.exists(root)?BenchmarkPaths.bytes(root):0,0,
+                walArea!=null&&Files.exists(walArea)?BenchmarkPaths.bytes(walArea):0,Files.exists(evidence)?BenchmarkPaths.bytes(evidence):0);
+            require(Phase18Paths.usable(evidence)>=Math.addExact(bounds.minimumFreeBytes,remaining),"CAP1 shared F physical peak");
+            require(Phase18Paths.usable(root)>=Math.addExact(bounds.minimumFreeBytes,remaining),"CAP1 F physical peak");
+            if(!ownership.wal.isEmpty())require(Phase18Paths.usable(Path.of(ownership.wal))>=Math.addExact(bounds.minimumFreeBytes,remaining),"CAP1 WAL physical peak");
+        }else{
         long totalDisk = Math.addExact(bounds.outputBytes, Math.addExact(bounds.buildBytes,
                 Math.addExact(bounds.walBytes, Math.addExact(bounds.databaseBytes, bounds.binlogBytes))));
         require(totalDisk <= 32L * 1024 * 1024 * 1024, "total disk reservation");
@@ -135,11 +163,12 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
             require(Phase18Paths.usable(p) >= Math.addExact(bounds.minimumFreeBytes, totalDisk), "free space reservation");
         if (!ownership.wal.isEmpty())
             require(Phase18Paths.usable(Path.of(ownership.wal)) >= Math.addExact(bounds.minimumFreeBytes, totalDisk), "WAL volume free space reservation");
+        }
         var caseIds = new HashSet<String>(); var runIds = new HashSet<String>(); long seconds = 0, disk = 0;
         for (Case c : cases) {
             id(c.caseId); id(c.runId); require(caseIds.add(c.caseId) && runIds.add(c.runId), "duplicate case/run");
             require(c.repeatIndex > 0 && c.repeatIndex <= 100, "repeat");
-            require(Set.of("pilot", "target", "diagnostic", "soak").contains(c.role), "role");
+            require((Phase18Cap.enabled(this)?Set.of("cap-smoke-s1","cap-smoke-s2","cap-target","cap-diagnostic-ab"):Set.of("pilot", "target", "diagnostic", "soak")).contains(c.role), "role");
             require(Set.of("tools", "prepare", "write", "read", "mixed", "soak").contains(c.kind), "kind");
             if (state.equals("ready") && !c.kind.equals("tools"))
                 require(!ownership.wal.isEmpty() && !ownership.dbInstance.isBlank() && !ownership.catalog.isEmpty()
@@ -149,7 +178,7 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
             require(w.writeRate >= 0 && w.readRate >= 0 && w.writeRate <= 10_000 && w.readRate <= 10_000, "rate");
             require(w.warmupSeconds >= 0 && w.measurementSeconds > 0, "duration");
             require(Set.of("same-pixel", "spread-tiles").contains(w.writePattern) && Set.of("hot", "spread").contains(w.readPattern), "pattern");
-            require(w.wsConnections >= 0 && w.wsConnections <= 100, "WS connections");
+            require(w.wsConnections >= 0 && w.wsConnections <= (Phase18Cap.enabled(this)?3200:100), "WS connections");
             require(w.writeInFlight >= 0 && w.writeInFlight <= 128 && w.readInFlight >= 0 && w.readInFlight <= 128,
                     "in flight ceiling");
             require((w.writeRate == 0 || w.writeInFlight > 0) && (w.readRate == 0 || w.readInFlight > 0), "dispatch capacity");
@@ -161,7 +190,7 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
                     && w.simultaneousSeconds <= w.measurementSeconds, "input fulfillment");
             require(!c.kind.equals("read") || w.writeRate == 0 && w.readRate > 0 && !w.bootstrap, "read only");
             require(!c.kind.equals("write") || w.writeRate > 0 && w.readRate == 0, "write case");
-            require(!c.kind.equals("mixed") || w.writeRate > 0 && w.readRate > 0 && w.simultaneousSeconds > 0, "mixed interval");
+            require(Phase18Cap.enabled(this) || !c.kind.equals("mixed") || w.writeRate > 0 && w.readRate > 0 && w.simultaneousSeconds > 0, "mixed interval");
             require(!c.role.equals("target") || w.writeRate > 0, "write target");
             Runtime r = c.runtime;
             require(Set.of("group", "single").contains(r.mode) && r.batchMax == 16 && r.outstandingMax == 128
@@ -176,6 +205,8 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
             for (String text : List.of(o.fallback, o.stopRule, ownership.dbInstance))
                 require(!state.equals("ready") || !text.toUpperCase(Locale.ROOT).contains("TODO"), "ready placeholder");
             require(new HashSet<>(o.required).size() == o.required.size() && Collections.disjoint(o.required, o.auxiliary), "metric names");
+            require(Phase18Cap.enabled(this)||w.schedule.equals(Phase18Cap.Schedule.legacy()),"legacy schedule invariant");
+            if(Phase18Cap.enabled(this))Phase18Cap.validate(this,c);
             Counts n = counts(c);
             require(n.writes() <= bounds.writeTerminals && n.reads() <= bounds.readTerminals && n.users <= bounds.users
                     && n.samples <= bounds.samples && n.wsEvents <= bounds.wsEvents && n.memoryBytes <= bounds.memoryBytes, "case allocation budget");
@@ -188,16 +219,26 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
     /** phase별 ordinal 수를 산식으로 보유. 수십만 payload 선할당 없음 */
     public Counts counts(Case c) {
         Workload w = c.workload; long seconds = Math.addExact(w.warmupSeconds, w.measurementSeconds);
-        long ww = Math.multiplyExact(w.writeRate, w.warmupSeconds), mw = Math.multiplyExact(w.writeRate, w.measurementSeconds);
-        long wr = Math.multiplyExact(w.readRate, w.warmupSeconds), mr = Math.multiplyExact(w.readRate, w.measurementSeconds);
+        long ww=Phase18Cap.count(w,"write","warmup"), mw=Phase18Cap.count(w,"write","measurement");
+        long wr=Phase18Cap.count(w,"read","warmup"), mr=Phase18Cap.count(w,"read","measurement");
         long writes = Math.addExact(w.bootstrap ? 1 : 0, Math.addExact(ww, mw));
-        long reads = Math.addExact(wr, mr), terminals = Math.addExact(writes, reads);
+        long initialReads=Phase18Cap.count(w,"read","initial-read");
+        long reads = Math.addExact(initialReads,Math.addExact(wr, mr)), terminals = Math.addExact(writes, reads);
         long users = w.userMode.equals("once") ? writes : Math.addExact(w.bootstrap ? 1 : 0, w.userPool);
         require(writes == 0 || users > 0, "users required");
         long overheadMillis = Math.addExact(Math.multiplyExact(3, w.drainMillis), Math.addExact(w.readyMillis,
                 Math.addExact(w.controlMillis, c.observation.stopAckMillis)));
-        long durationMillis = Math.addExact(Math.multiplyExact(seconds, 1000), overheadMillis);
-        long samples = Math.addExact(2, durationMillis / c.observation.sampleMillis);
+        if(Phase18Cap.enabled(this)){
+            // bootstrap+서버 소진2, warmup+서버2, measurement callback/WS/close/recheck4, 최종 서버1
+            long drains=8+(w.bootstrap?1:0)+(w.schedule.kind().equals("users")?1:0);
+            overheadMillis=Math.addExact(Math.multiplyExact(drains,w.drainMillis),Math.addExact(Math.multiplyExact(3,w.readyMillis),
+                    Math.addExact(w.controlMillis,Math.addExact(c.observation.stopAckMillis,375000))));
+            // 375s = 새 build/계획180 + 복구120 + 분석60 + 정상 shutdown10 + bootstrap 진단5
+        }
+        long durationMillis = Math.addExact(Math.multiplyExact(Math.addExact(seconds,Phase18Cap.initialSeconds(w)), 1000), overheadMillis);
+        if(Phase18Cap1.enabled(this))durationMillis=Math.multiplyExact(Phase18Cap1.seconds(w),1000);
+        long observationMillis=Phase18Cap1.enabled(this)?Math.addExact(durationMillis,180000):durationMillis;
+        long samples = Math.addExact(2, observationMillis / c.observation.sampleMillis);
         // 공통 canonical 저장소는 고유 이벤트만 보유. WS 연결 전 bootstrap은 기대 집합에서 제외
         long events = w.wsConnections == 0 ? 0 : Math.addExact(ww, mw);
         long deliveries = Math.multiplyExact(events, w.wsConnections);
@@ -211,17 +252,18 @@ public record Phase18Plan(int schemaVersion, String phase, String stage, String 
         long processing = Math.addExact(Math.multiplyExact(w.readInFlight, 524_288), Math.multiplyExact(w.writeInFlight, 34_816));
         long memory = Math.addExact(Math.addExact(134_217_728, processing), Math.addExact(Math.multiplyExact(terminals, 512),
                 Math.addExact(Math.multiplyExact(users, 256), Math.addExact(wsMemory, Math.multiplyExact(samples, 256)))));
+        if(Phase18Cap.enabled(this))memory=Math.addExact(memory,Math.addExact(Math.multiplyExact(w.wsConnections,32768),16777216));
         long disk = Math.addExact(1_048_576, Math.addExact(Math.multiplyExact(terminals, 2048),
                 Math.addExact(wsDisk, Math.multiplyExact(samples, 1024))));
-        return new Counts(ww, mw, wr, mr, w.bootstrap ? 1 : 0, users, samples, events, deliveries, bitsets, memory, disk,
+        if(Phase18Cap.enabled(this))disk=Math.addExact(disk,Math.addExact(Math.multiplyExact(deliveries,72),Math.addExact(Math.multiplyExact(terminals,512),1048576)));
+        return new Counts(ww, mw, wr, mr, w.bootstrap ? 1 : 0, initialReads, users, samples, events, deliveries, bitsets, memory, disk,
                 Math.addExact(durationMillis, 999) / 1000);
     }
 
     public static String requestId(Case c, String kind, String scheduledPhase, long ordinal) {
-        require(Set.of("write", "read").contains(kind) && Set.of("bootstrap", "warmup", "measurement").contains(scheduledPhase), "request namespace");
+        require(Set.of("write", "read").contains(kind) && (Set.of("bootstrap", "warmup", "measurement").contains(scheduledPhase)||c.workload.schedule.kind().equals("users")&&scheduledPhase.equals("initial-read")), "request namespace");
         long rate = kind.equals("write") ? c.workload.writeRate : c.workload.readRate;
-        long count = scheduledPhase.equals("bootstrap") ? (kind.equals("write") && c.workload.bootstrap ? 1 : 0)
-                : Math.multiplyExact(rate, scheduledPhase.equals("warmup") ? c.workload.warmupSeconds : c.workload.measurementSeconds);
+        long count = Phase18Cap.count(c.workload,kind,scheduledPhase);
         require(ordinal >= 0 && ordinal < count, "planned ordinal");
         return c.runId + "/" + c.caseId + "/" + kind + "/" + scheduledPhase + "/" + ordinal;
     }

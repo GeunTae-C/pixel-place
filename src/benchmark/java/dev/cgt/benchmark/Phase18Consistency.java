@@ -27,7 +27,7 @@ final class Phase18Consistency {
     }
     private static List<Phase18Raw> read(Path file,Phase18Plan.Loaded loaded,boolean allowStopped,boolean warmup) throws Exception {
         var c=loaded.plan().cases().getFirst();var counts=loaded.plan().counts(c);
-        long planned=warmup?counts.bootstrap()+counts.warmupWrites()+counts.warmupReads():counts.writes()+counts.reads();
+        long planned=warmup?counts.bootstrap()+counts.initialReads()+counts.warmupWrites()+counts.warmupReads():counts.writes()+counts.reads();
         Phase18Plan.require(planned<=2*Phase18Plan.TERMINALS&&Files.size(file)<=planned*2048,"bounded planned raw");
         var rows=new ArrayList<Phase18Raw>();var seen=new HashSet<String>();
         try(var input=Files.newBufferedReader(file)) {
@@ -39,21 +39,56 @@ final class Phase18Consistency {
                 boolean stopped=allowStopped&&r.status().equals("client_not_sent")&&r.sendState().equals("not_sent")&&r.outcome().equals("NOT_SENT")
                         &&r.reason().equals("stopped")&&r.sentNanos()==null&&r.completedNanos()==null;
                 boolean notSent=!Phase18Execution.fixture(loaded.plan())&&r.status().equals("client_not_sent")&&r.sendState().equals("not_sent")
-                        &&r.outcome().equals("NOT_SENT")&&Set.of("arrival_late","processing_capacity","user_pool").contains(r.reason())&&r.sentNanos()==null&&r.completedNanos()==null;
-                Phase18Plan.require(stopped||notSent||r.status().equals("accepted")&&r.sendState().equals("sent")&&r.outcome().equals("ACCEPTED")&&r.httpStatus()==200
+                        &&r.outcome().equals("NOT_SENT")&&(Set.of("arrival_late","processing_capacity","user_pool").contains(r.reason())||Phase18Cap.enabled(loaded.plan())&&r.reason().equals("user_not_ready"))&&r.sentNanos()==null&&r.completedNanos()==null;
+                Phase18Plan.require(stopped||notSent||(Phase18Cap.enabled(loaded.plan())&&Phase18Cap.rejection(r))||r.status().equals("accepted")&&r.sendState().equals("sent")&&r.outcome().equals("ACCEPTED")&&r.httpStatus()==200
                         &&r.completedNanos()>=r.sentNanos()&&r.decidedNanos()<=r.completedNanos(),"normal fixture HTTP result");
+                if(c.workload().schedule().kind().equals("users")&&r.kind().equals("read")&&r.sendState().equals("sent")){
+                    var pixel=Phase18Cap.readPixel(c.workload(),r.scheduledPhase(),r.ordinal());
+                    Phase18Plan.require(r.x()==pixel[0]&&r.y()==pixel[1],"CAP-3 fixed user viewport");
+                }
                 rows.add(r);
             }
         }
         Phase18Plan.require(rows.size()==planned,"frozen planned terminal completeness");return List.copyOf(rows);
     }
+    /** 초기 GET의 count만 맞춘 누락/extra/실패를 READY 이전에 거부 */
+    static void requireInitialReads(Path file,Phase18Plan.Loaded loaded) throws Exception {
+        var c=loaded.plan().cases().getFirst();long planned=Phase18Cap.count(c.workload(),"read","initial-read");
+        Phase18Plan.require(c.workload().schedule().kind().equals("users") && planned>0 && Files.size(file)<=planned*2048,"CAP initial GET byte/count bound");
+        var expected=new HashSet<String>();for(long i=0;i<planned;i++)expected.add(Phase18Plan.requestId(c,"read","initial-read",i));
+        try(var input=Files.newBufferedReader(file)) {
+            String line;while((line=input.readLine())!=null) {
+                Phase18Plan.require(line.length()<=2048,"CAP initial GET row bound");
+                var row=Phase18Plan.JSON.readValue(line,Phase18Raw.class);
+                Phase18Plan.require(row.schemaVersion()==1 && row.planHash().equals(loaded.planHash()) && row.runId().equals(c.runId()) && row.caseId().equals(c.caseId())
+                    && row.kind().equals("read") && row.scheduledPhase().equals("initial-read") && row.ordinal()>=0 && row.ordinal()<planned
+                    && row.requestId().equals(Phase18Plan.requestId(c,"read","initial-read",row.ordinal())) && expected.remove(row.requestId()),"CAP initial GET exact ID set");
+                Phase18Plan.require(row.status().equals("accepted") && row.outcome().equals("ACCEPTED") && row.sendState().equals("sent") && Integer.valueOf(200).equals(row.httpStatus())
+                    && row.sentNanos()!=null && row.completedNanos()!=null && row.completedNanos()>=row.sentNanos() && row.tileVersion()!=null
+                    && row.wireBytes()!=null && row.wireBytes()>0 && row.validationNanos()!=null && row.validationNanos()>=0,"CAP initial GET validated success");
+                var pixel=Phase18Cap.readPixel(c.workload(),"initial-read",row.ordinal());
+                Phase18Plan.require(row.x()==pixel[0] && row.y()==pixel[1],"CAP initial GET fixed viewport");
+            }
+        }
+        Phase18Plan.require(expected.isEmpty(),"CAP initial GET missing IDs");
+    }
     static Map<String,Object> verify(BenchmarkFixtures fixture,ConfigurableApplicationContext context,List<Long> users,List<Phase18Raw> rows) throws Exception {
-        var accepted=new TreeMap<Long,Phase18Raw>();var events=new ArrayList<Phase18Events.Event>();
-        var samples=new ArrayList<Phase18ReadReplay.Sample>();
+        var writes=new ArrayList<Accepted>();var samples=new ArrayList<Phase18ReadReplay.Sample>();
         for(var row:rows)if(row.status().equals("accepted")&&row.kind().equals("write")){
-            Phase18Plan.require(row.eventSeq()!=null&&accepted.put(row.eventSeq(),row)==null,"unique accepted seq");
-            events.add(new Phase18Events.Event(row.eventSeq(),row.tileVersion(),row.x(),row.y(),row.color()));
+            Phase18Plan.require(row.eventSeq()!=null,"accepted seq required");
+            writes.add(new Accepted(row.eventSeq(),row.tileVersion(),row.x(),row.y(),row.color(),row.userOrdinal()));
         }else if(row.rawSha256()!=null)samples.add(new Phase18ReadReplay.Sample(row.x()/256,row.y()/256,row.tileVersion(),row.rawSha256()));
+        return verify(fixture,context,users,writes,samples,rows.stream().filter(r->r.kind().equals("read")&&r.status().equals("accepted")).count());
+    }
+    /** 소비 형식과 분리된 실제 accepted 사실. k6를 Java raw/시계로 위장하지 않음 */
+    record Accepted(long eventSeq,long tileVersion,int x,int y,int color,int userOrdinal) { }
+    static Map<String,Object> verify(BenchmarkFixtures fixture,ConfigurableApplicationContext context,List<Long> users,
+            List<Accepted> writes,List<Phase18ReadReplay.Sample> samples,long reads)throws Exception {
+        var accepted=new TreeMap<Long,Accepted>();var events=new ArrayList<Phase18Events.Event>();
+        for(var row:writes){
+            Phase18Plan.require(accepted.put(row.eventSeq(),row)==null,"unique accepted seq");
+            events.add(new Phase18Events.Event(row.eventSeq(),row.tileVersion(),row.x(),row.y(),row.color()));
+        }
         var pixels=new HashMap<TileKey,byte[]>();var versions=new HashMap<TileKey,Long>();var timestamps=new HashMap<Long,LocalDateTime>();
         for(var key:new CanonicalZ0TileKeys().orderedKeys()){pixels.put(key,TileState.allWhite().pixels());versions.put(key,0L);}
         int count=0;long last=0;
@@ -91,7 +126,7 @@ final class Phase18Consistency {
         else Phase18Plan.require(batch.records().isEmpty(),"empty DB requires empty WAL");
         Phase18Plan.require(fixture.checkpoint()==last&&batch.walLastEventSeq()==last,"DB/WAL checkpoint/tail");
         Phase18ReadReplay.verify(samples,events);
-        return Map.of("complete",true,"accepted",accepted.size(),"reads",rows.stream().filter(r->r.kind().equals("read")&&r.status().equals("accepted")).count(),"readSamples",samples.size(),"checkpoint",last,
+        return Map.of("complete",true,"accepted",accepted.size(),"reads",reads,"readSamples",samples.size(),"checkpoint",last,
                 "retainedWalRecords",retained.size(),"canonicalMemory",1024,"databaseTiles",accepted.isEmpty()?0:1024,"createdAt","WAL original -> DB milliseconds");
     }
 }

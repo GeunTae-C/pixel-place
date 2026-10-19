@@ -18,13 +18,37 @@ final class Phase18Events {
     private final long[][] received;
     private final long[] accepted, deliveries, duplicates;
     private int size;
-    Phase18Events(int maximum, int connections) {
-        Phase18Plan.require(maximum >= 0 && maximum <= 200_000 && connections >= 0 && connections <= 100, "WS bounds");
+    private java.io.RandomAccessFile timing;
+    private long[][] bufferedTimes;
+    private long timingArrayBytes;
+    private long[] lastSeq, reversed;
+    Phase18Events(int maximum,int connections,Path timingFile)throws Exception {
+        this(maximum,connections,timingFile,false);
+    }
+    Phase18Events(int maximum,int connections,Path timingFile,boolean buffered)throws Exception {
+        this(maximum,connections,timingFile,buffered,false);
+    }
+    Phase18Events(int maximum,int connections,Path timingFile,boolean buffered,boolean cap1)throws Exception {
+        this(maximum,connections,timingFile!=null,cap1);
+        if(timingFile!=null){
+            long bytes=Math.multiplyExact(Math.multiplyExact((long)maximum,connections),8);
+            if(buffered){
+                Phase18Plan.require(bytes<=(cap1?Phase18Cap1.TIMING_MEMORY:128L*1024*1024),"bounded k6 timing arrays");
+                bufferedTimes=new long[connections][maximum];timingArrayBytes=bytes+connections*24L;
+            }
+            Files.createFile(timingFile);timing=new java.io.RandomAccessFile(timingFile.toFile(),"rw");
+            timing.setLength(bytes);
+        }
+    }
+    Phase18Events(int maximum, int connections) {this(maximum,connections,false);}
+    private Phase18Events(int maximum,int connections,boolean cap) {this(maximum,connections,cap,false);}
+    private Phase18Events(int maximum,int connections,boolean cap,boolean cap1) {
+        Phase18Plan.require(maximum >= 0 && maximum <= (cap1?Phase18Cap1.MAX_EVENTS:200_000) && connections >= 0 && connections <= (cap?3200:100), "WS bounds");
         int slots = 1; while (slots < Math.max(1, maximum * 2)) slots <<= 1;
         keys = new long[slots]; ordinals = new int[slots]; seq = new long[maximum]; version = new long[maximum];
         x = new int[maximum]; y = new int[maximum]; color = new int[maximum];
         received = new long[connections][(maximum + 63) / 64]; accepted = new long[(maximum + 63) / 64];
-        deliveries = new long[connections]; duplicates = new long[connections];
+        deliveries = new long[connections]; duplicates = new long[connections];lastSeq=new long[connections];reversed=new long[connections];
     }
     private int intern(Event e) {
         int slot = (int) ((e.eventSeq ^ (e.eventSeq >>> 32)) * 0x9e3779b9L) & (keys.length - 1);
@@ -39,11 +63,31 @@ final class Phase18Events {
         version[n] = e.tileVersion; x[n] = e.x; y[n] = e.y; color[n] = e.color; return n;
     }
     synchronized void accepted(Event event) { int n = intern(event); accepted[n >>> 6] |= 1L << n; }
-    synchronized void received(int connection, Event event) {
+    synchronized void received(int connection,Event event){
+        try{received(connection,event,System.nanoTime());}catch(java.io.IOException e){throw new java.io.UncheckedIOException(e);}
+    }
+    synchronized int received(int connection, Event event,long receivedNanos)throws java.io.IOException {
         Objects.checkIndex(connection, received.length); int n = intern(event); long bit = 1L << n;
         deliveries[connection]++;
         if ((received[connection][n >>> 6] & bit) != 0) duplicates[connection]++;
-        received[connection][n >>> 6] |= bit;
+        else if(bufferedTimes!=null)bufferedTimes[connection][n]=receivedNanos;
+        else if(timing!=null){timing.seek(((long)connection*seq.length+n)*8);timing.writeLong(receivedNanos);}
+        if(lastSeq[connection]>event.eventSeq())reversed[connection]++;lastSeq[connection]=event.eventSeq();
+        received[connection][n >>> 6] |= bit;return n;
+    }
+    synchronized void closeTiming()throws java.io.IOException {
+        if(timing!=null){
+            if(bufferedTimes!=null){
+                // 동시 WS 수신에서 delivery마다 여러 native write를 하지 않도록 동결 timing 한도만큼만 보유, 64KiB씩 파일화
+                timing.seek(0);var block=java.nio.ByteBuffer.allocate(65536);
+                for(var connection:bufferedTimes)for(long value:connection){
+                    block.putLong(value);if(!block.hasRemaining()){timing.write(block.array());block.clear();}
+                }
+                if(block.position()>0)timing.write(block.array(),0,block.position());
+                bufferedTimes=null;
+            }
+            timing.getFD().sync();timing.close();timing=null;
+        }
     }
     synchronized Event event(int n) { Objects.checkIndex(n, size); return new Event(seq[n], version[n], x[n], y[n], color[n]); }
     synchronized int size() { return size; }
@@ -63,12 +107,20 @@ final class Phase18Events {
         }
         return Map.of("uniqueEvents", size, "deliveries", deliveries.clone(), "duplicates", duplicates.clone(),
                 "missing", missing, "extra", extra, "bitsetBytes", (long) received.length * accepted.length * 8,
-                "retainedArrayBytes", retainedArrayBytes());
+                "retainedArrayBytes", retainedArrayBytes(),"arrivalReversals",reversed.clone());
+    }
+    /** 실제 수신 bit와 accepted bit의 일치. 중복/extra도 완료로 숨기지 않음 */
+    synchronized boolean complete() {
+        for(int connection=0;connection<received.length;connection++){
+            if(duplicates[connection]!=0)return false;
+            for(int word=0;word<accepted.length;word++)if(received[connection][word]!=accepted[word])return false;
+        }
+        return true;
     }
     long retainedArrayBytes() {
         // array header/정렬·연결 참조를 포함한 보수적 상한. 객체 payload/boxed map을 고유 건수마다 만들지 않음
         return keys.length * 12L + seq.length * 28L + (received.length + 1L) * accepted.length * 8
-                + received.length * 48L + 512;
+                + received.length * 64L + 544 + timingArrayBytes;
     }
     static Event parse(JsonNode value) {
         Phase18Plan.require(value.isObject() && value.size() == 6 && value.path("type").asText().equals("pixel"), "WS shape");

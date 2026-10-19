@@ -20,7 +20,7 @@ class Phase18PlanTest {
         return new Phase18Plan(2, "A", "A-1", "ready", session, Phase18Plan.head(Path.of(repo)),
                 new Phase18Plan.Frozen(predecessor.toString(), BenchmarkJson.hash(predecessor)), inputs,
                 new Phase18Plan.Ownership(repo, Path.of(System.getProperty("java.home"), "bin/java.exe").toString(), root,
-                        repo + "/build/agent-runs/" + session, root + "/build", root + "/project-cache", root + "/temp", root + "/jna", "", "", "", -1, System.getProperty("user.name")),
+                        "F:/pixel-place-work/evidence/" + session, root + "/build", root + "/project-cache", root + "/temp", root + "/jna", "", "", "", -1, System.getProperty("user.name")),
                 new Phase18Plan.Bounds(200_000, 200_000, 200_000, 200_000, 10_000, 536_870_912,
                         1_073_741_824, 0, 0, 0, 134_217_728, 1, 86_400, 65536),
                 List.of(new Phase18Plan.Case("tools", "run01", 1, "diagnostic", "tools", "2026-09-30T00:00:00Z",
@@ -37,6 +37,18 @@ class Phase18PlanTest {
     }
     private Phase18Plan.Loaded read(ObjectNode json) throws Exception { return read(json.toString()); }
     private static ObjectNode work(ObjectNode j) { return (ObjectNode) j.path("cases").get(0).path("workload"); }
+
+    @Test void newEvidenceRequiresItsExactFSessionAndRejectsLegacyC() throws Exception {
+        var valid = json();
+        assertDoesNotThrow(() -> read(valid));
+        for (String path : List.of(Path.of("").toAbsolutePath()+"/build/agent-runs/phase18-contract-fixture",
+                "F:/pixel-place-work/evidence/phase18-other-fixture", "build/agent-runs/phase18-contract-fixture",
+                "F:/pixel-place-archive/phase18-contract-fixture")) {
+            var invalid = valid.deepCopy();
+            ((ObjectNode) invalid.path("ownership")).put("evidenceRoot", path);
+            assertThrows(IllegalArgumentException.class, () -> read(invalid), path);
+        }
+    }
 
     @Test void planIsReadOnlyAndHashesActualBytes() throws Exception {
         var j = json(); var loaded = read(j); var p = loaded.plan();

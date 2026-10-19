@@ -10,12 +10,17 @@ public final class Phase18Main {
     private Phase18Main() { }
     public static void main(String[] args) throws Exception {
         if (args.length != 4 || !args[0].equals("--action") || !args[2].equals("--plan"))
-            throw new IllegalArgumentException("Usage: --action Plan|VerifyTools|VerifyTransport|VerifyObservation|Pilot|Run --plan <absolute.json>");
+            throw new IllegalArgumentException("Usage: --action Plan|VerifyTools|VerifyTransport|VerifyObservation|Pilot|Run|ProduceK6 --plan <absolute.json>");
         String action = args[1];
-        if (!Set.of("Plan", "VerifyTools", "VerifyTransport", "VerifyObservation", "Pilot", "Run").contains(action))
+        if (!Set.of("Plan", "VerifyTools", "VerifyTransport", "VerifyObservation", "Pilot", "Run", "ProduceK6").contains(action))
             throw new IllegalArgumentException("Action unavailable");
         var loaded = Phase18Plan.read(Path.of(args[3])); var plan = loaded.plan();
         Phase18Runtime.verify(plan);
+        if(action.equals("ProduceK6")) {
+            Phase18Execution.requireAction("Run",plan);Phase18K6Session.requireSupport(plan);
+            Phase18Transport.produceK6(loaded,Phase18Paths.checked(args[3]),Phase18Paths.checked(System.getProperty("phase18.environment","")));
+            System.out.println("K6_INITIAL_RECOVERY_COMPLETE finalClassification=NOT_EVALUATED");return;
+        }
         if (Set.of("VerifyTransport", "VerifyObservation", "Pilot", "Run").contains(action)) {
             Phase18Execution.requireAction(action, plan);
             Phase18Transport.run(loaded, Phase18Paths.checked(args[3]), Phase18Paths.checked(System.getProperty("phase18.environment", "")));
@@ -23,7 +28,7 @@ public final class Phase18Main {
         }
         if (action.equals("Plan")) {
             var result = new LinkedHashMap<String, Object>();
-            result.put("schemaVersion", Phase18Plan.VERSION); result.put("phase", plan.phase()); result.put("stage", plan.stage());
+            result.put("schemaVersion", plan.schemaVersion()); result.put("phase", plan.phase()); result.put("stage", plan.stage());
             result.put("planHash", loaded.planHash()); result.put("state", plan.state());
             boolean available;
             try {
@@ -37,7 +42,7 @@ public final class Phase18Main {
                         && Path.of(System.getProperty("java.home"), "bin", "java.exe").equals(Path.of(plan.ownership().java()));
             } catch (IllegalArgumentException unavailable) { available = false; }
             result.put("executionAvailable", available);
-            result.put("availableActions",List.of("Plan","VerifyTools","VerifyTransport","VerifyObservation","Pilot","Run"));
+            result.put("availableActions",List.of("Plan","VerifyTools","VerifyTransport","VerifyObservation","Pilot","Run","ProduceK6"));
             result.put("runs", plan.cases().stream().map(c -> Map.of("caseId", c.caseId(), "runId", c.runId(), "counts", plan.counts(c))).toList());
             result.put("unresolved", List.of("service actions independently require fresh live ownership, observation policy and current resource reservation; Plan does not contact services"));
             System.out.println(Phase18Plan.JSON.writeValueAsString(result)); return;

@@ -14,7 +14,7 @@ final class Phase18Execution {
             case "A-2" -> "VerifyTransport";
             case "A-3" -> "VerifyObservation";
             case "A-4" -> "Pilot";
-            case "B", "C", "D" -> "Run";
+            case "B", "C", "D", "CAP-0", "CAP-1", "CAP-2", "CAP-3" -> "Run";
             default -> "unavailable";
         };
         Phase18Plan.require(action.equals(expected), "action/stage");
@@ -30,7 +30,8 @@ final class Phase18Execution {
         Phase18Plan.require(Set.of("write", "read", "mixed", "soak").contains(c.kind())
                 && !p.ownership().wal().isBlank() && !p.ownership().catalog().isBlank()
                 && p.ownership().redisIndex() >= 2, "service workload/ownership");
-        if (fixture(p)) {
+        if(Phase18Cap.enabled(p)){Phase18Cap.validate(p,c);}
+        else if (fixture(p)) {
             Phase18Plan.require(p.phase().equals("A") && c.role().equals("diagnostic")
                     && n.writes() <= 64 && n.reads() <= 64 && w.wsConnections() <= 4
                     && w.measurementSeconds() <= 10 && w.warmupSeconds() <= 5
@@ -65,7 +66,7 @@ final class Phase18Execution {
             case "WARMUP_DONE" -> Math.addExact(phaseWaitMillis(w.warmupSeconds(),w.controlMillis()),w.drainMillis());
             case "SEND_DONE" -> phaseWaitMillis(w.measurementSeconds(),w.controlMillis());
             case "BOOTSTRAP" -> Math.addExact(w.readyMillis(),Math.addExact(w.drainMillis(),w.controlMillis()));
-            case "READY" -> Math.addExact(Math.multiplyExact(w.bootstrap()?1:2,w.readyMillis()),w.controlMillis());
+            case "READY" -> Math.addExact(Math.multiplyExact(w.bootstrap()?1:2,w.readyMillis()),Math.addExact(w.controlMillis(),Math.addExact(Phase18Cap.initialSeconds(w)*1000, w.schedule().kind().equals("users")?w.drainMillis():0)));
             case "CONNECT" -> Math.addExact(w.controlMillis(),Math.addExact(w.drainMillis(),COOLDOWN_MILLIS));
             case "MEASURE" -> Math.addExact(w.controlMillis(),w.drainMillis());
             // callback → WS 수신 → 전체 socket close → 최종 집합 확인의 네 소진 구간

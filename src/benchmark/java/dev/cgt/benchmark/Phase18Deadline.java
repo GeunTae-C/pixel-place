@@ -16,6 +16,7 @@ final class Phase18Deadline {
         plan.validate();Phase18Execution.requireService(plan);
         long limit=Math.multiplyExact(plan.bounds().totalSeconds(),1000);
         Phase18Plan.require(millis>0&&millis<=limit,"execution deadline within validated plan");
+        if(Phase18Cap.enabled(plan))return inherit(plan,Long.toString(plan.cases().getFirst().workload().schedule().expiresEpochMillis()));
         return new Phase18Deadline(Math.addExact(System.currentTimeMillis(),millis),millis,limit);
     }
     static Phase18Deadline inherit(Phase18Plan plan) throws Exception {
@@ -26,6 +27,7 @@ final class Phase18Deadline {
         plan.validate();Phase18Execution.requireService(plan);
         Phase18Plan.require(value.matches("[1-9][0-9]{0,18}"),"inherited execution deadline required");
         long expires=Long.parseLong(value),remaining=Math.subtractExact(expires,System.currentTimeMillis());
+        if(Phase18Cap.enabled(plan))Phase18Plan.require(expires==plan.cases().getFirst().workload().schedule().expiresEpochMillis(),"CAP original expiry cannot reset");
         long limit=Math.multiplyExact(plan.bounds().totalSeconds(),1000);
         Phase18Plan.require(remaining>0&&remaining<=limit,"inherited deadline exhausted or beyond plan");
         return new Phase18Deadline(expires,remaining,limit);

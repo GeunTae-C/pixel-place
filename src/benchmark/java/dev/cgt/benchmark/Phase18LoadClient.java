@@ -42,6 +42,7 @@ public final class Phase18LoadClient {
     private final InputStream controlInput;
     private final java.util.function.Consumer<String> protocolOutput;
     private Phase18JvmSampler sampler;
+    private Phase18CapObserver capObserver;
 
     private Phase18LoadClient(Phase18Plan.Loaded loaded, Path input) throws Exception {
         this(loaded,input,System.in,new BenchmarkEnvironment.Keys(System.getenv("PIXEL_PLACE_BENCH_JWT_KEY"),System.getenv("PIXEL_PLACE_BENCH_COOKIE_KEY")),value->{System.out.println(value);System.out.flush();});
@@ -60,9 +61,9 @@ public final class Phase18LoadClient {
         pool = new BenchmarkUsers(users.size(), w.userMode().equals("once"), w.reuseMarginMillis(), w.bootstrap());
         var auth = new AuthProperties(keys.jwt(), keys.cookie(), Duration.ofMinutes(15));
         tokens = new Phase18Tokens(new ServiceJwtTokens(auth, Clock.systemUTC()), Clock.systemUTC(), Math.max(1, (int) w.writeInFlight()));
-        events = new Phase18Events((int) loaded.plan().counts(c).wsEvents(), (int) w.wsConnections());
+        events = new Phase18Events((int) loaded.plan().counts(c).wsEvents(), (int) w.wsConnections(),Phase18Cap.enabled(loaded.plan())?output.resolve("cap-ws-times.bin"):null);
         wsOpened=new long[(int)w.wsConnections()];wsClosedAt=new long[wsOpened.length];
-        for(String phase:List.of("bootstrap","warmup","measurement"))for(String kind:List.of("write","read"))recorded.put(kind+"/"+phase,new BitSet());
+        for(String phase:List.of("bootstrap","initial-read","warmup","measurement"))for(String kind:List.of("write","read"))recorded.put(kind+"/"+phase,new BitSet());
         http = HttpClient.newBuilder().executor(callbacks).connectTimeout(Duration.ofMillis(w.requestMillis()))
                 .followRedirects(HttpClient.Redirect.NEVER).version(HttpClient.Version.HTTP_1_1).build();
         raw = Files.newBufferedWriter(output.resolve("raw.jsonl"), StandardOpenOption.CREATE_NEW);
@@ -118,10 +119,13 @@ public final class Phase18LoadClient {
         if(Phase18Execution.observed(loaded.plan()))sampler=new Phase18JvmSampler(loaded,output,this::fail);
         // 앱의 시작 인계가 확정되기 전 bootstrap을 포함한 신규 HTTP 차단
         await("START");
+        if(Phase18Cap.enabled(loaded.plan()))capObserver=new Phase18CapObserver(loaded,output,clock,execution,this::fail);
         if (c.workload().bootstrap()) {
             phase("bootstrap", 0, true); drain(); say("BOOTSTRAP " + sent.get()); await("CONNECT");
         }
-        if (!stopped) connectWs(); say("READY"); await("WARMUP");
+        if (!stopped) connectWs();
+        if(!stopped&&c.workload().schedule().kind().equals("users")){phase("initial-read",Phase18Cap.initialSeconds(c.workload()),false);drain();}
+        readyAfterInitialReads(); await("WARMUP");
         phase("warmup", c.workload().warmupSeconds(), false); drain(); say("WARMUP_DONE " + sent.get());
         await("MEASURE"); phase("measurement", c.workload().measurementSeconds(), false);
         say("SEND_DONE " + sent.get()); drain();
@@ -129,17 +133,40 @@ public final class Phase18LoadClient {
         finishSockets();
         if (!stopped) awaitWs();
         say("DRAINED " + control.snapshot().completed());
+        if(capObserver!=null)capObserver.close();
+        events.closeTiming();
         raw.flush();
         var summary = new LinkedHashMap<String, Object>();
         summary.put("schemaVersion", 1); summary.put("planHash", loaded.planHash()); summary.put("clockId", clock);
         summary.put("anchors", anchors); summary.put("planned", loaded.plan().counts(c)); summary.put("terminalRows", rows.get());
         summary.put("sent", sent.get()); summary.put("control", control.snapshot()); summary.put("stopped", stopped);
         summary.put("tokens", tokens.report()); summary.put("ws", events.report()); summary.put("runtime", runtime());
+        if(Phase18Cap.enabled(loaded.plan()))summary.put("capLogicalWsMapping",Map.of("activeUsers",c.workload().schedule().activeUsers(),"rule","scheduled user ordinal equals logical WS index; no WS authentication implied","initialGetRate",100));
         summary.put("wsOpenedNanos",wsOpened);summary.put("wsClosedNanos",wsClosedAt);summary.put("wsCallbacksDrained",socketsFinished);
         summary.put("wsReceiptEncoding",Map.of("schemaVersion",1,"canonicalOrdinal","JSONL zero-based row","wordsPerConnection",(loaded.plan().counts(c).wsEvents()+63)/64,"byteOrder","BIG_ENDIAN","file","ws-received.bin"));
         BenchmarkJson.write(output.resolve("producer.json"), summary);
         saveWs();
         check();say("DONE " + rows.get());
+    }
+    /** 초기 GET의 정확한 ID와 검증 성공을 READY 이전에 확정 */
+    private void readyAfterInitialReads() throws Exception {
+        if(c.workload().schedule().kind().equals("users")) {
+            try {
+                check();
+                Phase18Plan.require(!stopped && control.snapshot().state()==Phase18Control.State.OPEN,"CAP initial GET start stopped");
+                raw.flush();Phase18Consistency.requireInitialReads(output.resolve("raw.jsonl"),loaded);
+            } catch(Exception|Error problem) {fail(problem);throw problem;}
+        }
+        say("READY");
+    }
+    /** STOP/전체 만료와 실제 phase 지각은 사용자·처리 슬롯보다 우선 */
+    private String capDispatchReason(String kind,String phase,long due,boolean bootstrap) {
+        if(!Phase18Cap.enabled(loaded.plan()) || bootstrap)return "";
+        if(stopped || control.snapshot().state()==Phase18Control.State.STOPPED)return "stopped";
+        long now=System.nanoTime();
+        if(now>=execution.deadlineNanos()){fail(new TimeoutException("CAP cumulative dispatch expiry"));return "stopped";}
+        long end=((Number)((Map<?,?>)anchors.get(phase)).get("endNanos")).longValue();
+        return now<due || now>=Math.min(Math.addExact(due,Phase18Cap.late(c.workload(),kind,phase)),end)?"arrival_late":"";
     }
     private void phase(String phase, long seconds, boolean bootstrap) throws Exception {
         long anchor = System.nanoTime(); anchors.put(phase, Map.of("nanos", anchor, "endNanos",anchor+TimeUnit.SECONDS.toNanos(seconds),"utc", Instant.now().toString()));
@@ -155,32 +182,44 @@ public final class Phase18LoadClient {
     private void window(String kind, String phase, long anchor, long seconds) throws Exception {
         var w = c.workload(); long rate = kind.equals("write") ? w.writeRate() : w.readRate();
         var slots = new Semaphore((int) (kind.equals("write") ? w.writeInFlight() : w.readInFlight()));
-        long planned = Math.multiplyExact(rate, seconds), end = anchor + TimeUnit.SECONDS.toNanos(seconds);
+        long planned=Phase18Cap.count(w,kind,phase), end=anchor+TimeUnit.SECONDS.toNanos(seconds);
         for (long i = 0; i < planned; i++) {
-            long offset = Phase18Plan.scheduledOffsetNanos(i, rate), due = anchor + offset;
+            long offset=Phase18Cap.offset(w,kind,i,phase), due=anchor+offset;
             while (!stopped && System.nanoTime() < due) { check(); TimeUnit.NANOSECONDS.sleep(Math.max(0, Math.min(1_000_000, due - System.nanoTime()))); }
             long now = System.nanoTime();
             if (stopped) { notSent(kind, phase, i, offset, "stopped", null); continue; }
             check();
-            if (now >= end || now - due >= 1_000_000_000L/rate) { notSent(kind, phase, i, offset, "arrival_late", null); continue; }
+            if (now >= end || now - due >= Phase18Cap.late(w,kind,phase)) { notSent(kind, phase, i, offset, "arrival_late", null); continue; }
             send(kind, phase, i, offset, due, slots, false);
         }
         while(!stopped&&System.nanoTime()<end){check();TimeUnit.NANOSECONDS.sleep(Math.max(0,Math.min(1_000_000,end-System.nanoTime())));}
     }
     private void send(String kind, String phase, long ordinal, long offset, long due, Semaphore slots, boolean bootstrap) throws Exception {
-        if (!slots.tryAcquire()) { notSent(kind, phase, ordinal, offset, "processing_capacity", null); return; }
+        boolean cap=Phase18Cap.enabled(loaded.plan());
+        if(!cap && !slots.tryAcquire()){notSent(kind,phase,ordinal,offset,"processing_capacity",null);return;}
+        String priority=capDispatchReason(kind,phase,due,bootstrap);
+        if(!priority.isEmpty()){notSent(kind,phase,ordinal,offset,priority,null);return;}
         BenchmarkUsers.Assignment user = null;
         try {
             int[] pixel = pixel(c, phase, ordinal); String token = null;
             if (kind.equals("read")) {
-                long n = ordinal + (phase.equals("measurement") ? c.workload().readRate()*c.workload().warmupSeconds() : 0);
-                pixel = c.workload().readPattern().equals("hot") ? new int[]{0,0,0} : new int[]{(int)(n%32)*256,(int)((n/32)%32)*256,0};
+                pixel = Phase18Cap.readPixel(c.workload(),phase,ordinal);
             }
             if (kind.equals("write")) {
-                user = bootstrap ? new BenchmarkUsers.Assignment(0, 1) : pool.acquire(System.nanoTime());
-                if (user == null) { notSent(kind, phase, ordinal, offset, "user_pool", null); slots.release(); return; }
-                token = tokens.get(users.get(user.ordinal()));
+                user = bootstrap ? new BenchmarkUsers.Assignment(0, 1) : Phase18Cap.scheduled(c.workload())
+                        ?pool.acquire((int)(ordinal%c.workload().schedule().activeUsers())+(c.workload().bootstrap()?1:0),due):pool.acquire(Phase18Cap.enabled(loaded.plan())?due:System.nanoTime());
+                if (user == null) {
+                    String reason=capDispatchReason(kind,phase,due,bootstrap);
+                    notSent(kind,phase,ordinal,offset,!reason.isEmpty()?reason:cap?"user_not_ready":"user_pool",null);if(!cap)slots.release();return;
+                }
+
             }
+            if(cap && !slots.tryAcquire()) {
+                if(user!=null && !bootstrap)pool.cancel(user);
+                String reason=capDispatchReason(kind,phase,due,bootstrap);
+                notSent(kind,phase,ordinal,offset,reason.isEmpty()?"processing_capacity":reason,null);return;
+            }
+            if(user!=null)token=tokens.get(users.get(user.ordinal()));
             String id = Phase18Plan.requestId(c, kind, phase, ordinal);
             var builder = HttpRequest.newBuilder().timeout(Duration.ofMillis(c.workload().requestMillis())).header("X-Phase18-Request", id);
             if (kind.equals("write")) builder.uri(URI.create(endpoint + "/api/pixels")).header("Authorization", "Bearer " + token)
@@ -188,8 +227,15 @@ public final class Phase18LoadClient {
                     .POST(HttpRequest.BodyPublishers.ofString("{\"x\":"+pixel[0]+",\"y\":"+pixel[1]+",\"color\":"+pixel[2]+"}"));
             else builder.uri(URI.create(endpoint + "/api/tiles/0/" + (pixel[0]/256) + "/" + (pixel[1]/256))).GET();
             var request = builder.build(); var assignment = user; int[] actualPixel = pixel;
-            boolean dispatched = control.dispatch(() -> {
-                long sentAt = System.nanoTime(); sent.incrementAndGet();
+            var dispatchReason=new AtomicReference<>("stopped");
+            java.util.concurrent.Callable<Boolean> startDispatch=() -> {
+                long sentAt = System.nanoTime();
+                if(Phase18Cap.enabled(loaded.plan())&&!bootstrap){
+                    if(sentAt>=execution.deadlineNanos()){fail(new TimeoutException("CAP cumulative dispatch expiry"));return false;}
+                    long end=((Number)((Map<?,?>)anchors.get(phase)).get("endNanos")).longValue();
+                    if(sentAt<due||sentAt>=Math.min(Math.addExact(due,Phase18Cap.late(c.workload(),kind,phase)),end)){dispatchReason.set("arrival_late");return false;}
+                }
+                sent.incrementAndGet();
                 activeRequests.put(id,Map.of("requestId",id,"sendState","unknown","reason","dispatch_in_progress","lastObservedNanos",sentAt));
                 try {
                     var receivedAt=new AtomicLong();
@@ -199,11 +245,12 @@ public final class Phase18LoadClient {
                 } catch (RuntimeException problem) {
                     complete(kind, phase, ordinal, offset, sentAt, 0, assignment, actualPixel, null, problem, slots, bootstrap, "unknown");
                 }
-                return null;
-            });
+                return true;
+            };
+            boolean dispatched=Phase18Cap.enabled(loaded.plan())?control.dispatchChecked(startDispatch):control.dispatch(()->{startDispatch.call();return null;});
             if (!dispatched) {
-                if (assignment != null && !bootstrap) pool.complete(assignment, System.nanoTime(), false);
-                notSent(kind, phase, ordinal, offset, "stopped", assignment); slots.release();
+                if (assignment != null && !bootstrap) {if(Phase18Cap.enabled(loaded.plan()))pool.cancel(assignment);else pool.complete(assignment, System.nanoTime(), false);}
+                notSent(kind, phase, ordinal, offset, dispatchReason.get(), assignment); slots.release();
             }
         } catch (Exception | Error problem) {
             fail(problem); throw problem;
@@ -232,7 +279,7 @@ public final class Phase18LoadClient {
                         if (!bootstrap && c.workload().wsConnections() > 0) events.accepted(event);
                     } else {
                         var result = Phase18TileBody.verify(response.headers(), response.body()); version = result.tileVersion(); wire = result.wireBytes(); validation = result.validationNanos();
-                        long global = ordinal + (phase.equals("measurement") ? c.workload().readRate()*c.workload().warmupSeconds() : 0);
+                        long global = Phase18Cap.readOrdinal(c.workload(),phase,ordinal);
                         if (Phase18ReadReplay.sampled(global, loaded.plan().counts(c).reads())) hash = result.sha256();
                     }
                     status = "accepted"; outcome = "ACCEPTED";
@@ -246,14 +293,22 @@ public final class Phase18LoadClient {
                     else if (message.equals("Pixel write outcome is unknown.")) reason = "write_unknown";
                 } catch (RuntimeException ignored) { /* 비민감 label만 기록 */ }
             } else { status = "unexpected_status"; outcome = "UNKNOWN"; }
+            boolean allowedRejection=false;
+            if(Phase18Cap.enabled(loaded.plan())&&!bootstrap&&response!=null&&code!=200)try{
+                allowedRejection=Phase18Cap.rejection(kind,code,Phase18Plan.JSON.readTree(response.body()));
+                if(allowedRejection){outcome="REJECTED";reason=code==503?"cap_write_busy":"cap_cooldown";}
+            }catch(RuntimeException ignored){/* 식별 불가능 응답의 기존 STOP 유지 */}
+            long poolCompleted=completed;
+            if(capObserver!=null)poolCompleted=capObserver.http(Phase18Plan.requestId(c,kind,phase,ordinal),phase,sentAt,completed,seq,
+                    user==null?null:user.ordinal(),user==null?null:user.attemptOrdinal(),outcome);
             save(new Phase18Raw(1, loaded.planHash(), c.runId(), c.caseId(), Phase18Plan.requestId(c, kind, phase, ordinal), kind, phase, ordinal,
                     clock, offset, sentAt, sentAt, completed, status, reason, code, seq, version, sendState, outcome,
                     outcome.equals("UNKNOWN") ? "unresolved" : "not_applicable", user == null ? null : user.ordinal(), user == null ? null : user.attemptOrdinal(),
                     pixel[0], pixel[1], pixel[2], hash, wire, validation));
             saved=true;
             if(outcome.equals("UNKNOWN")){String id=Phase18Plan.requestId(c,kind,phase,ordinal);unknownRequests.put(id,Map.of("requestId",id,"sendState",sendState,"reason",reason,"lastObservedNanos",completed));}
-            if (user != null && !bootstrap) pool.complete(user, completed, outcome.equals("UNKNOWN"));
-            if (outcome.equals("UNKNOWN") || !status.equals("accepted")) fail(new IllegalStateException("HTTP terminal requires stop: " + status));
+            if (user != null && !bootstrap) pool.complete(user, poolCompleted, outcome.equals("UNKNOWN"));
+            if (outcome.equals("UNKNOWN") || !status.equals("accepted")&&!allowedRejection) fail(new IllegalStateException("HTTP terminal requires stop: " + status));
         } catch (Exception | Error invalid) { fail(invalid); }
         finally { if(saved)activeRequests.remove(Phase18Plan.requestId(c,kind,phase,ordinal));slots.release(); control.complete(); }
     }
@@ -288,7 +343,7 @@ public final class Phase18LoadClient {
                         try {
                             if (text.length()+data.length()>2048) throw new IOException("WS message limit");
                             text.append(data);
-                            if(last){events.received(connection,Phase18Events.parse(Phase18Plan.JSON.readTree(text.toString())));text.setLength(0);}
+                            if(last){long received=System.nanoTime();events.received(connection,Phase18Events.parse(Phase18Plan.JSON.readTree(text.toString())),received);text.setLength(0);}
                             s.request(1);
                         } catch(Exception|Error error){fail(error); s.sendClose(1002,"invalid");}
                         return null;
@@ -309,7 +364,9 @@ public final class Phase18LoadClient {
     private void check() throws Exception { Phase18Process.rethrow(failure.get());execution.check(); }
     private void close() throws Exception {
         closing=true;control.stop();Throwable problem=null;
-        try{if(sampler!=null)sampler.close();}catch(Exception|Error e){problem=e;fail(e);}
+        try{if(capObserver!=null)capObserver.close();}catch(Exception|Error e){problem=e;fail(e);}
+        try{events.closeTiming();}catch(Exception|Error e){problem=Phase18Process.preserve(problem,e);fail(e);}
+        try{if(sampler!=null)sampler.close();}catch(Exception|Error e){problem=Phase18Process.preserve(problem,e);fail(e);}
         try{if(failure.get()!=null)BenchmarkJson.write(output.resolve("producer-failure.json"),failureReport());}catch(Exception|Error e){problem=Phase18Process.preserve(problem,e);}
         try{finishSockets();}catch(Exception|Error e){problem=Phase18Process.preserve(problem,e);}
         try{Phase17CVerificationMain.bounded(()->{
@@ -354,11 +411,11 @@ public final class Phase18LoadClient {
     }
     /** 실패 뒤 확인된 미시작 namespace만 채움. 송신/저장 불확실 ID는 unresolved에 남기고 NOT_SENT로 바꾸지 않음 */
     private void fillNotStarted()throws Exception {
-        for(String phase:List.of("bootstrap","warmup","measurement"))for(String kind:List.of("write","read")) {
+        for(String phase:List.of("bootstrap","initial-read","warmup","measurement"))for(String kind:List.of("write","read")) {
             long rate=kind.equals("write")?c.workload().writeRate():c.workload().readRate();
-            long count=phase.equals("bootstrap")?(kind.equals("write")&&c.workload().bootstrap()?1:0):rate*(phase.equals("warmup")?c.workload().warmupSeconds():c.workload().measurementSeconds());
+            long count=Phase18Cap.count(c.workload(),kind,phase);
             for(int i=0;i<count;i++)if(!recorded.get(kind+"/"+phase).get(i)&&!activeRequests.containsKey(Phase18Plan.requestId(c,kind,phase,i)))
-                notSent(kind,phase,i,phase.equals("bootstrap")?0:Phase18Plan.scheduledOffsetNanos(i,rate),"producer_failure",null);
+                notSent(kind,phase,i,phase.equals("bootstrap")?0:Phase18Cap.offset(c.workload(),kind,i,phase),"producer_failure",null);
         }
     }
     static int[] pixel(Phase18Plan.Case c,String phase,long ordinal) {

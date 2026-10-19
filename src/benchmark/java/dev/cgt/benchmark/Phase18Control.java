@@ -18,6 +18,18 @@ public final class Phase18Control {
             stop(); throw failure;
         }
     }
+    /** 실제 dispatch lock 안의 시계/만료 재확인. 미시작은 소유 counter에 넣지 않음 */
+    public synchronized boolean dispatchIf(java.util.function.BooleanSupplier allowed,Callable<Void> start) throws Exception {
+        if(state!=State.OPEN||!allowed.getAsBoolean())return false;
+        return dispatch(start);
+    }
+    /** 미시작 반환은 실제 네트워크 호출 전만 허용. callback이 즉시 실행돼도 소유량이 선행 */
+    public synchronized boolean dispatchChecked(Callable<Boolean> start)throws Exception {
+        if(state!=State.OPEN)return false;
+        dispatched++;active++;
+        try {if(start.call())return true;dispatched--;active--;return false;}
+        catch(Exception|Error problem){stop();throw problem;}
+    }
     public synchronized long stop() {
         if (state == State.OPEN) { state = State.STOPPED; appliedNanos = System.nanoTime(); }
         return appliedNanos;

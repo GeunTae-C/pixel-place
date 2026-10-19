@@ -10,6 +10,163 @@ import static org.junit.jupiter.api.Assertions.*;
 /** 관측 공백과 실제 실패의 안전 경계. seq 차이를 건수로 치환하거나 정상 stale에 추가 scan 금지 */
 class Phase18CollectorTest {
     @TempDir Path temporary;
+    @Test void expandedS2SeparatesUsageFromLimitsAndRetainsFullTrace()throws Exception{
+        var node=(tools.jackson.databind.node.ObjectNode)Phase18Plan.JSON.valueToTree(s2());
+        ((tools.jackson.databind.node.ObjectNode)node.path("bounds")).put("samples",50000).put("outputBytes",1342177280).put("totalSeconds",2400);
+        var expandedCase=(tools.jackson.databind.node.ObjectNode)node.path("cases").get(0);
+        expandedCase.put("kind","mixed");
+        ((tools.jackson.databind.node.ObjectNode)expandedCase.path("workload")).put("writeInFlight",4).put("readInFlight",4);
+        var schedule=(tools.jackson.databind.node.ObjectNode)expandedCase.path("workload").path("schedule");
+        schedule.put("expiresEpochMillis",schedule.path("issuedEpochMillis").asLong()+2400000);
+        var ownership=(tools.jackson.databind.node.ObjectNode)node.path("ownership");
+        ownership.put("wal","F:/pixel-place-wal/phase18/"+node.path("sessionId").asText()+"/"+expandedCase.path("runId").asText()+"/pixel-place.wal");
+        var p=Phase18Plan.JSON.treeToValue(node,Phase18Plan.class);var u=Phase18K6Session.s2Output(p);
+        assertEquals(10322,u.samples());assertEquals(63418368,u.sampleBytes());
+        assertEquals(12368,u.traceEntries());assertEquals(10002432,u.traceBytes());
+        assertEquals(100,Phase18K6Session.expandLimit(100,49));
+        assertEquals(500,Phase18K6Session.expandLimit(100,50));
+        assertEquals(2500,Phase18K6Session.expandLimit(100,400));
+        assertThrows(ArithmeticException.class,()->Phase18K6Session.expandLimit(Long.MAX_VALUE,Long.MAX_VALUE));
+        var policy=new Phase18ObservationPolicy(1,"0".repeat(64),p.cases().getFirst().caseId(),1610612736,64,128,256,30000,52428800,335544320,"none");
+        var old=System.getProperty("phase18.k6");System.setProperty("phase18.k6","isolated-test");
+        try{
+            assertDoesNotThrow(()->policy.validate(new Phase18Plan.Loaded(p,"0".repeat(64))));
+            assertDoesNotThrow(p::validate);
+            assertDoesNotThrow(()->Phase18Environment.requireEvidenceReservation(p,1677721600));
+            assertThrows(IllegalArgumentException.class,()->Phase18Environment.requireEvidenceReservation(p,335544320));
+            assertDoesNotThrow(()->Phase18Collector.requireSampleCapacity(10321,10321L*6144,6144,p,policy));
+            // 실제50% 초과는 허용. 준비 계산의 여유와 런타임 동결 한도는 별개
+            assertDoesNotThrow(()->Phase18Collector.requireSampleCapacity(30000,180000000,6144,p,policy));
+            assertThrows(IllegalArgumentException.class,()->Phase18Collector.requireSampleCapacity(50000,0,1,p,policy));
+            assertTrue(u.runBytes()*2<p.bounds().outputBytes());
+            assertTrue(u.runBytes()<2*(policy.maxSampleBytes()+policy.maxTraceBytes())+Phase18K6Session.metricsBytes(p));
+        }finally{if(old==null)System.clearProperty("phase18.k6");else System.setProperty("phase18.k6",old);}
+        // 실제 Trace 구현의 유한 대역. DB/WAL 호출이나 실제 서비스 시간을 기다리지 않음
+        var trace=new Phase18Trace(policy.maxTraceEntries(),policy.maxTraceBytes());trace.phase("measurement");
+        for(int cycle=0;cycle<2580;cycle++){
+            long flush=trace.begin("flushOnce","flushWorker");
+            long capture=trace.begin("capturePlan","flushPlanCaptureService");
+            trace.end(capture,"capturePlan","flushPlanCaptureService","records=0;tiles=0;dirty=0;checkpoint=4;target=4",null);
+            long retention=trace.begin("retryIfEligible","flushWalRetention");
+            long deletion=trace.begin("deleteCommittedPrefix","segmentedWalStorage");
+            trace.end(deletion,"deleteCommittedPrefix","segmentedWalStorage","deleted=0;delayed=false",null);
+            trace.end(retention,"retryIfEligible","flushWalRetention","completed",null);
+            trace.end(flush,"flushOnce","flushWorker","NO_OP",null);
+        }
+        for(int i=0;i<2048;i++){
+            trace.phase(List.of("startup","measurement","drain","recovery").get(i%4));
+            String op=List.of("R","S","capturePlan","writeBatch","close","replayFrom","flushOnce","deleteCommittedPrefix").get(i%8);
+            long id=trace.begin(op,p.ownership().wal());trace.end(id,op,p.ownership().wal(),"x".repeat(512),null);
+        }
+        var report=trace.report();assertTrue(trace.complete());assertEquals(0L,report.get("loss"));
+        assertEquals(12368,((List<?>)report.get("journal")).size());
+        assertTrue(((Map<?,?>)report.get("totals")).size()<=512);
+        assertTrue(((Number)report.get("chargedBytes")).longValue()<=u.traceBytes());
+        Path out=Path.of("F:/pixel-place-work/evidence",System.getenv("PIXEL_PLACE_WORK_SESSION"));
+        BenchmarkJson.write(out.resolve("expanded-trace.json"),report);
+        assertTrue(Files.size(out.resolve("expanded-trace.json"))<=u.observationBytes());
+        BenchmarkJson.write(out.resolve("expanded-profile.json"),Map.of("usage",u,"policy",policy,"plan",p,
+                "actualCharged",report.get("chargedBytes"),"actualSerialized",Files.size(out.resolve("expanded-trace.json")),
+                "journalEntries",12368,"aggregateEntries",((Map<?,?>)report.get("totals")).size(),"loss",0));
+    }
+    @Test void keptTraceCeilingDoesNotCoverConservativeS2Lifetime()throws Exception{
+        var trace=new Phase18Trace(6000,2097152);trace.phase("measurement");int firstLoss=0;
+        // 현재 FlushWorker의 무작업 cycle 4개 반환 경로. 실제 DB/flush 실행이나 wall-clock 대기 없음
+        for(int cycle=1;cycle<=2337;cycle++){
+            long flush=trace.begin("flushOnce","flushWorker");
+            long capture=trace.begin("capturePlan","flushPlanCaptureService");
+            trace.end(capture,"capturePlan","flushPlanCaptureService","records=0;tiles=0;dirty=0;checkpoint=4;target=4",null);
+            long retention=trace.begin("retryIfEligible","flushWalRetention");
+            long deletion=trace.begin("deleteCommittedPrefix","segmentedWalStorage");
+            trace.end(deletion,"deleteCommittedPrefix","segmentedWalStorage","deleted=0;delayed=false",null);
+            trace.end(retention,"retryIfEligible","flushWalRetention","completed",null);
+            trace.end(flush,"flushOnce","flushWorker","NO_OP",null);
+            if(cycle==220)assertTrue(trace.complete(),"measurement-only duration fits but does not prove total lifetime");
+            if(!trace.complete()&&firstLoss==0)firstLoss=cycle;
+        }
+        assertFalse(trace.complete());assertTrue(firstLoss>220&&firstLoss<2337);
+        BenchmarkJson.write(Path.of("F:/pixel-place-work/evidence",System.getenv("PIXEL_PLACE_WORK_SESSION"),"trace-lifetime-gap.json"),
+                Map.of("fixtureOnly",true,"cycles",2337,"operationsPerCycle",4,"firstLossCycle",firstLoss,
+                        "chargedBytes",trace.report().get("chargedBytes"),"retainedEntries",((List<?>)trace.report().get("journal")).size(),
+                        "loss",trace.report().get("loss"),"targetTraceBytes",2097152,"targetTraceEntries",6000,"sufficiencyProven",false));
+    }
+    @Test void actualCollectorOverflowStopsAndKeepsFirstFailureWithoutServices()throws Exception{
+        var original=s2();var tree=(tools.jackson.databind.node.ObjectNode)Phase18Plan.JSON.valueToTree(original);
+        Path wal=temporary.resolve("pixel-place.wal");Files.createFile(wal);
+        ((tools.jackson.databind.node.ObjectNode)tree.path("ownership")).put("wal",wal.toString()).put("sessionRoot",temporary.toString());
+        var p=Phase18Plan.JSON.treeToValue(tree,Phase18Plan.class);
+        var context=org.mockito.Mockito.mock(org.springframework.context.ConfigurableApplicationContext.class);
+        var measurement=org.mockito.Mockito.mock(PixelMeasurement.class);
+        org.mockito.Mockito.when(measurement.phase()).thenReturn(PixelMeasurement.Phase.measurement);
+        org.mockito.Mockito.when(measurement.walCounts()).thenReturn(new PixelMeasurement.WalCounts(0,0,0,0,0,0,0,0,0,Map.of()));
+        var executor=org.mockito.Mockito.mock(dev.cgt.pixelplace.pixel.application.PixelWriteExecutor.class);
+        org.mockito.Mockito.when(executor.snapshot()).thenReturn(new dev.cgt.pixelplace.pixel.application.ExecutionSnapshot(0,0,0,0,0,dev.cgt.pixelplace.pixel.application.ExecutionSnapshot.State.RUNNING,0,true));
+        var pending=org.mockito.Mockito.mock(dev.cgt.pixelplace.flush.application.PendingAmbiguousFlushStore.class);
+        org.mockito.Mockito.when(pending.current()).thenReturn(Optional.empty());
+        var ready=org.mockito.Mockito.mock(dev.cgt.pixelplace.recovery.application.ServiceReadiness.class);
+        org.mockito.Mockito.when(ready.isReady()).thenReturn(true);
+        org.mockito.Mockito.when(context.getBean(PixelMeasurement.class)).thenReturn(measurement);
+        org.mockito.Mockito.when(context.getBean(dev.cgt.pixelplace.pixel.application.PixelWriteExecutor.class)).thenReturn(executor);
+        org.mockito.Mockito.when(context.getBean(dev.cgt.pixelplace.flush.application.PendingAmbiguousFlushStore.class)).thenReturn(pending);
+        org.mockito.Mockito.when(context.getBean(dev.cgt.pixelplace.recovery.application.ServiceReadiness.class)).thenReturn(ready);
+        var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        org.mockito.Mockito.when(context.getBean(io.micrometer.core.instrument.MeterRegistry.class)).thenReturn(registry);
+        var parent=new Phase18ParentControl(2000,2000);
+        var tiny=new Phase18ObservationPolicy(1,"0".repeat(64),p.cases().getFirst().caseId(),1610612736,64,128,256,6000,2097152,1,"none");
+        var collector=new Phase18Collector(new Phase18Plan.Loaded(p,"0".repeat(64)),tiny,org.mockito.Mockito.mock(Phase18Environment.class),context,new Phase18Trace(6000,2097152),parent,temporary);
+        try{
+            long until=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while(!parent.stopped()&&System.nanoTime()<until)Thread.sleep(10);
+            assertTrue(parent.stopped());
+            var failure=assertThrows(IllegalArgumentException.class,parent::check);assertTrue(failure.getMessage().contains("collector output bound"));
+            parent.stop("LATE",new IllegalStateException("later"));assertSame(failure,assertThrows(IllegalArgumentException.class,parent::check));
+        }finally{collector.close();registry.close();}
+        collector.write();assertEquals(0,Files.size(temporary.resolve("resource-samples.jsonl")));
+        assertFalse(BenchmarkJson.read(temporary.resolve("collector.json")).path("complete").asBoolean());
+    }
+    static Phase18Plan s2()throws Exception{
+        var p=Phase18CapTest.plan(Phase18PlanTest.valid(),"CAP-0","cap-smoke-s2",0,2,0,220,"smoke-s2",2);
+        var j=(tools.jackson.databind.node.ObjectNode)Phase18Plan.JSON.valueToTree(p);
+        var c=(tools.jackson.databind.node.ObjectNode)j.path("cases").get(0);
+        ((tools.jackson.databind.node.ObjectNode)c.path("workload")).put("bootstrap",false);
+        c.set("observation",Phase18Plan.JSON.valueToTree(new Phase18Plan.Observation(250,15000,5000,2000,
+                List.of("heap","outstanding","backlog","disk","deadline","metrics","wal-metadata"),List.of("after-gc","process-io","host-disk"),"planned-writes-upper-bound","stop-new-dispatch")));
+        ((tools.jackson.databind.node.ObjectNode)j.path("ownership")).put("wal","F:/pixel-place-wal/phase18/phase18-s2-output-fixture/run01/pixel-place.wal");
+        ((tools.jackson.databind.node.ObjectNode)c.path("runtime")).put("batchMax",16);
+        ((tools.jackson.databind.node.ObjectNode)j.path("bounds")).put("outputBytes",268435456);
+        return Phase18Plan.JSON.treeToValue(j,Phase18Plan.class);
+    }
+    @Test void s2LifetimeSerializationAndSharedReservationRejectOldLimits()throws Exception{
+        var p=s2();var n=p.counts(p.cases().getFirst());assertEquals(9350,n.samples());assertEquals(2337,n.seconds());
+        assertEquals(11695696,n.diskBytes());assertEquals(101188608,Phase18K6Session.metricsBytes(p));
+        assertEquals(268106320,2*(67108864L+2097152)+Phase18K6Session.outputBytes(p));
+        var good=new Phase18ObservationPolicy(1,"0".repeat(64),p.cases().getFirst().caseId(),1610612736,64,128,256,6000,2097152,67108864,"none");
+        var old=System.getProperty("phase18.k6");System.setProperty("phase18.k6","isolated-test");
+        try{
+            assertTrue(assertThrows(IllegalArgumentException.class,()->good.validate(new Phase18Plan.Loaded(p,"0".repeat(64)))).getMessage().contains("conservative trace lifetime"));
+            var small=new Phase18ObservationPolicy(1,"0".repeat(64),p.cases().getFirst().caseId(),1610612736,64,128,256,6000,2097152,1048576,"none");
+            assertTrue(assertThrows(IllegalArgumentException.class,()->small.validate(new Phase18Plan.Loaded(p,"0".repeat(64)))).getMessage().contains("lifetime bytes"));
+            assertEquals(6144,Phase18Collector.sampleByteUpperBound(p));
+            assertEquals(57446400,n.samples()*Phase18Collector.sampleByteUpperBound(p));
+            assertDoesNotThrow(()->Phase18Environment.requireEvidenceReservation(p,335544320));
+            assertTrue(assertThrows(IllegalArgumentException.class,()->Phase18Environment.requireEvidenceReservation(p,201326592)).getMessage().contains("evidence reservation"));
+            assertThrows(IllegalArgumentException.class,()->Phase18Collector.requireSampleCapacity(10000,0,1,p,good));
+            assertThrows(IllegalArgumentException.class,()->Phase18Collector.requireSampleCapacity(0,67108864,1,p,good));
+            assertThrows(IllegalArgumentException.class,()->Phase18Collector.requireSampleCapacity(0,0,6145,p,good));
+            assertDoesNotThrow(()->Phase18Collector.requireSampleCapacity(9349,9349L*6144,6144,p,good));
+            var node=(tools.jackson.databind.node.ObjectNode)Phase18Plan.JSON.valueToTree(p);
+            ((tools.jackson.databind.node.ObjectNode)node.path("bounds")).put("samples",9349);
+            var few=Phase18Plan.JSON.treeToValue(node,Phase18Plan.class);
+            assertTrue(assertThrows(IllegalArgumentException.class,()->good.validate(new Phase18Plan.Loaded(few,"0".repeat(64)))).getMessage().contains("sample count"));
+            ((tools.jackson.databind.node.ObjectNode)node.path("bounds")).put("samples",10001);
+            assertThrows(IllegalArgumentException.class,()->Phase18Plan.JSON.treeToValue(node,Phase18Plan.class).validate());
+            ((tools.jackson.databind.node.ObjectNode)node.path("bounds")).put("samples",10000).put("outputBytes",268106319);
+            var shortOutput=Phase18Plan.JSON.treeToValue(node,Phase18Plan.class);
+            assertTrue(assertThrows(IllegalArgumentException.class,()->good.validate(new Phase18Plan.Loaded(shortOutput,"0".repeat(64)))).getMessage().contains("combined observation"));
+            Path evidence=Path.of("F:/pixel-place-work/evidence",System.getenv("PIXEL_PLACE_WORK_SESSION"),"maximum-sample.json");
+            BenchmarkJson.write(evidence,Phase18Collector.maximumSample(p));
+        }finally{if(old==null)System.clearProperty("phase18.k6");else System.setProperty("phase18.k6",old);}
+    }
     private static Phase18ObservationPolicy policy(long backlog,long heap){return new Phase18ObservationPolicy(1,"0".repeat(64),"tools",heap,backlog,128,10,100,65536,65536,"none");}
     private static Phase18Collector.Input input(long now,PixelMeasurement.Capture capture,boolean pending,Map<String,Object> wal){
         return new Phase18Collector.Input(now,"measurement",100,1,true,true,capture,pending,wal,Long.MAX_VALUE,0);
