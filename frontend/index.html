@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="pixel-place 픽셀 보드 조회·이동·색상 선택 데모">
+  <meta name="description" content="pixel-place 픽셀 보드 탐색·로그인·배치 데모">
   <title>pixel-place · 픽셀 보드</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="./styles.css">
@@ -21,11 +21,14 @@
     </div>
     <div class="connection" aria-label="연결 및 동기화 상태">
       <span id="connection-state" class="connection-state">조회 준비</span>
-      <span class="muted">실시간 미연결</span>
+      <span id="realtime-state" class="muted">실시간 연결 준비</span>
     </div>
-    <div class="login-area">
-      <span class="muted">로그인 전</span>
-      <button type="button" disabled title="로그인은 다음 구간에서 연결됩니다.">로그인</button>
+    <div class="login-area" aria-label="서비스 로그인">
+      <div class="login-controls">
+        <span id="auth-state" class="connection-state">로그인 전</span>
+        <button id="auth-button" type="button" aria-describedby="auth-notice">카카오 로그인</button>
+      </div>
+      <p id="auth-notice" class="muted" role="status" aria-live="polite"></p>
     </div>
   </header>
 
@@ -73,11 +76,11 @@
         <p class="muted">좌표와 색상을 골라도 아직 배치되지 않습니다. 정밀한 선택은 확대 후 진행하세요.</p>
       </section>
       <section class="tool-section placement-section" aria-label="배치 및 쿨다운">
-        <button class="place-button" type="button" disabled aria-describedby="placement-notice">픽셀 배치</button>
-        <p id="placement-notice" class="muted">배치 기능은 후속 구간에서 연결됩니다.</p>
+        <button id="place-button" class="place-button" type="button" disabled aria-describedby="placement-notice cooldown-notice">픽셀 배치</button>
+        <p id="placement-notice" class="muted" role="status" aria-live="polite">로그인 후 좌표와 색상을 선택해 주세요.</p>
         <div class="cooldown">
           <h3>쿨다운</h3>
-          <p class="muted">배치 기능 연결 후 표시</p>
+          <p id="cooldown-notice" class="muted">남은 대기 시간은 배치 요청 시 서버에서 확인합니다.</p>
         </div>
       </section>
     </aside>
