@@ -4,6 +4,7 @@ import { AuthSession } from "./auth-session.mjs";
 import { PlacementController } from "./placement.mjs";
 import { RealtimeConnection } from "./realtime.mjs";
 import { parsePixelEvent } from "./exact-json.mjs";
+import { drawBoardOverlays, GRID_MIN_SCALE } from "./board-overlays.mjs";
 
 // 공개 조회·보드 조작·인증·배치 UI 연결. 수락 변경은 loader의 공통 병합 경계로 전달
 const API_BASE = "http://localhost:8080";
@@ -39,6 +40,15 @@ const realtimeState = document.querySelector("#realtime-state");
 const reloadButton = document.querySelector("#reload");
 const zoomIn = document.querySelector("#zoom-in");
 const zoomOut = document.querySelector("#zoom-out");
+const workspace = document.querySelector(".workspace");
+const toolsPanel = document.querySelector("#tools-panel");
+const panelToggle = document.querySelector("#panel-toggle");
+const gridToggle = document.querySelector("#grid-toggle");
+const gridNotice = document.querySelector("#grid-notice");
+const PANEL_STORAGE_KEY = "pixel-place.panel-open";
+const GRID_STORAGE_KEY = "pixel-place.grid-enabled";
+let panelOpen = readPreference(PANEL_STORAGE_KEY, false);
+let gridEnabled = readPreference(GRID_STORAGE_KEY, true);
 const paletteElement = document.querySelector("#palette");
 const gesture = new PointerGesture();
 const images = new WeakMap();
@@ -53,6 +63,58 @@ let realtime = null;
 let pageActive = true;
 let queriesAllowed = false;
 let fallbackStarted = false;
+
+// 표시 설정 저장 실패는 인증 저장과 달리 조작을 막지 않으며 현재 탭의 선택을 유지
+function readPreference(key, fallback) {
+  try {
+    const value = window.localStorage.getItem(key);
+    return value === "true" ? true : value === "false" ? false : fallback;
+  } catch { return fallback; }
+}
+
+function savePreference(key, value) {
+  try { window.localStorage.setItem(key, String(value)); }
+  catch { /* 저장소 차단·용량 초과 시 메모리 설정으로 계속 사용 */ }
+}
+
+function updatePanel() {
+  const restoreFocus = !panelOpen && toolsPanel.contains(document.activeElement);
+  toolsPanel.hidden = !panelOpen;
+  workspace.dataset.panelOpen = String(panelOpen);
+  panelToggle.setAttribute("aria-expanded", String(panelOpen));
+  panelToggle.setAttribute("aria-label", `픽셀 배치 패널 ${panelOpen ? "닫기" : "열기"}`);
+  document.querySelector("#panel-arrow").textContent = panelOpen ? "▶" : "◀";
+  document.querySelector("#panel-label").hidden = panelOpen;
+  if (restoreFocus) panelToggle.focus({ preventScroll: true });
+}
+
+function updateGridControl() {
+  gridToggle.setAttribute("aria-pressed", String(gridEnabled));
+  gridToggle.textContent = `격자 ${gridEnabled ? "ON" : "OFF"}`;
+  gridNotice.hidden = !gridEnabled || !view || view.scale >= GRID_MIN_SCALE;
+  gridToggle.title = gridEnabled ? `격자 켜짐 · ${GRID_MIN_SCALE}배 이상 확대 시 표시` : "격자 꺼짐";
+}
+
+panelToggle.addEventListener("click", () => {
+  cancelGesture();
+  panelOpen = !panelOpen;
+  updatePanel();
+  savePreference(PANEL_STORAGE_KEY, panelOpen);
+  resizeBoard();
+});
+gridToggle.addEventListener("click", () => {
+  gridEnabled = !gridEnabled;
+  updateGridControl();
+  savePreference(GRID_STORAGE_KEY, gridEnabled);
+  requestDraw();
+});
+// Canvas와 형제인 조작부는 포인터·휠 입력을 보드 조작으로 전달하지 않음
+for (const element of [panelToggle, document.querySelector(".board-controls")]) {
+  for (const type of ["pointerdown", "click", "wheel"]) element.addEventListener(type, (event) => event.stopPropagation());
+}
+updatePanel();
+updateGridControl();
+
 const placeButton = document.querySelector("#place-button");
 const placementNotice = document.querySelector("#placement-notice");
 const cooldownNotice = document.querySelector("#cooldown-notice");
@@ -120,12 +182,18 @@ function draw() {
     context.fillText("보드 조회를 기다리는 중", width / 2, height / 2);
     return;
   }
+  const raster = context.getTransform();
   for (const tile of view.visibleTiles()) {
     const entry = loader.get(tile.key);
     const position = view.boardToScreen(tile.tx * metadata.tileSize, tile.ty * metadata.tileSize);
     const size = metadata.tileSize * view.scale;
     if (entry?.data) {
-      context.drawImage(tileImage(entry.data), position.x, position.y, size, size);
+      // 공유 타일 경계를 같은 내부 픽셀에 맞춰 부분 덮임으로 생기는 이음선 방지
+      const left = Math.round(position.x * raster.a) / raster.a;
+      const top = Math.round(position.y * raster.d) / raster.d;
+      const right = Math.round((position.x + size) * raster.a) / raster.a;
+      const bottom = Math.round((position.y + size) * raster.d) / raster.d;
+      context.drawImage(tileImage(entry.data), left, top, right - left, bottom - top);
     } else {
       // 미조회·실패 영역을 기본 흰색으로 오인하지 않도록 채움과 대각선 표시
       context.fillStyle = entry?.state === "error" ? "#f4dad9" : "#e1e6ec";
@@ -145,17 +213,7 @@ function draw() {
       context.fillRect(position.x, position.y, size, size);
     }
   }
-  if (selected) {
-    const position = view.boardToScreen(selected.x, selected.y);
-    if (position.x + view.scale > 0 && position.y + view.scale > 0 && position.x < width && position.y < height) {
-      context.lineWidth = 3;
-      context.strokeStyle = "#fff";
-      context.strokeRect(position.x, position.y, view.scale, view.scale);
-      context.lineWidth = 1;
-      context.strokeStyle = "#174e96";
-      context.strokeRect(position.x, position.y, view.scale, view.scale);
-    }
-  }
+  drawBoardOverlays(context, view, selected, gridEnabled);
 }
 
 function updateLoadState() {
@@ -187,6 +245,7 @@ function updateLoadState() {
 }
 
 function refreshView() {
+  updateGridControl();
   if (!view) { requestDraw(); return; }
   document.querySelector("#zoom-level").textContent = `${view.scale}배`;
   zoomOut.disabled = view.scale === ZOOM_LEVELS[0];
@@ -219,6 +278,7 @@ function connectRealtime() {
 function resizeBoard() {
   const { width, height } = viewportElement.getBoundingClientRect();
   if (width <= 0 || height <= 0) return;
+  cancelGesture();
   const ratio = window.devicePixelRatio || 1;
   board.width = Math.max(1, Math.round(width * ratio));
   board.height = Math.max(1, Math.round(height * ratio));
@@ -384,6 +444,15 @@ reloadButton.addEventListener("click", () => {
 
 new ResizeObserver(resizeBoard).observe(viewportElement);
 window.addEventListener("resize", resizeBoard);
+// 모니터 이동처럼 CSS 크기 변화 없이 DPR만 바뀌는 경우도 Canvas 내부 해상도 갱신
+let resolutionQuery;
+function watchResolution() {
+  resolutionQuery?.removeEventListener("change", watchResolution);
+  resolutionQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+  resolutionQuery.addEventListener("change", watchResolution);
+  resizeBoard();
+}
+watchResolution();
 window.addEventListener("pagehide", (event) => {
   pageActive = false;
   queriesAllowed = false;

@@ -211,6 +211,26 @@ test("경계에서 배율 변경과 resize는 보드 경계 제한을 우선", (
   assert.deepEqual(view.screenToBoard(0, 0), { x: 0, y: 0 });
 });
 
+test("패널 폭 왕복은 8·16·32배와 중심·선택을 유지하며 같은 배율의 가시 범위만 변경", () => {
+  for (const scale of [8, 16, 32]) {
+    const view = new Viewport(metadata, 800, 600);
+    view.scale = scale;
+    view.pan(19.5, -13.25);
+    const selected = view.screenToBoard(410, 310);
+    const center = [view.centerX, view.centerY];
+    const original = view.boardToScreen(selected.x, selected.y);
+    const first = view.screenToBoard(0, 300).x;
+    view.resize(1120, 600);
+    assert.deepEqual([view.centerX, view.centerY], center);
+    assert.equal(view.scale, scale);
+    assert.equal(first - view.screenToBoard(0, 300).x, 160 / scale);
+    const point = view.boardToScreen(selected.x, selected.y);
+    assert.deepEqual(view.screenToBoard(point.x + scale / 2, point.y + scale / 2), selected);
+    view.resize(800, 600);
+    assert.deepEqual(view.boardToScreen(selected.x, selected.y), original);
+  }
+});
+
 test("4 CSS px 미만은 클릭이며 정확한 4px와 대각선 3·3 이동은 드래그", () => {
   for (const [x, y, click] of [[3.99, 0, true], [4, 0, false], [3, 3, false]]) {
     const gesture = new PointerGesture();

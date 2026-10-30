@@ -32,37 +32,33 @@
     </div>
   </header>
 
-  <main class="workspace">
-    <section class="board-panel" aria-labelledby="board-title">
-      <div class="board-heading">
-        <div>
-          <h2 id="board-title">픽셀 보드</h2>
-          <p id="board-description" class="muted">서버 메타데이터를 기다리는 중입니다.</p>
-        </div>
-        <div class="zoom-controls" role="group" aria-label="보드 확대·축소">
-          <button id="zoom-out" type="button" disabled aria-label="축소">−</button>
-          <output id="zoom-level" aria-label="현재 배율">8배</output>
-          <button id="zoom-in" type="button" disabled aria-label="확대">＋</button>
-        </div>
-      </div>
+  <main class="workspace" data-panel-open="false">
+    <section class="board-panel" aria-label="픽셀 보드">
       <div class="canvas-viewport">
         <canvas id="board" tabindex="0" role="img" aria-label="픽셀 보드. 방향키로 이동, 마우스 드래그로 이동, 클릭으로 좌표 선택" aria-describedby="movement-notice">
           보드 표시에는 Canvas를 지원하는 브라우저가 필요합니다.
         </canvas>
-      </div>
-      <div class="board-toolbar">
-        <p id="movement-notice" class="muted">드래그·방향키로 이동 · 휠로 확대 · 클릭으로 선택</p>
-        <div class="movement-controls" role="group" aria-label="보드 이동" aria-describedby="movement-notice">
-          <button type="button" data-move="left" disabled aria-label="왼쪽으로 이동">←</button>
-          <button type="button" data-move="up" disabled aria-label="위로 이동">↑</button>
-          <button type="button" data-move="down" disabled aria-label="아래로 이동">↓</button>
-          <button type="button" data-move="right" disabled aria-label="오른쪽으로 이동">→</button>
+        <div class="board-controls">
+          <div class="zoom-controls" role="group" aria-label="보드 확대·축소와 격자">
+            <button id="zoom-out" type="button" disabled aria-label="축소">−</button>
+            <output id="zoom-level" aria-label="현재 배율">8배</output>
+            <button id="zoom-in" type="button" disabled aria-label="확대">＋</button>
+            <button id="grid-toggle" type="button" aria-pressed="true" aria-describedby="grid-notice">격자 ON</button>
+          </div>
+          <p id="grid-notice" class="muted" hidden>8배 이상 확대 시 표시</p>
         </div>
       </div>
     </section>
 
-    <aside class="tools-panel" aria-labelledby="tools-title">
+    <button id="panel-toggle" class="panel-toggle" type="button" aria-expanded="false" aria-controls="tools-panel" aria-label="픽셀 배치 패널 열기">
+      <span id="panel-arrow" aria-hidden="true">◀</span><span id="panel-label" aria-hidden="true">배치</span>
+    </button>
+    <aside id="tools-panel" class="tools-panel" aria-labelledby="tools-title" hidden>
       <h2 id="tools-title">픽셀 배치</h2>
+      <section class="tool-section board-info" aria-labelledby="board-title">
+        <h3 id="board-title">픽셀 보드</h3>
+        <p id="board-description" class="muted">서버 메타데이터를 기다리는 중입니다.</p>
+      </section>
       <section class="tool-section" aria-labelledby="palette-title">
         <h3 id="palette-title">팔레트</h3>
         <div id="palette" class="palette-placeholder" role="group" aria-label="배치 색상">보드 연결 후 표시</div>
@@ -81,6 +77,16 @@
         <div class="cooldown">
           <h3>쿨다운</h3>
           <p id="cooldown-notice" class="muted">남은 대기 시간은 배치 요청 시 서버에서 확인합니다.</p>
+        </div>
+      </section>
+      <section class="tool-section movement-section" aria-labelledby="movement-title">
+        <h3 id="movement-title">조작 안내</h3>
+        <p id="movement-notice" class="muted">드래그·방향키로 이동 · 휠로 확대 · 클릭으로 선택</p>
+        <div class="movement-controls" role="group" aria-label="보드 이동" aria-describedby="movement-notice">
+          <button type="button" data-move="left" disabled aria-label="왼쪽으로 이동">←</button>
+          <button type="button" data-move="up" disabled aria-label="위로 이동">↑</button>
+          <button type="button" data-move="down" disabled aria-label="아래로 이동">↓</button>
+          <button type="button" data-move="right" disabled aria-label="오른쪽으로 이동">→</button>
         </div>
       </section>
     </aside>
