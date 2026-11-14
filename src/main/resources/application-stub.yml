@@ -1,0 +1,4 @@
+# stub은 startup 입력 대체용. 명시 group은 선택 단계에서 거부하고 기본값만 single 적용
+pixel-place:
+  write:
+    mode: ${PIXELPLACE_WRITE_MODE:single}

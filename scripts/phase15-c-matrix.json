@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "low-single",
+      "role": "low",
+      "mode": "single",
+      "caseIndex": 2,
+      "repetition": 0,
+      "instrumentation": true
+    },
+    {
+      "id": "low-group",
+      "role": "low",
+      "mode": "group",
+      "caseIndex": 2,
+      "repetition": 0,
+      "instrumentation": true
+    },
+    {
+      "id": "r1-same-single",
+      "role": "target",
+      "mode": "single",
+      "caseIndex": 0,
+      "repetition": 0,
+      "instrumentation": true
+    },
+    {
+      "id": "r1-same-group",
+      "role": "target",
+      "mode": "group",
+      "caseIndex": 0,
+      "repetition": 0,
+      "instrumentation": true
+    },
+    {
+      "id": "r1-spread-single",
+      "role": "target",
+      "mode": "single",
+      "caseIndex": 1,
+      "repetition": 0,
+      "instrumentation": true
+    },
+    {
+      "id": "r1-spread-group",
+      "role": "target",
+      "mode": "group",
+      "caseIndex": 1,
+      "repetition": 0,
+      "instrumentation": true
+    },
+    {
+      "id": "r2-same-group",
+      "role": "target",
+      "mode": "group",
+      "caseIndex": 0,
+      "repetition": 1,
+      "instrumentation": true
+    },
+    {
+      "id": "r2-same-single",
+      "role": "target",
+      "mode": "single",
+      "caseIndex": 0,
+      "repetition": 1,
+      "instrumentation": true
+    },
+    {
+      "id": "r2-spread-group",
+      "role": "target",
+      "mode": "group",
+      "caseIndex": 1,
+      "repetition": 1,
+      "instrumentation": true
+    },
+    {
+      "id": "r2-spread-group-off",
+      "role": "instrumentation",
+      "mode": "group",
+      "caseIndex": 1,
+      "repetition": 1,
+      "instrumentation": false
+    },
+    {
+      "id": "r2-spread-single",
+      "role": "target",
+      "mode": "single",
+      "caseIndex": 1,
+      "repetition": 1,
+      "instrumentation": true
+    },
+    {
+      "id": "r3-same-single",
+      "role": "target",
+      "mode": "single",
+      "caseIndex": 0,
+      "repetition": 2,
+      "instrumentation": true
+    },
+    {
+      "id": "r3-same-group",
+      "role": "target",
+      "mode": "group",
+      "caseIndex": 0,
+      "repetition": 2,
+      "instrumentation": true
+    },
+    {
+      "id": "r3-spread-single",
+      "role": "target",
+      "mode": "single",
+      "caseIndex": 1,
+      "repetition": 2,
+      "instrumentation": true
+    },
+    {
+      "id": "r3-spread-group",
+      "role": "target",
+      "mode": "group",
+      "caseIndex": 1,
+      "repetition": 2,
+      "instrumentation": true
+    }
+  ],
+  "smokes": [
+    {
+      "id": "smoke-single",
+      "role": "smoke",
+      "mode": "single",
+      "caseIndex": 0,
+      "repetition": 0,
+      "instrumentation": true
+    },
+    {
+      "id": "smoke-group",
+      "role": "smoke",
+      "mode": "group",
+      "caseIndex": 0,
+      "repetition": 0,
+      "instrumentation": true
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "mysqlRoot": "F:/MySQL/demo",
+  "mysqlPort": 3308,
+  "mysqlSchema": "pixel_place_demo_final_20261112",
+  "mysqlUuid": "07782aa5-cb43-11f1-9e5a-000000000002",
+  "walFile": "F:/pixel-place-wal/demo/final-board-20261112/pixel-place.wal",
+  "redisDatabase": 15,
+  "frontendOrigin": "http://localhost:3000",
+  "apiOrigin": "http://localhost:8080"
+}

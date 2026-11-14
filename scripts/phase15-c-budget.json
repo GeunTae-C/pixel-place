@@ -1,0 +1,11 @@
+{
+  "scope": "15-C-4 비교·최종 코드·회귀·증거·승인된 재실행 여유",
+  "approvedAt": "2026-09-23T02:04:39.8631314+09:00",
+  "approval": "사용자: 누적 74GiB 제안에 승인",
+  "carryForward": "C-3 및 C-4 진입의 보수적 charge 승계. 감소분 반환 없이 외부 순차 ledger에 양의 증가만 누적",
+  "carriedChargeBytes": 36960813040,
+  "maximumBytes": 79456894976,
+  "legacyChargeBytes": 2824498477,
+  "ancillaryChargeBytes": 67108864,
+  "minimumFreeBytes": 5368709120
+}

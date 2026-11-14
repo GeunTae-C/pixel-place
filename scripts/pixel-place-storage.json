@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "enabled": true,
+  "mappings": [
+    {
+      "source": "C:/Users/cgt/Desktop/Java/pixel-place/build/agent-runs/phase18-cap0-prep-20261004-181654",
+      "destination": "F:/pixel-place-work/projects/pixel-place/control/phase18-cap0-prep-20261004-181654"
+    },
+    {
+      "source": "C:/Users/cgt/Desktop/Java/pixel-place/build/agent-runs/phase18-cap0-resume-20261006",
+      "destination": "F:/pixel-place-work/projects/pixel-place/control/phase18-cap0-resume-20261006"
+    }
+  ]
+}

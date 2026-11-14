@@ -77,3 +77,13 @@ out/
 .env
 .env.*
 !.env.example
+
+# 브라우저 검증 산출물 및 개인 코딩 지침
+/.playwright-mcp/
+/docs/coding-guide.md
+
+# 제출용으로 검토한 원본 시연 이미지 4개만 허용
+!/docs/assets/portfolio/placement-accepted.png
+!/docs/assets/portfolio/spectator-realtime.png
+!/docs/assets/portfolio/reconnect-disconnected.png
+!/docs/assets/portfolio/reconnect-restored.png

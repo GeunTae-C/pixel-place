@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "owner": "cgt",
+  "root": "F:/MySQL/test",
+  "config": "F:/MySQL/test/runtime.ini",
+  "binary": "C:/Program Files/MySQL/MySQL Server 8.4/bin/mysqld.exe",
+  "uuid": "17866afe-b2ad-11f1-8eac-000000000002",
+  "configSha256": "fc524d4783d07035019e3d5092a99667db6264203de0331d62f0dffe9052cba7",
+  "binarySha256": "9be6aec2e079fc500d80f6225f253075a86174d5e084fa297f60a3483220c808",
+  "port": 3307,
+  "bind": "127.0.0.1",
+  "catalog": "pixel_place_test",
+  "migrationDate": "2026-10-03",
+  "previousRoot": "E:/pixel-place-phase15/phase15-a-20260918/mysql"
+}

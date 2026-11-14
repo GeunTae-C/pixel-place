@@ -1,0 +1,87 @@
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          kakao:
+            provider: kakao
+            client-id: ${KAKAO_CLIENT_ID}
+            client-secret: ${KAKAO_CLIENT_SECRET}
+            client-authentication-method: client_secret_post
+            authorization-grant-type: authorization_code
+            redirect-uri: ${pixel-place.auth.provider-callback-uri}
+        provider:
+          kakao:
+            authorization-uri: https://kauth.kakao.com/oauth/authorize
+            token-uri: https://kauth.kakao.com/oauth/token
+            user-info-uri: https://kapi.kakao.com/v2/user/me
+            user-info-authentication-method: header
+            user-name-attribute: id
+  application:
+    name: pixel-place
+
+  config:
+    import: "optional:file:./local-secrets/secrets.yml"
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/pixel_place?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    username: root
+    password: ${DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+        # lock timeout 설정 (밀리초 단위)
+        # lock을 획득하지 못하면 이 시간 이후 예외 발생
+        # lock_timeout: 2000
+
+    # schema.sql / data.sql 실행 시점 제어
+    # true로 하면 JPA 초기화 이후 실행됨
+    # defer-datasource-initialization: true
+
+pixel-place:
+  write:
+    mode: ${PIXELPLACE_WRITE_MODE:group}
+  auth:
+    jwt-secret: ${PIXEL_PLACE_JWT_SECRET}
+    oauth-cookie-secret: ${PIXEL_PLACE_OAUTH_COOKIE_SECRET}
+    access-token-ttl: 15m
+    frontend-origin: http://localhost:3000
+    frontend-auth-callback-uri: http://localhost:3000/
+    public-api-origin: http://localhost:8080
+    provider-callback-uri: http://localhost:8080/login/oauth2/code/kakao
+    cookie-secure: false
+  wal:
+    active-file: ${PIXEL_PLACE_WAL_ACTIVE_FILE:F:/pixel-place-wal/runtime/pixel-place.wal}
+    max-segment-bytes: 33554432
+  flush:
+    fixed-delay: 1s
+
+server:
+  port: 8080
+
+
+
+
+# Logging (필요할 때만 활성화)
+#logging:
+#  level:
+#    org.hibernate.SQL: DEBUG
+
+  # SQL 파라미터 값까지 출력
+  # org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+
+  # JPA 내부 동작 로그
+  # org.springframework.orm.jpa: DEBUG
+
+  # 트랜잭션 동작 로그
+  # org.springframework.transaction: DEBUG
+
+  # Spring Security 필터 체인 로그
+  # org.springframework.security.web.FilterChainProxy: INFO

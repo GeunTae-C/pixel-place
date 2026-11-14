@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "CHANGES_REQUESTED",
+        "BLOCKED"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "must_fix": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "recommended": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "not_issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "properties": {
+        "task_sha256": {
+          "type": "string",
+          "pattern": "^[A-F0-9]{64}$"
+        },
+        "baseline_sha256": {
+          "type": "string",
+          "pattern": "^[A-F0-9]{64}$"
+        },
+        "change_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[A-F0-9]{64}$"
+        }
+      },
+      "required": [
+        "task_sha256",
+        "baseline_sha256",
+        "change_manifest_sha256"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "verdict",
+    "summary",
+    "blockers",
+    "must_fix",
+    "recommended",
+    "not_issues",
+    "evidence"
+  ],
+  "additionalProperties": false
+}
